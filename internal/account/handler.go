@@ -30,7 +30,6 @@ type Handler struct {
 	settings      *settings.Service
 	proxyResolver ProxyURLResolver
 	oauth         *openAIOAuthManager
-	appBaseURL    string
 }
 
 func NewHandler(s *Service) *Handler {
@@ -51,11 +50,6 @@ func (h *Handler) SetSettings(s *settings.Service) { h.settings = s }
 
 // SetProxyResolver 注入代理 URL 解析器(可选,未注入时 RT/ST 批量导入只能直连)。
 func (h *Handler) SetProxyResolver(r ProxyURLResolver) { h.proxyResolver = r }
-
-// SetAppBaseURL 注入站点对外 base URL,用于 OAuth 默认回调地址。
-func (h *Handler) SetAppBaseURL(baseURL string) {
-	h.appBaseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-}
 
 // POST /api/admin/accounts/oauth/generate-auth-url
 func (h *Handler) GenerateOAuthURL(c *gin.Context) {
@@ -86,8 +80,8 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 	}
 
 	redirectURI := strings.TrimSpace(req.RedirectURI)
-	if redirectURI == "" && h.appBaseURL != "" {
-		redirectURI = h.appBaseURL + "/oauth/openai/callback"
+	if redirectURI == "" {
+		redirectURI = openAIOAuthDefaultRedirectURI
 	}
 
 	out, err := h.oauth.GenerateAuthURL(redirectURI, proxyURL)

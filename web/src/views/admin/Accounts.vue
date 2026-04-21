@@ -8,7 +8,8 @@ import { formatDateShort } from '@/utils/format'
 
 const OAUTH_CALLBACK_STORAGE_KEY = 'gpt2api.oauth.openai.callback'
 const OAUTH_CALLBACK_MESSAGE_TYPE = 'gpt2api:openai-oauth-callback'
-const oauthCallbackOrigin = `${window.location.origin}/oauth/openai/callback`
+const OAUTH_OFFICIAL_REDIRECT_URI = 'http://localhost:1455/auth/callback'
+const oauthSiteCallbackOrigin = `${window.location.origin}/oauth/openai/callback`
 
 // ========== 列表 & 筛选 ==========
 const loading = ref(false)
@@ -432,6 +433,7 @@ async function onProbeAll() {
 //   - st:   一行一个 session_token
 //   - oauth: OpenAI OAuth 登录后直接导入
 type ImportMode = 'json' | 'at' | 'rt' | 'st' | 'oauth'
+type OAuthCallbackMode = 'official' | 'site'
 const importDlg = ref(false)
 const importMode = ref<ImportMode>('json')
 const importForm = reactive({
@@ -448,6 +450,7 @@ const oauthForm = reactive({
   redirect_uri: '',
   callback_text: '',
   state: '',
+  callback_mode: 'official' as OAuthCallbackMode,
   account_type: 'codex' as 'codex' | 'chatgpt',
 })
 const importing = ref(false)
@@ -476,6 +479,7 @@ function openImport() {
   oauthForm.redirect_uri = ''
   oauthForm.callback_text = ''
   oauthForm.state = ''
+  oauthForm.callback_mode = 'official'
   oauthForm.account_type = 'codex'
   try {
     localStorage.removeItem(OAUTH_CALLBACK_STORAGE_KEY)
@@ -502,6 +506,16 @@ const tokenLineCount = computed(() => {
     .map((s) => s.trim())
     .filter(Boolean).length
 })
+
+const oauthRedirectURI = computed(() =>
+  oauthForm.callback_mode === 'site' ? oauthSiteCallbackOrigin : OAUTH_OFFICIAL_REDIRECT_URI,
+)
+
+const oauthCallbackPlaceholder = computed(() =>
+  oauthForm.callback_mode === 'site'
+    ? `优先粘贴完整回调地址: ${oauthSiteCallbackOrigin}?code=...&state=...&#10;也支持只粘贴 code(会自动复用已生成链接里的 state)`
+    : `登录完成后浏览器会跳到 ${OAUTH_OFFICIAL_REDIRECT_URI}?code=...&state=... 并提示无法访问，这是正常的。请把地址栏完整链接，或只把 code 粘贴到这里。`,
+)
 
 function readStateFromAuthURL(raw: string) {
   try {
@@ -537,7 +551,7 @@ async function onGenerateOAuthURL() {
   try {
     const r = await accountApi.generateOAuthAuthURL({
       proxy_id: importForm.default_proxy_id || undefined,
-      redirect_uri: oauthCallbackOrigin,
+      redirect_uri: oauthRedirectURI.value,
     })
     oauthForm.auth_url = r.auth_url || ''
     oauthForm.session_id = r.session_id || ''
@@ -553,6 +567,19 @@ function openOAuthAuthURL() {
   if (!oauthForm.auth_url) {
     ElMessage.warning('请先生成授权链接')
     return
+  }
+  if (oauthForm.callback_mode === 'official') {
+    ElNotification.info({
+      title: '官方回调模式',
+      message: '登录后浏览器会跳到 localhost 报无法访问，这是正常现象。复制最后的地址栏链接或 code 回来粘贴即可。',
+      duration: 5000,
+    })
+  } else {
+    ElNotification.warning({
+      title: '站点自动回传模式',
+      message: '如果 OpenAI 页面再次出现“验证过程中出错 (unknown_error)”，请切回“官方回调”模式重试。',
+      duration: 5000,
+    })
   }
   window.open(oauthForm.auth_url, '_blank', 'noopener,noreferrer')
 }
@@ -594,6 +621,19 @@ function onOAuthStorage(event: StorageEvent) {
   if (event.key !== OAUTH_CALLBACK_STORAGE_KEY || !event.newValue) return
   try {
     consumeOAuthCallbackPayload(JSON.parse(event.newValue))
+  } catch {
+    // noop
+  }
+}
+
+function onOAuthCallbackModeChange() {
+  oauthForm.auth_url = ''
+  oauthForm.session_id = ''
+  oauthForm.redirect_uri = ''
+  oauthForm.callback_text = ''
+  oauthForm.state = ''
+  try {
+    localStorage.removeItem(OAUTH_CALLBACK_STORAGE_KEY)
   } catch {
     // noop
   }
@@ -1334,8 +1374,9 @@ onBeforeUnmount(() => {
       <!-- OAuth 模式 -->
       <template v-else-if="importMode === 'oauth'">
         <div class="tip">
-          参考 <b>sub2api</b> 的 GPT/OpenAI 登录方式:先生成官方 OAuth 授权链接,完成登录后把浏览器最终跳转的
-          <code>{{ oauthCallbackOrigin }}?... </code> 地址带回当前页面,系统会自动换取 RT / AT 并直接导入账号池。
+          参考 <b>sub2api</b> 的 GPT/OpenAI 登录方式:默认使用 OpenAI/Codex 官方常用的
+          <code>{{ OAUTH_OFFICIAL_REDIRECT_URI }}</code> 回调地址，这条链路最稳；站点自动回传只是可选增强，若出现
+          <code>验证过程中出错 (unknown_error)</code>，请切回官方回调模式。
         </div>
 
         <div class="oauth-box">
@@ -1345,6 +1386,14 @@ onBeforeUnmount(() => {
               <el-option label="Codex" value="codex" />
               <el-option label="ChatGPT" value="chatgpt" />
             </el-select>
+          </div>
+
+          <div class="oauth-row">
+            <span class="muted">回调方式</span>
+            <el-radio-group v-model="oauthForm.callback_mode" size="small" @change="onOAuthCallbackModeChange">
+              <el-radio-button label="official">官方回调</el-radio-button>
+              <el-radio-button label="site">站点自动回传</el-radio-button>
+            </el-radio-group>
           </div>
 
           <div class="oauth-actions">
@@ -1363,8 +1412,13 @@ onBeforeUnmount(() => {
             placeholder="先点击“生成授权链接”"
           />
           <div class="muted" style="margin-top:8px;line-height:1.7">
-            <div>当前站点回调地址: <code>{{ oauthForm.redirect_uri || oauthCallbackOrigin }}</code></div>
-            <div>完成授权后，回调页会自动把结果回传到当前后台窗口；没自动带回时，也可以手动粘贴完整回调地址或 code。</div>
+            <div>当前授权回调地址: <code>{{ oauthForm.redirect_uri || oauthRedirectURI }}</code></div>
+            <div v-if="oauthForm.callback_mode === 'official'">
+              完成授权后浏览器通常会跳到 localhost 并提示无法访问，这是正常现象；把最终地址栏完整链接或 code 粘贴回来即可。
+            </div>
+            <div v-else>
+              完成授权后，回调页会自动把结果回传到当前后台窗口；如果 OpenAI 侧先报错，请改用“官方回调”模式。
+            </div>
           </div>
         </div>
 
@@ -1373,7 +1427,7 @@ onBeforeUnmount(() => {
           v-model="oauthForm.callback_text"
           type="textarea"
           :rows="6"
-          :placeholder="`优先粘贴完整回调地址: ${oauthCallbackOrigin}?code=...&state=...&#10;也支持只粘贴 code(会自动复用已生成链接里的 state)`"
+          :placeholder="oauthCallbackPlaceholder"
           spellcheck="false"
         />
       </template>
