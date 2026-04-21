@@ -94,11 +94,6 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 
 	result := &RunResult{Status: StatusFailed, ErrorCode: ErrUnknown}
 
-	// 仅当有 DAO 和 taskID 时才落库
-	if r.dao != nil && opt.TaskID != "" {
-		_ = r.dao.MarkRunning(ctx, opt.TaskID, 0)
-	}
-
 	for attempt := 1; attempt <= opt.MaxAttempts; attempt++ {
 		result.Attempts = attempt
 		if err := ctx.Err(); err != nil {
@@ -165,9 +160,10 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		_ = lease.Release(context.Background())
 	}()
 	result.AccountID = lease.Account.ID
-	// 立刻把 account_id 写回 image_tasks,供后续图片代理端点按 task_id 解出 AT。
-	// MarkRunning 在 status=running 时 WHERE 不命中,所以用专门的 SetAccount。
+	// 拿到真实账号后再把任务切到 running,这样前端在等待调度期间仍能看到
+	// dispatched/排队中。重试切换账号时,SetAccount 继续负责覆盖最新 account_id。
 	if r.dao != nil && opt.TaskID != "" {
+		_ = r.dao.MarkRunning(ctx, opt.TaskID, lease.Account.ID)
 		_ = r.dao.SetAccount(ctx, opt.TaskID, lease.Account.ID)
 	}
 

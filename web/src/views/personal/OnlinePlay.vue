@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { storeToRefs } from 'pinia'
+import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { formatCredit } from '@/utils/format'
 import {
@@ -20,6 +21,7 @@ import { ENABLE_CHAT_MODEL } from '@/config/feature'
 // 用户 / 模型
 // ----------------------------------------------------
 const userStore = useUserStore()
+const router = useRouter()
 const { user } = storeToRefs(userStore)
 
 const balance = computed(() => formatCredit(user.value?.credit_balance))
@@ -59,6 +61,7 @@ onMounted(async () => {
   } catch {
     // 静默;错误拦截器已提示
   }
+  void restorePendingImageTasks()
 })
 
 // ----------------------------------------------------
@@ -199,7 +202,11 @@ function copyText(s: string) {
   }
 }
 
-onBeforeUnmount(() => chatAbort.value?.abort())
+onBeforeUnmount(() => {
+  chatAbort.value?.abort()
+  t2iAbort.value?.abort()
+  i2iAbort.value?.abort()
+})
 
 // ---------- 轻量 markdown 渲染(代码块 / 行内代码 / 粗体 / 链接) ----------
 function escapeHtml(s: string) {
@@ -332,6 +339,8 @@ const imgExamples = [
   '童话风格蘑菇屋,黄昏光线,柔和景深',
 ]
 
+type PlaygroundImageTaskMode = 'text2img' | 'img2img'
+
 // 点击示例 prompt 时,自动把当前比例的前缀拼到最前面,保持和 ratio 同步
 function useT2iExample(p: string) {
   t2iPrompt.value = applyRatioPrefix(p, t2iRatio.value)
@@ -339,6 +348,149 @@ function useT2iExample(p: string) {
 
 const IMAGE_TASK_POLL_INTERVAL = 3000
 const IMAGE_TASK_POLL_TIMEOUT = 6 * 60 * 1000
+const IMAGE_TASK_WAIT_TIMEOUT_MESSAGE = '等待图片生成超时，请稍后在使用记录里查看任务结果'
+const IMAGE_TASK_STORAGE_KEYS: Record<PlaygroundImageTaskMode, string> = {
+  text2img: 'gpt2api.playground.t2i.pending-task',
+  img2img: 'gpt2api.playground.i2i.pending-task',
+}
+
+const t2iTask = ref<ImageTask | null>(null)
+const i2iTask = ref<ImageTask | null>(null)
+
+interface ImagePlayState {
+  sending: Ref<boolean>
+  abort: Ref<AbortController | null>
+  error: Ref<string>
+  preview: Ref<boolean>
+  result: Ref<PlayImageData[]>
+  task: Ref<ImageTask | null>
+}
+
+function createPendingImageTask(taskID: string): ImageTask {
+  return {
+    id: 0,
+    task_id: taskID,
+    user_id: 0,
+    model_id: 0,
+    account_id: 0,
+    prompt: '',
+    n: 1,
+    size: '',
+    status: 'dispatched',
+    credit_cost: 0,
+    image_urls: [],
+    created_at: new Date().toISOString(),
+  }
+}
+
+function getImagePlayState(mode: PlaygroundImageTaskMode): ImagePlayState {
+  if (mode === 'text2img') {
+    return {
+      sending: t2iSending,
+      abort: t2iAbort,
+      error: t2iError,
+      preview: t2iPreview,
+      result: t2iResult,
+      task: t2iTask,
+    }
+  }
+  return {
+    sending: i2iSending,
+    abort: i2iAbort,
+    error: i2iError,
+    preview: i2iPreview,
+    result: i2iResult,
+    task: i2iTask,
+  }
+}
+
+function persistPendingImageTask(mode: PlaygroundImageTaskMode, taskID: string) {
+  try {
+    localStorage.setItem(IMAGE_TASK_STORAGE_KEYS[mode], JSON.stringify({ task_id: taskID }))
+  } catch {
+    /* ignore */
+  }
+}
+
+function readPendingImageTask(mode: PlaygroundImageTaskMode): string {
+  try {
+    const raw = localStorage.getItem(IMAGE_TASK_STORAGE_KEYS[mode])
+    if (!raw) return ''
+    const parsed = JSON.parse(raw) as { task_id?: string }
+    if (!parsed?.task_id) {
+      localStorage.removeItem(IMAGE_TASK_STORAGE_KEYS[mode])
+      return ''
+    }
+    return parsed.task_id
+  } catch {
+    localStorage.removeItem(IMAGE_TASK_STORAGE_KEYS[mode])
+    return ''
+  }
+}
+
+function clearPendingImageTask(mode: PlaygroundImageTaskMode) {
+  try {
+    localStorage.removeItem(IMAGE_TASK_STORAGE_KEYS[mode])
+  } catch {
+    /* ignore */
+  }
+}
+
+function isImageTaskPending(status?: string) {
+  return status === 'queued' || status === 'dispatched' || status === 'running'
+}
+
+function imageTaskStatusLabel(status?: string) {
+  switch (status || '') {
+    case 'queued':
+    case 'dispatched':
+      return '排队中'
+    case 'running':
+      return '正在生成'
+    case 'success':
+      return '已完成'
+    case 'failed':
+      return '失败'
+    default:
+      return '处理中'
+  }
+}
+
+function imageTaskAlertType(task: ImageTask | null) {
+  return task?.status === 'failed' ? 'error' : 'info'
+}
+
+function imageTaskDescription(task: ImageTask | null, waiting: boolean) {
+  if (!task) return ''
+  const prefix = `任务 ID: ${task.task_id}`
+  switch (task.status) {
+    case 'queued':
+    case 'dispatched':
+      return waiting
+        ? `${prefix} · 正在等待可用账号，拿到后会自动开始`
+        : `${prefix} · 任务还在排队，点击“继续查看”可恢复等待`
+    case 'running':
+      return waiting
+        ? `${prefix} · 正在后台生成，通常需要 1-2 分钟`
+        : `${prefix} · 任务仍在后台生成，点击“继续查看”可恢复等待`
+    case 'failed':
+      return `${prefix} · ${formatImageTaskError(task.error)}`
+    default:
+      return prefix
+  }
+}
+
+function goToUsagePage() {
+  router.push('/personal/usage')
+}
+
+function isTaskWaitStopped(msg: string) {
+  return msg === '已停止'
+}
+
+function isTaskWaitTimeout(msg: string) {
+  return msg === IMAGE_TASK_WAIT_TIMEOUT_MESSAGE
+}
 
 function formatImageTaskError(code?: string) {
   switch (code || '') {
@@ -388,25 +540,126 @@ function taskToPlayImages(task: ImageTask): PlayImageData[] {
   }))
 }
 
-async function waitForImageTask(taskID: string, signal?: AbortSignal) {
+async function waitForImageTask(
+  taskID: string,
+  options: {
+    signal?: AbortSignal
+    onUpdate?: (task: ImageTask) => void
+  } = {},
+) {
+  const { signal, onUpdate } = options
   const deadline = Date.now() + IMAGE_TASK_POLL_TIMEOUT
   while (Date.now() < deadline) {
     if (signal?.aborted) {
       throw new Error('已停止')
     }
     const task = await getMyImageTask(taskID)
+    onUpdate?.(task)
     if (task.status === 'success') {
-      return {
-        data: taskToPlayImages(task),
-        is_preview: !!task.is_preview,
-      }
+      return task
     }
     if (task.status === 'failed') {
       throw new Error(formatImageTaskError(task.error))
     }
     await sleepWithSignal(IMAGE_TASK_POLL_INTERVAL, signal)
   }
-  throw new Error('等待图片生成超时，请稍后在使用记录里查看任务结果')
+  throw new Error(IMAGE_TASK_WAIT_TIMEOUT_MESSAGE)
+}
+
+async function watchImageTask(
+  mode: PlaygroundImageTaskMode,
+  taskID: string,
+  options: {
+    controller?: AbortController
+    silent?: boolean
+  } = {},
+) {
+  const state = getImagePlayState(mode)
+  const controller = options.controller || new AbortController()
+  const silent = !!options.silent
+  state.sending.value = true
+  state.abort.value = controller
+  state.task.value = createPendingImageTask(taskID)
+  persistPendingImageTask(mode, taskID)
+  try {
+    const task = await waitForImageTask(taskID, {
+      signal: controller.signal,
+      onUpdate: (nextTask) => {
+        state.task.value = nextTask
+      },
+    })
+    state.task.value = task
+    state.result.value = taskToPlayImages(task)
+    state.preview.value = !!task.is_preview
+    clearPendingImageTask(mode)
+    if (state.result.value.length === 0) {
+      state.error.value = '未产出图片,请重试或更换描述'
+      return
+    }
+    state.error.value = ''
+    if (silent) return
+    if (state.preview.value) {
+      ElMessage.warning('生成成功(预览模式):本次账号未命中 IMG2 灰度,展示的是 IMG1 预览图')
+    } else {
+      ElMessage.success(`生成成功,共 ${state.result.value.length} 张`)
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (isTaskWaitStopped(msg)) {
+      if (!silent) {
+        ElMessage.info('已停止等待，任务仍在后台生成，可稍后继续查看')
+      }
+      return
+    }
+    if (isTaskWaitTimeout(msg)) {
+      state.error.value = msg
+      if (!silent) {
+        ElMessage.warning(msg)
+      }
+      return
+    }
+    state.error.value = msg
+    clearPendingImageTask(mode)
+    if (!silent) {
+      ElMessage.error(msg)
+    }
+  } finally {
+    if (state.abort.value === controller) {
+      state.abort.value = null
+    }
+    state.sending.value = false
+    userStore.fetchMe().catch(() => {})
+  }
+}
+
+async function restorePendingImageTasks() {
+  const pending = (Object.keys(IMAGE_TASK_STORAGE_KEYS) as PlaygroundImageTaskMode[])
+    .map((mode) => ({ mode, taskID: readPendingImageTask(mode) }))
+    .filter((item) => !!item.taskID)
+  if (pending.length === 0) {
+    return
+  }
+  await Promise.allSettled(
+    pending.map(({ mode, taskID }) => watchImageTask(mode, taskID, { silent: true })),
+  )
+}
+
+async function resumeText2ImgTask() {
+  const taskID = t2iTask.value?.task_id || readPendingImageTask('text2img')
+  if (!taskID || t2iSending.value) return
+  t2iError.value = ''
+  t2iResult.value = []
+  t2iPreview.value = false
+  await watchImageTask('text2img', taskID)
+}
+
+async function resumeImg2ImgTask() {
+  const taskID = i2iTask.value?.task_id || readPendingImageTask('img2img')
+  if (!taskID || i2iSending.value) return
+  i2iError.value = ''
+  i2iResult.value = []
+  i2iPreview.value = false
+  await watchImageTask('img2img', taskID)
 }
 
 async function sendText2Img() {
@@ -422,7 +675,9 @@ async function sendText2Img() {
   t2iSending.value = true
   t2iError.value = ''
   t2iResult.value = []
-  t2iAbort.value = new AbortController()
+  t2iTask.value = null
+  const controller = new AbortController()
+  t2iAbort.value = controller
   try {
     const submit = await playGenerateImage(
       {
@@ -433,24 +688,35 @@ async function sendText2Img() {
         upscale: t2iUpscale.value || undefined,
         wait_for_result: false,
       },
-      t2iAbort.value.signal,
+      controller.signal,
     )
-    const resp = submit.task_id
-      ? await waitForImageTask(submit.task_id, t2iAbort.value.signal)
-      : submit
+    if (submit.task_id) {
+      await watchImageTask('text2img', submit.task_id, { controller })
+      return
+    }
+    const resp = submit
     t2iResult.value = resp.data || []
     if (t2iResult.value.length === 0) {
       t2iError.value = '未产出图片,请重试或更换描述'
     } else {
       ElMessage.success(`生成成功,共 ${t2iResult.value.length} 张`)
     }
+    t2iSending.value = false
+    if (t2iAbort.value === controller) {
+      t2iAbort.value = null
+    }
+    userStore.fetchMe().catch(() => {})
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
+    t2iSending.value = false
+    if (t2iAbort.value === controller) {
+      t2iAbort.value = null
+    }
+    if (isTaskWaitStopped(msg)) {
+      return
+    }
     t2iError.value = msg
     ElMessage.error(msg)
-  } finally {
-    t2iSending.value = false
-    t2iAbort.value = null
     userStore.fetchMe().catch(() => {})
   }
 }
@@ -545,7 +811,9 @@ async function sendImg2Img() {
   i2iSending.value = true
   i2iError.value = ''
   i2iResult.value = []
-  i2iAbort.value = new AbortController()
+  i2iTask.value = null
+  const controller = new AbortController()
+  i2iAbort.value = controller
   try {
     const submit = await playGenerateImage(
       {
@@ -557,23 +825,39 @@ async function sendImg2Img() {
         upscale: i2iUpscale.value || undefined,
         wait_for_result: false,
       },
-      i2iAbort.value.signal,
+      controller.signal,
     )
-    const resp = submit.task_id
-      ? await waitForImageTask(submit.task_id, i2iAbort.value.signal)
-      : submit
+    if (submit.task_id) {
+      await watchImageTask('img2img', submit.task_id, { controller })
+      return
+    }
+    const resp = submit
     i2iResult.value = resp.data || []
     if (i2iResult.value.length > 0) {
       ElMessage.success(`生成成功,共 ${i2iResult.value.length} 张`)
     }
+    i2iSending.value = false
+    if (i2iAbort.value === controller) {
+      i2iAbort.value = null
+    }
+    userStore.fetchMe().catch(() => {})
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
+    i2iSending.value = false
+    if (i2iAbort.value === controller) {
+      i2iAbort.value = null
+    }
+    if (isTaskWaitStopped(msg)) {
+      return
+    }
     i2iError.value = msg
     ElMessage.error(msg)
-  } finally {
-    i2iSending.value = false
-    i2iAbort.value = null
+    userStore.fetchMe().catch(() => {})
   }
+}
+
+function stopImg2Img() {
+  i2iAbort.value?.abort()
 }
 
 // 代码块内的 "复制" 按钮(通过事件委托,避免每次重渲染都重新绑定)
@@ -888,7 +1172,7 @@ watch(activeTab, (v) => {
             </div>
 
             <el-button v-if="t2iSending" type="danger" @click="stopText2Img" round class="side-btn">
-              <el-icon><VideoPause /></el-icon> 停止
+              <el-icon><VideoPause /></el-icon> 停止等待
             </el-button>
             <el-button
               v-else
@@ -904,6 +1188,25 @@ watch(activeTab, (v) => {
           </aside>
 
           <section class="card-block img-main">
+            <div v-if="t2iTask && (isImageTaskPending(t2iTask.status) || t2iTask.status === 'failed')" class="task-banner">
+              <el-alert
+                :type="imageTaskAlertType(t2iTask)"
+                :closable="false"
+                show-icon
+                :title="`最近任务${imageTaskStatusLabel(t2iTask.status)}`"
+                :description="imageTaskDescription(t2iTask, t2iSending)"
+              />
+              <div class="task-banner-actions">
+                <el-button
+                  v-if="isImageTaskPending(t2iTask.status) && !t2iSending"
+                  size="small"
+                  @click="resumeText2ImgTask"
+                >
+                  继续查看
+                </el-button>
+                <el-button text size="small" @click="goToUsagePage">使用记录</el-button>
+              </div>
+            </div>
             <div v-if="t2iSending" class="stage loading">
               <div class="orb"><el-icon class="spin"><Loading /></el-icon></div>
               <div class="stage-title">正在为你绘制…</div>
@@ -1035,11 +1338,14 @@ watch(activeTab, (v) => {
               />
             </div>
 
+            <el-button v-if="i2iSending" type="danger" @click="stopImg2Img" round class="side-btn">
+              <el-icon><VideoPause /></el-icon> 停止等待
+            </el-button>
             <el-button
+              v-else
               type="primary"
               round
               size="large"
-              :loading="i2iSending"
               :disabled="refImages.length === 0 || !i2iPrompt.trim()"
               @click="sendImg2Img"
               class="side-btn gen-btn"
@@ -1049,6 +1355,25 @@ watch(activeTab, (v) => {
           </aside>
 
           <section class="card-block img-main">
+            <div v-if="i2iTask && (isImageTaskPending(i2iTask.status) || i2iTask.status === 'failed')" class="task-banner">
+              <el-alert
+                :type="imageTaskAlertType(i2iTask)"
+                :closable="false"
+                show-icon
+                :title="`最近任务${imageTaskStatusLabel(i2iTask.status)}`"
+                :description="imageTaskDescription(i2iTask, i2iSending)"
+              />
+              <div class="task-banner-actions">
+                <el-button
+                  v-if="isImageTaskPending(i2iTask.status) && !i2iSending"
+                  size="small"
+                  @click="resumeImg2ImgTask"
+                >
+                  继续查看
+                </el-button>
+                <el-button text size="small" @click="goToUsagePage">使用记录</el-button>
+              </div>
+            </div>
             <div v-if="i2iError" class="err-block">
               <el-icon><WarningFilled /></el-icon>
               {{ i2iError }}
@@ -1407,6 +1732,19 @@ watch(activeTab, (v) => {
   gap: 16px;
 }
 .img-main { min-height: 560px; }
+
+ .task-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.task-banner-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
 
 /* 比例按钮 —— 10 档预设,5 列 × 2 行 grid */
 .ratio-row {
