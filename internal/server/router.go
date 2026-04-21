@@ -31,19 +31,19 @@ type Deps struct {
 	AuthH *auth.Handler
 	UserH *user.Handler
 
-	KeySvc     *apikey.Service
-	KeyH       *apikey.Handler
-	ProxyH     *proxy.Handler
-	AccountH   *account.Handler
+	KeySvc   *apikey.Service
+	KeyH     *apikey.Handler
+	ProxyH   *proxy.Handler
+	AccountH *account.Handler
 
 	GatewayH *gateway.Handler
 	ImagesH  *gateway.ImagesHandler
 
-	BackupH      *backup.Handler
-	AuditH       *audit.Handler
-	AuditDAO     *audit.DAO
-	AdminUserH   *user.AdminHandler
-	AdminGroupH  *user.AdminGroupHandler
+	BackupH     *backup.Handler
+	AuditH      *audit.Handler
+	AuditDAO    *audit.DAO
+	AdminUserH  *user.AdminHandler
+	AdminGroupH *user.AdminGroupHandler
 
 	AdminModelH *model.AdminHandler
 	AdminKeyH   *apikey.AdminHandler
@@ -188,6 +188,8 @@ func New(d *Deps) *gin.Engine {
 				ag.POST("", middleware.RequirePerm(rbac.PermAccountWrite), d.AccountH.Create)
 				ag.POST("/import", middleware.RequirePerm(rbac.PermAccountWrite), d.AccountH.Import)
 				ag.POST("/import-tokens", middleware.RequirePerm(rbac.PermAccountWrite), d.AccountH.ImportTokens)
+				ag.POST("/oauth/generate-auth-url", middleware.RequirePerm(rbac.PermAccountWrite), d.AccountH.GenerateOAuthURL)
+				ag.POST("/oauth/exchange-code", middleware.RequirePerm(rbac.PermAccountWrite), d.AccountH.ExchangeOAuthCode)
 				ag.POST("/refresh-all", middleware.RequirePerm(rbac.PermAccountWrite), d.AccountH.RefreshAll)
 				ag.POST("/probe-quota-all", middleware.RequirePerm(rbac.PermAccountWrite), d.AccountH.ProbeQuotaAll)
 				ag.POST("/bulk-delete", middleware.RequirePerm(rbac.PermAccountWrite), d.AccountH.BulkDelete)

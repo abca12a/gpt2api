@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,9 +29,15 @@ type Handler struct {
 	prober        *QuotaProber
 	settings      *settings.Service
 	proxyResolver ProxyURLResolver
+	oauth         *openAIOAuthManager
 }
 
-func NewHandler(s *Service) *Handler { return &Handler{svc: s} }
+func NewHandler(s *Service) *Handler {
+	return &Handler{
+		svc:   s,
+		oauth: newOpenAIOAuthManager(),
+	}
+}
 
 // SetRefresher 注入刷新器(可选,未注入时相关接口返回 501)。
 func (h *Handler) SetRefresher(r *Refresher) { h.refresher = r }
@@ -42,6 +50,168 @@ func (h *Handler) SetSettings(s *settings.Service) { h.settings = s }
 
 // SetProxyResolver 注入代理 URL 解析器(可选,未注入时 RT/ST 批量导入只能直连)。
 func (h *Handler) SetProxyResolver(r ProxyURLResolver) { h.proxyResolver = r }
+
+// POST /api/admin/accounts/oauth/generate-auth-url
+func (h *Handler) GenerateOAuthURL(c *gin.Context) {
+	if h.oauth == nil {
+		resp.Internal(c, "oauth 未初始化")
+		return
+	}
+	var req struct {
+		ProxyID     uint64 `json:"proxy_id"`
+		RedirectURI string `json:"redirect_uri"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !strings.Contains(err.Error(), "EOF") {
+		resp.BadRequest(c, "请求参数错误:"+err.Error())
+		return
+	}
+
+	var proxyURL string
+	if req.ProxyID > 0 {
+		if h.proxyResolver == nil {
+			resp.BadRequest(c, "代理解析器未初始化")
+			return
+		}
+		proxyURL = h.proxyResolver.ProxyURLByID(c.Request.Context(), req.ProxyID)
+		if proxyURL == "" {
+			resp.BadRequest(c, "代理不存在、未启用或无法构造 URL")
+			return
+		}
+	}
+
+	out, err := h.oauth.GenerateAuthURL(strings.TrimSpace(req.RedirectURI), proxyURL)
+	if err != nil {
+		resp.Internal(c, err.Error())
+		return
+	}
+	resp.OK(c, out)
+}
+
+// POST /api/admin/accounts/oauth/exchange-code
+func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
+	if h.oauth == nil {
+		resp.Internal(c, "oauth 未初始化")
+		return
+	}
+	var req struct {
+		SessionID      string `json:"session_id"`
+		CallbackURL    string `json:"callback_url"`
+		Code           string `json:"code"`
+		State          string `json:"state"`
+		RedirectURI    string `json:"redirect_uri"`
+		ProxyID        uint64 `json:"proxy_id"`
+		AccountType    string `json:"account_type"`
+		UpdateExisting *bool  `json:"update_existing"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		resp.BadRequest(c, "请求参数错误:"+err.Error())
+		return
+	}
+	if req.CallbackURL != "" && (strings.TrimSpace(req.Code) == "" || strings.TrimSpace(req.State) == "") {
+		code, state, err := parseOAuthCallback(req.CallbackURL)
+		if err != nil {
+			resp.BadRequest(c, err.Error())
+			return
+		}
+		if strings.TrimSpace(req.Code) == "" {
+			req.Code = code
+		}
+		if strings.TrimSpace(req.State) == "" {
+			req.State = state
+		}
+	}
+	if strings.TrimSpace(req.SessionID) == "" {
+		resp.BadRequest(c, "session_id 不能为空")
+		return
+	}
+	if strings.TrimSpace(req.Code) == "" {
+		resp.BadRequest(c, "code 不能为空")
+		return
+	}
+	if strings.TrimSpace(req.State) == "" {
+		resp.BadRequest(c, "state 不能为空")
+		return
+	}
+
+	var proxyURL string
+	if req.ProxyID > 0 {
+		if h.proxyResolver == nil {
+			resp.BadRequest(c, "代理解析器未初始化")
+			return
+		}
+		proxyURL = h.proxyResolver.ProxyURLByID(c.Request.Context(), req.ProxyID)
+		if proxyURL == "" {
+			resp.BadRequest(c, "代理不存在、未启用或无法构造 URL")
+			return
+		}
+	}
+
+	out, err := h.oauth.ExchangeCode(c.Request.Context(), &openAIOAuthExchangeInput{
+		SessionID:   strings.TrimSpace(req.SessionID),
+		Code:        strings.TrimSpace(req.Code),
+		State:       strings.TrimSpace(req.State),
+		RedirectURI: strings.TrimSpace(req.RedirectURI),
+		ProxyURL:    proxyURL,
+		AccountType: strings.TrimSpace(req.AccountType),
+	})
+	if err != nil {
+		resp.BadRequest(c, err.Error())
+		return
+	}
+
+	updateExisting := true
+	if req.UpdateExisting != nil {
+		updateExisting = *req.UpdateExisting
+	}
+	summary := h.svc.ImportBatch(c.Request.Context(), []ImportSource{out.Source}, ImportOptions{
+		UpdateExisting:  updateExisting,
+		DefaultClientID: out.Source.ClientID,
+		DefaultProxyID:  req.ProxyID,
+		BatchSize:       1,
+	})
+
+	var result *ImportLineResult
+	var accountItem *Account
+	if len(summary.Results) > 0 {
+		result = &summary.Results[0]
+		if result.ID > 0 {
+			current, _ := h.svc.Get(c.Request.Context(), result.ID)
+			if out.Token != nil && out.Token.PlanType != "" && current != nil &&
+				(result.Status == "created" || result.Status == "updated") {
+				if a, err := h.svc.Update(c.Request.Context(), result.ID, UpdateInput{
+					PlanType: out.Token.PlanType,
+					Notes:    current.Notes,
+				}); err == nil {
+					accountItem = a
+				}
+			}
+			if accountItem == nil {
+				accountItem = current
+			}
+		}
+	}
+
+	if h.refresher != nil {
+		h.refresher.Kick()
+	}
+	if h.prober != nil {
+		h.prober.Kick()
+	}
+
+	resp.OK(c, gin.H{
+		"summary": summary,
+		"result":  result,
+		"account": accountItem,
+		"oauth": gin.H{
+			"email":               out.Token.Email,
+			"plan_type":           out.Token.PlanType,
+			"chatgpt_account_id":  out.Token.ChatGPTAccountID,
+			"client_id":           out.Token.ClientID,
+			"expires_at":          out.Token.ExpiresAt,
+			"redirect_uri_notice": openAIOAuthDefaultRedirectURI,
+		},
+	})
+}
 
 // POST /api/admin/accounts
 func (h *Handler) Create(c *gin.Context) {
@@ -428,6 +598,20 @@ func splitLines(s string) []string {
 		}
 	}
 	return out
+}
+
+func parseOAuthCallback(raw string) (code, state string, err error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", "", errors.New("回调地址解析失败,请粘贴完整 URL")
+	}
+	q := u.Query()
+	code = strings.TrimSpace(q.Get("code"))
+	state = strings.TrimSpace(q.Get("state"))
+	if code == "" || state == "" {
+		return "", "", errors.New("回调地址缺少 code 或 state 参数")
+	}
+	return code, state, nil
 }
 
 // ===================== 刷新 / 探测 =====================

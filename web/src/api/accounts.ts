@@ -151,6 +151,46 @@ export function importAccountsFiles(
   })
 }
 
+export interface OAuthAuthURLResp {
+  auth_url: string
+  session_id: string
+  redirect_uri: string
+}
+
+export interface OAuthImportResp {
+  summary: ImportSummary
+  result?: ImportLineResult | null
+  account?: Account | null
+  oauth?: {
+    email?: string
+    plan_type?: string
+    chatgpt_account_id?: string
+    client_id?: string
+    expires_at?: number
+    redirect_uri_notice?: string
+  }
+}
+
+export function generateOAuthAuthURL(body: {
+  proxy_id?: number
+  redirect_uri?: string
+}) {
+  return http.post<any, OAuthAuthURLResp>('/api/admin/accounts/oauth/generate-auth-url', body)
+}
+
+export function exchangeOAuthCode(body: {
+  session_id: string
+  callback_url?: string
+  code?: string
+  state?: string
+  redirect_uri?: string
+  proxy_id?: number
+  account_type?: 'codex' | 'chatgpt'
+  update_existing?: boolean
+}) {
+  return http.post<any, OAuthImportResp>('/api/admin/accounts/oauth/exchange-code', body)
+}
+
 // ---------- 刷新 / 探测 ----------
 export interface RefreshResult {
   account_id: number

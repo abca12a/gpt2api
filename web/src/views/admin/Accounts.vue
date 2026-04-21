@@ -421,12 +421,13 @@ async function onProbeAll() {
 }
 
 // ========== 批量导入(多文件 + 分批) ==========
-// 4 种模式:
+// 5 种模式:
 //   - json: 文件/JSON 文本,原有行为
 //   - at:   一行一个 access_token
 //   - rt:   一行一个 refresh_token,必须提供 APPID(client_id)
 //   - st:   一行一个 session_token
-type ImportMode = 'json' | 'at' | 'rt' | 'st'
+//   - oauth: OpenAI OAuth 登录后直接导入
+type ImportMode = 'json' | 'at' | 'rt' | 'st' | 'oauth'
 const importDlg = ref(false)
 const importMode = ref<ImportMode>('json')
 const importForm = reactive({
@@ -436,6 +437,14 @@ const importForm = reactive({
   update_existing: true,
   default_client_id: 'app_EMoamEEZ73f0CkXaXp7hrann',
   default_proxy_id: 0,
+})
+const oauthForm = reactive({
+  auth_url: '',
+  session_id: '',
+  redirect_uri: '',
+  callback_text: '',
+  state: '',
+  account_type: 'codex' as 'codex' | 'chatgpt',
 })
 const importing = ref(false)
 const importProgress = reactive({
@@ -458,6 +467,12 @@ function openImport() {
   importForm.update_existing = true
   importForm.default_client_id = 'app_EMoamEEZ73f0CkXaXp7hrann'
   importForm.default_proxy_id = 0
+  oauthForm.auth_url = ''
+  oauthForm.session_id = ''
+  oauthForm.redirect_uri = ''
+  oauthForm.callback_text = ''
+  oauthForm.state = ''
+  oauthForm.account_type = 'codex'
   importResult.value = null
   importLastErrors.value = []
   importProgress.running = false
@@ -472,12 +487,65 @@ function openImport() {
 
 // 当前 tokens 模式下,每行 token 的数量预览
 const tokenLineCount = computed(() => {
-  if (importMode.value === 'json') return 0
+  if (importMode.value === 'json' || importMode.value === 'oauth') return 0
   return importForm.tokens_text
     .split(/\r?\n/)
     .map((s) => s.trim())
     .filter(Boolean).length
 })
+
+function readStateFromAuthURL(raw: string) {
+  try {
+    return new URL(raw).searchParams.get('state') || ''
+  } catch {
+    return ''
+  }
+}
+
+function extractOAuthCallback(raw: string) {
+  const text = raw.trim()
+  if (!text) return { callback_url: '', code: '', state: '' }
+
+  try {
+    const u = new URL(text)
+    return {
+      callback_url: text,
+      code: u.searchParams.get('code') || '',
+      state: u.searchParams.get('state') || '',
+    }
+  } catch {
+    const code = text.match(/[?&]code=([^&]+)/)?.[1] || (text.includes('code=') ? '' : text)
+    const state = text.match(/[?&]state=([^&]+)/)?.[1] || ''
+    return {
+      callback_url: '',
+      code: decodeURIComponent(code || ''),
+      state: decodeURIComponent(state || ''),
+    }
+  }
+}
+
+async function onGenerateOAuthURL() {
+  try {
+    const r = await accountApi.generateOAuthAuthURL({
+      proxy_id: importForm.default_proxy_id || undefined,
+    })
+    oauthForm.auth_url = r.auth_url || ''
+    oauthForm.session_id = r.session_id || ''
+    oauthForm.redirect_uri = r.redirect_uri || ''
+    oauthForm.state = readStateFromAuthURL(r.auth_url || '')
+    ElMessage.success('授权链接已生成,请在新窗口完成 OpenAI 登录')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '生成授权链接失败')
+  }
+}
+
+function openOAuthAuthURL() {
+  if (!oauthForm.auth_url) {
+    ElMessage.warning('请先生成授权链接')
+    return
+  }
+  window.open(oauthForm.auth_url, '_blank', 'noopener,noreferrer')
+}
 
 function onPickFiles(e: Event) {
   const input = e.target as HTMLInputElement
@@ -519,6 +587,77 @@ const BATCH_BYTES = 8 * 1024 * 1024 // 8MB
 async function doImport() {
   importLastErrors.value = []
   importResult.value = null
+
+  if (importMode.value === 'oauth') {
+    if (!oauthForm.session_id || !oauthForm.auth_url) {
+      ElMessage.warning('请先生成授权链接')
+      return
+    }
+    if (!oauthForm.callback_text.trim()) {
+      ElMessage.warning('请粘贴回调地址或授权 code')
+      return
+    }
+    const parsed = extractOAuthCallback(oauthForm.callback_text)
+    const state = parsed.state || oauthForm.state
+    if (!parsed.code) {
+      ElMessage.warning('未能识别授权 code,请粘贴完整回调地址或 code')
+      return
+    }
+    if (!state) {
+      ElMessage.warning('未能识别 state,请重新生成授权链接后再试')
+      return
+    }
+
+    importing.value = true
+    importProgress.running = true
+    importProgress.current = 0
+    importProgress.totalBatches = 1
+    importProgress.created = 0
+    importProgress.updated = 0
+    importProgress.skipped = 0
+    importProgress.failed = 0
+    try {
+      const r = await accountApi.exchangeOAuthCode({
+        session_id: oauthForm.session_id,
+        callback_url: parsed.callback_url || undefined,
+        code: parsed.code || undefined,
+        state,
+        proxy_id: importForm.default_proxy_id || undefined,
+        account_type: oauthForm.account_type,
+        update_existing: importForm.update_existing,
+      })
+      const summary = r.summary
+      mergeSummary(summary)
+      importResult.value = cloneAgg()
+      importLastErrors.value = summary.results
+        .filter((x) => x.status === 'failed' || x.status === 'skipped')
+        .slice(0, 50)
+      const item = r.result
+      if (item?.status === 'created') {
+        ElMessage.success(`OAuth 导入成功:已创建 ${item.email}`)
+      } else if (item?.status === 'updated') {
+        ElMessage.success(`OAuth 导入成功:已更新 ${item.email}`)
+      } else if (item?.status === 'skipped') {
+        ElNotification.warning({
+          title: 'OAuth 导入已跳过',
+          message: item.reason || `${item.email} 已存在`,
+        })
+      } else {
+        ElMessage.success('OAuth 导入完成')
+      }
+      oauthForm.callback_text = ''
+      oauthForm.session_id = ''
+      oauthForm.auth_url = ''
+      oauthForm.state = ''
+    } catch (e: any) {
+      ElMessage.error(e?.message || 'OAuth 导入失败')
+    } finally {
+      importing.value = false
+      importProgress.running = false
+      fetchList()
+    }
+    return
+  }
 
   // 情况 0:AT/RT/ST 纯 token 模式
   if (importMode.value !== 'json') {
@@ -698,7 +837,7 @@ onMounted(() => {
         <div class="hdr-left">
           <h2 class="page-title">GPT 账号池</h2>
           <div class="page-sub">
-            统一管理 ChatGPT Plus / Team / Codex 账号:JSON / AT / RT / ST 批量导入 · 自动刷新 · 图片额度探测 · 风控熔断轮转
+            统一管理 ChatGPT Plus / Team / Codex 账号:JSON / OAuth / AT / RT / ST 批量导入 · 自动刷新 · 图片额度探测 · 风控熔断轮转
           </div>
         </div>
         <div class="actions">
@@ -1072,6 +1211,7 @@ onMounted(() => {
       <!-- 模式 tab -->
       <el-tabs v-model="importMode" class="import-tabs">
         <el-tab-pane label="JSON 文件" name="json" />
+        <el-tab-pane label="OAuth 登录" name="oauth" />
         <el-tab-pane label="Access Token" name="at" />
         <el-tab-pane label="Refresh Token" name="rt" />
         <el-tab-pane label="Session Token" name="st" />
@@ -1126,6 +1266,53 @@ onMounted(() => {
         />
       </template>
 
+      <!-- OAuth 模式 -->
+      <template v-else-if="importMode === 'oauth'">
+        <div class="tip">
+          参考 <b>sub2api</b> 的 GPT/OpenAI 登录方式:先生成官方 OAuth 授权链接,完成登录后把浏览器最终跳转的
+          <code>http://localhost:1455/auth/callback?... </code> 地址粘贴回来,系统会自动换取 RT / AT 并直接导入账号池。
+        </div>
+
+        <div class="oauth-box">
+          <div class="oauth-row">
+            <span class="muted">账号类型</span>
+            <el-select v-model="oauthForm.account_type" size="small" style="width: 180px">
+              <el-option label="Codex" value="codex" />
+              <el-option label="ChatGPT" value="chatgpt" />
+            </el-select>
+          </div>
+
+          <div class="oauth-actions">
+            <el-button type="primary" plain @click="onGenerateOAuthURL">1. 生成授权链接</el-button>
+            <el-button :disabled="!oauthForm.auth_url" @click="openOAuthAuthURL">2. 打开授权页</el-button>
+            <el-button :disabled="!oauthForm.auth_url" @click="copyText(oauthForm.auth_url, 'OAuth 授权链接')">
+              复制链接
+            </el-button>
+          </div>
+
+          <el-input
+            v-model="oauthForm.auth_url"
+            type="textarea"
+            :rows="3"
+            readonly
+            placeholder="先点击“生成授权链接”"
+          />
+          <div class="muted" style="margin-top:8px;line-height:1.7">
+            <div>固定回调地址: <code>{{ oauthForm.redirect_uri || 'http://localhost:1455/auth/callback' }}</code></div>
+            <div>若浏览器最终提示“无法连接 localhost:1455”是正常现象,直接复制地址栏完整 URL 回来即可。</div>
+          </div>
+        </div>
+
+        <el-divider content-position="left">粘贴回调地址或授权 Code</el-divider>
+        <el-input
+          v-model="oauthForm.callback_text"
+          type="textarea"
+          :rows="6"
+          placeholder="优先粘贴完整回调地址: http://localhost:1455/auth/callback?code=...&state=...&#10;也支持只粘贴 code(会自动复用已生成链接里的 state)"
+          spellcheck="false"
+        />
+      </template>
+
       <!-- AT 模式 -->
       <template v-else-if="importMode === 'at'">
         <div class="tip">
@@ -1175,7 +1362,7 @@ onMounted(() => {
 
       <div style="margin-top: 14px; display: flex; flex-wrap: wrap; gap: 14px; align-items: center">
         <el-checkbox v-model="importForm.update_existing">邮箱已存在则更新 token</el-checkbox>
-        <div>
+        <div v-if="importMode !== 'oauth'">
           <span class="muted" style="margin-right: 6px">
             {{ importMode === 'rt' ? 'APPID(client_id,必填)' : 'client_id' }}
           </span>
@@ -1187,7 +1374,11 @@ onMounted(() => {
         </div>
         <div>
           <span class="muted" style="margin-right: 6px">
-            {{ importMode === 'st' || importMode === 'rt' ? '代理(强烈推荐)' : '默认代理' }}
+            {{
+              importMode === 'oauth'
+                ? '换 token / 默认绑定代理'
+                : (importMode === 'st' || importMode === 'rt' ? '代理(强烈推荐)' : '默认代理')
+            }}
           </span>
           <el-select v-model="importForm.default_proxy_id" clearable size="small" style="width: 220px">
             <el-option :value="0" label="不绑定" />
@@ -1242,6 +1433,9 @@ onMounted(() => {
           开始导入
           <span v-if="importMode === 'json' && importForm.files.length > 0">
             ({{ importForm.files.length }} 个文件)
+          </span>
+          <span v-else-if="importMode === 'oauth'">
+            (OAuth)
           </span>
           <span v-else-if="importMode !== 'json' && tokenLineCount > 0">
             ({{ tokenLineCount }} 条 {{ importMode.toUpperCase() }})
@@ -1337,6 +1531,27 @@ onMounted(() => {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   margin-top: 6px;
+}
+
+.oauth-box {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  padding: 14px;
+  background: var(--el-fill-color-extra-light);
+}
+
+.oauth-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.oauth-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
 }
 
 .drop-zone {
