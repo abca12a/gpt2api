@@ -3,7 +3,6 @@ package image
 import (
 	"errors"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -44,24 +43,32 @@ type taskView struct {
 }
 
 func toView(t *Task) taskView {
-	urls := t.DecodeResultURLs()
 	fids := t.DecodeFileIDs()
+	urls := t.DecodeResultURLs()
+	count := len(urls)
+	if count == 0 {
+		count = len(fids)
+	}
+	proxyURLs := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		proxyURLs = append(proxyURLs, BuildImageProxyURL(t.TaskID, i, ImageProxyTTL))
+	}
 	isPreview := len(fids) > 0
 	for _, id := range fids {
-		if !strings.HasPrefix(id, "sed:") {
+		if !IsPreviewRef(id) {
 			isPreview = false
 			break
 		}
 	}
 	for i, id := range fids {
-		fids[i] = strings.TrimPrefix(id, "sed:")
+		fids[i] = PublicFileID(id)
 	}
 	return taskView{
 		ID: t.ID, TaskID: t.TaskID, UserID: t.UserID, ModelID: t.ModelID,
 		AccountID: t.AccountID, Prompt: t.Prompt, N: t.N, Size: t.Size,
 		Upscale: t.Upscale,
 		Status: t.Status, ConversationID: t.ConversationID, Error: t.Error,
-		CreditCost: t.CreditCost, IsPreview: isPreview, ImageURLs: urls, FileIDs: fids,
+		CreditCost: t.CreditCost, IsPreview: isPreview, ImageURLs: proxyURLs, FileIDs: fids,
 		CreatedAt: t.CreatedAt, StartedAt: t.StartedAt, FinishedAt: t.FinishedAt,
 	}
 }

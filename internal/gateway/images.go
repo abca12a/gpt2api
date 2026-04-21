@@ -415,9 +415,9 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
 	for i := range res.SignedURLs {
-		d := ImageGenData{URL: BuildImageProxyURL(taskID, i, ImageProxyTTL)}
+		d := ImageGenData{URL: image.BuildImageProxyURL(taskID, i, image.ImageProxyTTL)}
 		if i < len(res.FileIDs) {
-			d.FileID = strings.TrimPrefix(res.FileIDs[i], "sed:")
+			d.FileID = image.PublicFileID(res.FileIDs[i])
 		}
 		out.Data = append(out.Data, d)
 	}
@@ -458,9 +458,9 @@ func (h *ImagesHandler) ImageTask(c *gin.Context) {
 	data := make([]ImageGenData, 0, len(urls))
 	fileIDs := t.DecodeFileIDs()
 	for i := range urls {
-		d := ImageGenData{URL: BuildImageProxyURL(t.TaskID, i, ImageProxyTTL)}
+		d := ImageGenData{URL: image.BuildImageProxyURL(t.TaskID, i, image.ImageProxyTTL)}
 		if i < len(fileIDs) {
-			d.FileID = strings.TrimPrefix(fileIDs[i], "sed:")
+			d.FileID = image.PublicFileID(fileIDs[i])
 		}
 		data = append(data, d)
 	}
@@ -607,7 +607,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		if i > 0 {
 			sb.WriteString("\n\n")
 		}
-		sb.WriteString(fmt.Sprintf("![generated](%s)", BuildImageProxyURL(taskID, i, ImageProxyTTL)))
+		sb.WriteString(fmt.Sprintf("![generated](%s)", image.BuildImageProxyURL(taskID, i, image.ImageProxyTTL)))
 	}
 	resp := ChatCompletionResponse{
 		ID:      "chatcmpl-" + uuid.NewString(),
@@ -922,9 +922,9 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
 	for i := range res.SignedURLs {
-		d := ImageGenData{URL: BuildImageProxyURL(taskID, i, ImageProxyTTL)}
+		d := ImageGenData{URL: image.BuildImageProxyURL(taskID, i, image.ImageProxyTTL)}
 		if i < len(res.FileIDs) {
-			d.FileID = strings.TrimPrefix(res.FileIDs[i], "sed:")
+			d.FileID = image.PublicFileID(res.FileIDs[i])
 		}
 		out.Data = append(out.Data, d)
 	}
