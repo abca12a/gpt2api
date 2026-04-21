@@ -29,6 +29,7 @@ const routes: RouteRecordRaw[] = [
     children: [
       { path: 'login', component: () => import('@/views/auth/Login.vue'), meta: { public: true, title: '登录' } },
       { path: 'register', component: () => import('@/views/auth/Register.vue'), meta: { public: true, title: '注册' } },
+      { path: 'oauth/openai/callback', component: () => import('@/views/auth/OpenAIOAuthCallback.vue'), meta: { public: true, title: 'OpenAI 登录回调' } },
     ],
   },
   {

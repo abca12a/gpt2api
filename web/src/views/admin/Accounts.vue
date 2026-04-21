@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, onBeforeUnmount, computed } from 'vue'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { Upload } from '@element-plus/icons-vue'
 import * as accountApi from '@/api/accounts'
 import * as proxyApi from '@/api/proxies'
 import { formatDateShort } from '@/utils/format'
+
+const OAUTH_CALLBACK_STORAGE_KEY = 'gpt2api.oauth.openai.callback'
+const OAUTH_CALLBACK_MESSAGE_TYPE = 'gpt2api:openai-oauth-callback'
+const oauthCallbackOrigin = `${window.location.origin}/oauth/openai/callback`
 
 // ========== 列表 & 筛选 ==========
 const loading = ref(false)
@@ -473,6 +477,11 @@ function openImport() {
   oauthForm.callback_text = ''
   oauthForm.state = ''
   oauthForm.account_type = 'codex'
+  try {
+    localStorage.removeItem(OAUTH_CALLBACK_STORAGE_KEY)
+  } catch {
+    /* noop */
+  }
   importResult.value = null
   importLastErrors.value = []
   importProgress.running = false
@@ -528,6 +537,7 @@ async function onGenerateOAuthURL() {
   try {
     const r = await accountApi.generateOAuthAuthURL({
       proxy_id: importForm.default_proxy_id || undefined,
+      redirect_uri: oauthCallbackOrigin,
     })
     oauthForm.auth_url = r.auth_url || ''
     oauthForm.session_id = r.session_id || ''
@@ -545,6 +555,48 @@ function openOAuthAuthURL() {
     return
   }
   window.open(oauthForm.auth_url, '_blank', 'noopener,noreferrer')
+}
+
+function consumeOAuthCallbackPayload(payload: any) {
+  if (!payload || typeof payload !== 'object') return
+  if (payload.type !== OAUTH_CALLBACK_MESSAGE_TYPE) return
+  if (payload.error) {
+    ElNotification.warning({
+      title: 'OpenAI 登录失败',
+      message: payload.error_description || payload.error,
+    })
+    return
+  }
+  if (!payload.code || !payload.state) return
+  if (oauthForm.callback_text && payload.callback_url === oauthForm.callback_text) return
+  if (oauthForm.state && payload.state !== oauthForm.state) {
+    ElNotification.warning({
+      title: '收到一条过期回调',
+      message: '当前导入会话和返回的 state 不一致，已忽略这次回调。',
+    })
+    return
+  }
+  oauthForm.callback_text = payload.callback_url || ''
+  try {
+    localStorage.removeItem(OAUTH_CALLBACK_STORAGE_KEY)
+  } catch {
+    // noop
+  }
+  ElMessage.success('已自动收到 OpenAI 回调，直接点“开始导入”即可')
+}
+
+function onOAuthMessage(event: MessageEvent) {
+  if (event.origin !== window.location.origin) return
+  consumeOAuthCallbackPayload(event.data)
+}
+
+function onOAuthStorage(event: StorageEvent) {
+  if (event.key !== OAUTH_CALLBACK_STORAGE_KEY || !event.newValue) return
+  try {
+    consumeOAuthCallbackPayload(JSON.parse(event.newValue))
+  } catch {
+    // noop
+  }
 }
 
 function onPickFiles(e: Event) {
@@ -826,6 +878,19 @@ onMounted(() => {
   fetchList()
   fetchProxies()
   loadAutoRefresh()
+  window.addEventListener('message', onOAuthMessage)
+  window.addEventListener('storage', onOAuthStorage)
+  try {
+    const cached = localStorage.getItem(OAUTH_CALLBACK_STORAGE_KEY)
+    if (cached) consumeOAuthCallbackPayload(JSON.parse(cached))
+  } catch {
+    /* noop */
+  }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('message', onOAuthMessage)
+  window.removeEventListener('storage', onOAuthStorage)
 })
 </script>
 
@@ -1270,7 +1335,7 @@ onMounted(() => {
       <template v-else-if="importMode === 'oauth'">
         <div class="tip">
           参考 <b>sub2api</b> 的 GPT/OpenAI 登录方式:先生成官方 OAuth 授权链接,完成登录后把浏览器最终跳转的
-          <code>http://localhost:1455/auth/callback?... </code> 地址粘贴回来,系统会自动换取 RT / AT 并直接导入账号池。
+          <code>{{ oauthCallbackOrigin }}?... </code> 地址带回当前页面,系统会自动换取 RT / AT 并直接导入账号池。
         </div>
 
         <div class="oauth-box">
@@ -1298,8 +1363,8 @@ onMounted(() => {
             placeholder="先点击“生成授权链接”"
           />
           <div class="muted" style="margin-top:8px;line-height:1.7">
-            <div>固定回调地址: <code>{{ oauthForm.redirect_uri || 'http://localhost:1455/auth/callback' }}</code></div>
-            <div>若浏览器最终提示“无法连接 localhost:1455”是正常现象,直接复制地址栏完整 URL 回来即可。</div>
+            <div>当前站点回调地址: <code>{{ oauthForm.redirect_uri || oauthCallbackOrigin }}</code></div>
+            <div>完成授权后，回调页会自动把结果回传到当前后台窗口；没自动带回时，也可以手动粘贴完整回调地址或 code。</div>
           </div>
         </div>
 
@@ -1308,7 +1373,7 @@ onMounted(() => {
           v-model="oauthForm.callback_text"
           type="textarea"
           :rows="6"
-          placeholder="优先粘贴完整回调地址: http://localhost:1455/auth/callback?code=...&state=...&#10;也支持只粘贴 code(会自动复用已生成链接里的 state)"
+          :placeholder="`优先粘贴完整回调地址: ${oauthCallbackOrigin}?code=...&state=...&#10;也支持只粘贴 code(会自动复用已生成链接里的 state)`"
           spellcheck="false"
         />
       </template>

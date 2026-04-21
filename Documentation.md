@@ -13,7 +13,7 @@
 - 原因：当前库已经能完整存储 `AT / RT / client_id / chatgpt_account_id`，问题主要在“账号获取方式不方便”，因此选择补一条更顺手的导入通道，而不是重写整套账号模型。
 - 影响：管理员可以直接通过 OpenAI OAuth 登录拿到 `AT / RT` 并导入账号池，导入完成后会继续进入现有的自动刷新、额度探测和调度流程。
 - 边界：
-  - 默认回调地址固定为 `http://localhost:1455/auth/callback`，当前实现不在本机监听该端口；用户完成登录后，需要把浏览器最终跳转的完整地址复制回后台，前后端会自动提取 `code/state`。
+  - OAuth 默认优先使用当前站点域名的前端回调路由 `/oauth/openai/callback`。回调页会通过 `postMessage/localStorage` 把 `code/state` 自动回传到账号池导入弹窗；如果自动回传失败，仍可手动粘贴完整回调地址或 `code`。
   - OAuth 会话状态只保存在服务端内存，TTL 为 30 分钟；服务重启后需要重新生成授权链接。
   - `proxy_id` 在 OAuth 导入里既用于服务端向 `auth.openai.com` 换 token，也用于新建账号时的默认代理绑定；如果是更新已有账号，不会自动改绑它原来的代理。
   - 现有 `JSON / AT / RT / ST` 导入链路保持不变，OAuth 只是新增入口，不替换旧流程。

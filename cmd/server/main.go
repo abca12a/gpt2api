@@ -245,6 +245,7 @@ func main() {
 	accountH.SetProber(accQuota)
 	accountH.SetSettings(settingsSvc)
 	accountH.SetProxyResolver(acctProxyResolver)
+	accountH.SetAppBaseURL(cfg.App.BaseURL)
 
 	// 把 resolver 注入到图片代理端点:下载图片时按 account_id 解出 AT/cookies/proxy。
 	imagesH.ImageAccResolver = acctProxyResolver
