@@ -7,6 +7,16 @@
 
 ## 最近变更
 
+### 2026-04-21 Playground 生图超时 / Turnstile 排查
+
+- 结论：`image 524` 不是账号绑定失败，而是图片请求在站点前面经过 Cloudflare 时同步等待过久，浏览器先超时断开；同时图片 runner 之前没有把账号 cookies 带给 `chatgpt` 客户端，容易触发 `chat-requirements` 的 Turnstile 挑战。
+- 决策：
+  - 图片 runner 改为复用账号 cookies，尽量降低 Turnstile 命中率。
+  - Playground 生图请求改为默认 `wait_for_result=false`，先立即返回 `task_id`，前端再轮询 `/api/me/images/tasks/:id` 拿最终结果，避免网页侧直接出现 Cloudflare `524`。
+- 影响：
+  - 用户在“在线体验”里文生图 / 图生图时，不再同步卡住 2 分钟以上；即使上游很慢，也会先看到任务排队/轮询，而不是直接被站点层超时打断。
+  - 如果任务最终仍失败，前端会优先展示更接近真实原因的错误文案，例如上游风控/Turnstile，而不是笼统的 `image 524`。
+
 ### 2026-04-21 OpenAI OAuth 导入
 
 - 决策：新增 `/api/admin/accounts/oauth/generate-auth-url` 与 `/api/admin/accounts/oauth/exchange-code` 两个后台接口，并在账号池“批量导入”弹窗里增加 `OAuth 登录` 页签。

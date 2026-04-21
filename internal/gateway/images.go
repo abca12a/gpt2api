@@ -74,6 +74,7 @@ type ImageGenRequest struct {
 	// 生效时机:图片代理 URL 首次请求时做一次 decode+放大+PNG 编码,之后进程内
 	// LRU 缓存命中毫秒级返回。仅影响 /v1/images/proxy/... 的出口字节,不改原图。
 	Upscale string `json:"upscale,omitempty"`
+	WaitForResult   *bool    `json:"wait_for_result,omitempty"`  // false=立即返回 task_id,客户端自行轮询
 }
 
 // ImageGenData 单张图响应。
@@ -88,6 +89,85 @@ type ImageGenResponse struct {
 	Created int64          `json:"created"`
 	Data    []ImageGenData `json:"data"`
 	TaskID  string         `json:"task_id,omitempty"`
+}
+
+type imageAsyncJob struct {
+	TaskID        string
+	UserID        uint64
+	KeyID         uint64
+	ModelID       uint64
+	UpstreamModel string
+	Prompt        string
+	N             int
+	MaxAttempts   int
+	References    []image.ReferenceImage
+	Cost          int64
+	RefID         string
+	IP            string
+	UA            string
+}
+
+func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
+	go func() {
+		startAt := time.Now()
+		rec := &usage.Log{
+			UserID:    job.UserID,
+			KeyID:     job.KeyID,
+			ModelID:   job.ModelID,
+			RequestID: job.RefID,
+			Type:      usage.TypeImage,
+			IP:        job.IP,
+			UA:        job.UA,
+		}
+		defer func() {
+			rec.DurationMs = int(time.Since(startAt).Milliseconds())
+			if rec.Status == "" {
+				rec.Status = usage.StatusFailed
+			}
+			if h.Usage != nil {
+				h.Usage.Write(rec)
+			}
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+		defer cancel()
+
+		res := h.Runner.Run(ctx, image.RunOptions{
+			TaskID:        job.TaskID,
+			UserID:        job.UserID,
+			KeyID:         job.KeyID,
+			ModelID:       job.ModelID,
+			UpstreamModel: job.UpstreamModel,
+			Prompt:        job.Prompt,
+			N:             job.N,
+			MaxAttempts:   job.MaxAttempts,
+			References:    job.References,
+		})
+		rec.AccountID = res.AccountID
+
+		if res.Status != image.StatusSuccess {
+			rec.Status = usage.StatusFailed
+			rec.ErrorCode = ifEmpty(res.ErrorCode, "upstream_error")
+			if job.Cost > 0 && h.Billing != nil {
+				_ = h.Billing.Refund(context.Background(), job.UserID, job.KeyID, job.Cost, job.RefID, "image async refund")
+			}
+			return
+		}
+
+		if job.Cost > 0 && h.Billing != nil {
+			if err := h.Billing.Settle(context.Background(), job.UserID, job.KeyID, job.Cost, job.Cost, job.RefID, "image async settle"); err != nil {
+				logger.L().Error("billing settle async image", zap.Error(err), zap.String("ref", job.RefID))
+			}
+		}
+		if h.Keys != nil && h.Keys.DAO() != nil {
+			_ = h.Keys.DAO().TouchUsage(context.Background(), job.KeyID, job.IP, job.Cost)
+		}
+		if h.DAO != nil {
+			_ = h.DAO.UpdateCost(context.Background(), job.TaskID, job.Cost)
+		}
+		rec.Status = usage.StatusSuccess
+		rec.CreditCost = job.Cost
+	}()
 }
 
 // ImageGenerations POST /v1/images/generations。
@@ -131,7 +211,11 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		IP:        c.ClientIP(),
 		UA:        c.Request.UserAgent(),
 	}
+	writeUsageOnReturn := true
 	defer func() {
+		if !writeUsageOnReturn {
+			return
+		}
 		rec.DurationMs = int(time.Since(startAt).Milliseconds())
 		if rec.Status == "" {
 			rec.Status = usage.StatusFailed
@@ -251,6 +335,34 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	if len(refs) > 0 {
 		maxAttempts = 1
 	}
+	waitForResult := true
+	if req.WaitForResult != nil {
+		waitForResult = *req.WaitForResult
+	}
+	if !waitForResult {
+		writeUsageOnReturn = false
+		h.runImageTaskAsync(imageAsyncJob{
+			TaskID:        taskID,
+			UserID:        ak.UserID,
+			KeyID:         ak.ID,
+			ModelID:       m.ID,
+			UpstreamModel: m.UpstreamModelSlug,
+			Prompt:        maybeAppendClaritySuffix(req.Prompt),
+			N:             req.N,
+			MaxAttempts:   maxAttempts,
+			References:    refs,
+			Cost:          cost,
+			RefID:         refID,
+			IP:            c.ClientIP(),
+			UA:            c.Request.UserAgent(),
+		})
+		c.JSON(http.StatusAccepted, ImageGenResponse{
+			Created: time.Now().Unix(),
+			TaskID:  taskID,
+			Data:    []ImageGenData{},
+		})
+		return
+	}
 
 	res := h.Runner.Run(runCtx, image.RunOptions{
 		TaskID:        taskID,
@@ -354,14 +466,14 @@ func (h *ImagesHandler) ImageTask(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"task_id":          t.TaskID,
-		"status":           t.Status,
-		"conversation_id":  t.ConversationID,
-		"created":          t.CreatedAt.Unix(),
-		"finished_at":      nullableUnix(t.FinishedAt),
-		"error":            t.Error,
-		"credit_cost":      t.CreditCost,
-		"data":             data,
+		"task_id":         t.TaskID,
+		"status":          t.Status,
+		"conversation_id": t.ConversationID,
+		"created":         t.CreatedAt.Unix(),
+		"finished_at":     nullableUnix(t.FinishedAt),
+		"error":           t.Error,
+		"credit_cost":     t.CreditCost,
+		"data":            data,
 	})
 }
 

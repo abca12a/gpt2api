@@ -56,7 +56,7 @@ type RunOptions struct {
 
 // RunResult 是单次生图的输出。
 type RunResult struct {
-	Status         string   // success / failed
+	Status         string // success / failed
 	ConversationID string
 	AccountID      uint64
 	FileIDs        []string // chatgpt.com 侧的原始 ref("sed:" 前缀表示 sediment)
@@ -177,7 +177,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		DeviceID:  lease.DeviceID,
 		SessionID: lease.SessionID,
 		ProxyURL:  lease.ProxyURL,
-		Cookies:   "", // 目前不从 oai_account_cookies 加载,后续 M3+ 再做
+		Cookies:   lease.Cookies,
 	})
 	if err != nil {
 		return false, ErrUnknown, fmt.Errorf("chatgpt client: %w", err)

@@ -137,6 +137,7 @@ export interface ImageTask {
   conversation_id?: string
   error?: string
   credit_cost: number
+  is_preview?: boolean
   image_urls: string[]
   file_ids?: string[]
   created_at: string
@@ -244,6 +245,7 @@ export interface PlayImageRequest {
   // 本地 Catmull-Rom 高清放大档位:"" 原图 / "2k" 长边 2560 / "4k" 长边 3840。
   // 服务端仅保存标记,放大在图片代理 URL 首次被请求时做,PNG 输出并进程内缓存。
   upscale?: '' | '2k' | '4k'
+  wait_for_result?: boolean
 }
 
 export interface PlayImageData {

@@ -5,12 +5,14 @@ import { storeToRefs } from 'pinia'
 import { useUserStore } from '@/stores/user'
 import { formatCredit } from '@/utils/format'
 import {
+  getMyImageTask,
   listMyModels,
   streamPlayChat,
   playGenerateImage,
   type SimpleModel,
   type PlayChatMessage,
   type PlayImageData,
+  type ImageTask,
 } from '@/api/me'
 import { ENABLE_CHAT_MODEL } from '@/config/feature'
 
@@ -335,6 +337,78 @@ function useT2iExample(p: string) {
   t2iPrompt.value = applyRatioPrefix(p, t2iRatio.value)
 }
 
+const IMAGE_TASK_POLL_INTERVAL = 3000
+const IMAGE_TASK_POLL_TIMEOUT = 6 * 60 * 1000
+
+function formatImageTaskError(code?: string) {
+  switch (code || '') {
+    case 'turnstile_required':
+      return '上游触发 Turnstile 风控，请稍后重试或更换账号'
+    case 'rate_limited':
+      return '上游风控限流，请稍后再试'
+    case 'poll_timeout':
+      return '上游出图超时，请稍后重试'
+    case 'no_available_account':
+      return '账号池暂无可用图片账号，请稍后再试'
+    case 'preview_only':
+      return '上游仅返回预览图，请稍后重试'
+    case 'upstream_error':
+      return '上游图片任务失败，常见原因是 Turnstile 风控或图片链路波动'
+    case 'download_failed':
+      return '图片已生成，但下载地址获取失败，请稍后重试'
+    case 'unknown':
+      return '图片生成失败，请稍后重试'
+    default:
+      return code ? `图片生成失败(${code})` : '图片生成失败，请稍后重试'
+  }
+}
+
+function sleepWithSignal(ms: number, signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new Error('已停止')
+  }
+  return new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      window.clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      reject(new Error('已停止'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function taskToPlayImages(task: ImageTask): PlayImageData[] {
+  return (task.image_urls || []).map((url, idx) => ({
+    url,
+    file_id: task.file_ids?.[idx],
+  }))
+}
+
+async function waitForImageTask(taskID: string, signal?: AbortSignal) {
+  const deadline = Date.now() + IMAGE_TASK_POLL_TIMEOUT
+  while (Date.now() < deadline) {
+    if (signal?.aborted) {
+      throw new Error('已停止')
+    }
+    const task = await getMyImageTask(taskID)
+    if (task.status === 'success') {
+      return {
+        data: taskToPlayImages(task),
+        is_preview: !!task.is_preview,
+      }
+    }
+    if (task.status === 'failed') {
+      throw new Error(formatImageTaskError(task.error))
+    }
+    await sleepWithSignal(IMAGE_TASK_POLL_INTERVAL, signal)
+  }
+  throw new Error('等待图片生成超时，请稍后在使用记录里查看任务结果')
+}
+
 async function sendText2Img() {
   const prompt = t2iPrompt.value.trim()
   if (!prompt) {
@@ -350,16 +424,20 @@ async function sendText2Img() {
   t2iResult.value = []
   t2iAbort.value = new AbortController()
   try {
-    const resp = await playGenerateImage(
+    const submit = await playGenerateImage(
       {
         model: selectedImageModel.value,
         prompt,
         n: t2iN.value,
         size: t2iSize.value,
         upscale: t2iUpscale.value || undefined,
+        wait_for_result: false,
       },
       t2iAbort.value.signal,
     )
+    const resp = submit.task_id
+      ? await waitForImageTask(submit.task_id, t2iAbort.value.signal)
+      : submit
     t2iResult.value = resp.data || []
     if (t2iResult.value.length === 0) {
       t2iError.value = '未产出图片,请重试或更换描述'
@@ -469,7 +547,7 @@ async function sendImg2Img() {
   i2iResult.value = []
   i2iAbort.value = new AbortController()
   try {
-    const resp = await playGenerateImage(
+    const submit = await playGenerateImage(
       {
         model: selectedImageModel.value,
         prompt: i2iPrompt.value.trim(),
@@ -477,9 +555,13 @@ async function sendImg2Img() {
         size: i2iSize.value,
         reference_images: refImages.value.map((r) => r.dataUrl),
         upscale: i2iUpscale.value || undefined,
+        wait_for_result: false,
       },
       i2iAbort.value.signal,
     )
+    const resp = submit.task_id
+      ? await waitForImageTask(submit.task_id, i2iAbort.value.signal)
+      : submit
     i2iResult.value = resp.data || []
     if (i2iResult.value.length > 0) {
       ElMessage.success(`生成成功,共 ${i2iResult.value.length} 张`)

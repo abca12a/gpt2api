@@ -1,11 +1,11 @@
 // Package scheduler 负责 chatgpt.com 账号的并发安全调度。
 //
 // 核心规则(参考 RISK_AND_SAAS.md):
-//   1. 一号一锁:同账号同时只允许 1 个请求占用(Redis SETNX)。
-//   2. 最小间隔:同账号相邻请求 >= min_interval_sec。
-//   3. 每日配额:today_used_count < daily_image_quota * daily_usage_ratio。
-//   4. 状态机:healthy -> warned -> throttled -> suspicious -> dead,冷却过期自动恢复。
-//   5. 选择策略:status=healthy + cooldown 到期 + last_used_at 最早的优先。
+//  1. 一号一锁:同账号同时只允许 1 个请求占用(Redis SETNX)。
+//  2. 最小间隔:同账号相邻请求 >= min_interval_sec。
+//  3. 每日配额:today_used_count < daily_image_quota * daily_usage_ratio。
+//  4. 状态机:healthy -> warned -> throttled -> suspicious -> dead,冷却过期自动恢复。
+//  5. 选择策略:status=healthy + cooldown 到期 + last_used_at 最早的优先。
 package scheduler
 
 import (
@@ -32,6 +32,7 @@ var ErrNoAvailable = errors.New("scheduler: no available account")
 type Lease struct {
 	Account     *account.Account
 	AuthToken   string // 已解密
+	Cookies     string // oai_account_cookies 明文(JSON),可为空
 	ProxyURL    string // 已带密码
 	ProxyID     uint64
 	DeviceID    string
@@ -253,6 +254,12 @@ func (s *Scheduler) tryLock(ctx context.Context, acc *account.Account) (*Lease, 
 		_ = s.lock.Release(ctx, key, token)
 		return nil, fmt.Errorf("decrypt auth_token: %w", err)
 	}
+	cookies, err := s.accSvc.DecryptCookies(ctx, acc.ID)
+	if err != nil {
+		logger.L().Warn("scheduler decrypt cookies failed",
+			zap.Uint64("account_id", acc.ID), zap.Error(err))
+		cookies = ""
+	}
 
 	// 首次使用时为账号补发一个持久化的 oai_device_id(导入时常为空)。
 	// chatgpt.com 要求请求头带 oai-device-id,等同于浏览器首访拿到的 oai-did cookie;
@@ -298,6 +305,7 @@ func (s *Scheduler) tryLock(ctx context.Context, acc *account.Account) (*Lease, 
 	lease := &Lease{
 		Account:   accCopy,
 		AuthToken: authToken,
+		Cookies:   cookies,
 		ProxyURL:  proxyURL,
 		ProxyID:   proxyID,
 		DeviceID:  deviceID,
