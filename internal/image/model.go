@@ -33,7 +33,6 @@ const (
 	ErrPOWFailed       = "pow_failed"
 	ErrTurnstile       = "turnstile_required"
 	ErrUpstream        = "upstream_error"
-	ErrPreviewOnly     = "preview_only" // 非灰度桶,未产出 IMG2 终稿
 	ErrPollTimeout     = "poll_timeout"
 	ErrDownload        = "download_failed"
 	ErrInvalidResponse = "invalid_response"

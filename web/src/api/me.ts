@@ -253,8 +253,6 @@ export interface PlayImageResponse {
   created: number
   task_id?: string
   data: PlayImageData[]
-  /** true = 本次账号未命中 IMG2 灰度,返回的是 IMG1 预览图。前端应给用户软提示。 */
-  is_preview?: boolean
 }
 
 // 注意:返回是"裸 OpenAI 结构",不走我们的 ApiEnvelope,所以用 fetch。

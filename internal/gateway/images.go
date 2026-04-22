@@ -82,9 +82,6 @@ type ImageGenResponse struct {
 	Created int64          `json:"created"`
 	Data    []ImageGenData `json:"data"`
 	TaskID  string         `json:"task_id,omitempty"`
-	// IsPreview=true 表示本次账号未命中 IMG2 灰度,返回的是 IMG1 预览图。
-	// 前端可据此给用户一个"本次未使用 IMG2 生成"之类的软提示。
-	IsPreview bool `json:"is_preview,omitempty"`
 }
 
 // ImageGenerations POST /v1/images/generations。
@@ -112,7 +109,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		req.N = 1
 	}
 	if req.N > 4 {
-		req.N = 4 // 目前上游灰度一次只产 1-4 张,保守上限
+		req.N = 4 // 目前 IMG2 终稿单轮稳定产出 1-4 张,保守上限
 	}
 	if req.Size == "" {
 		req.Size = "1024x1024"
@@ -236,11 +233,12 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 
 	// 5) 执行(同步阻塞)
 	//
-	// 单请求硬上限 6 分钟:单个 attempt 5 分钟 + 可能的 preview_only 重试余量。
-	runCtx, cancel := context.WithTimeout(c.Request.Context(), 6*time.Minute)
+	// 单请求硬上限 3 分钟:Runner 默认 per-attempt 2 分钟,留出 1 分钟给
+	// 账号调度 + 签名 URL 换取等周边耗时。IMG2 已正式上线,不再做 preview_only 重试。
+	runCtx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Minute)
 	defer cancel()
 
-	// 带参考图时,灰度没什么意义,只留 1 次尝试避免重复上传参考图。
+	// 带参考图时,多轮重试没什么意义(反而会重复上传参考图),只留 1 次尝试。
 	maxAttempts := 2
 	if len(refs) > 0 {
 		maxAttempts = 1
@@ -292,10 +290,9 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 
 	// 9) 响应:URL 统一走自家代理,防止 chatgpt.com estuary/content 防盗链
 	out := ImageGenResponse{
-		Created:   time.Now().Unix(),
-		TaskID:    taskID,
-		IsPreview: res.IsPreview,
-		Data:      make([]ImageGenData, 0, len(res.SignedURLs)),
+		Created: time.Now().Unix(),
+		TaskID:  taskID,
+		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
 	for i := range res.SignedURLs {
 		d := ImageGenData{URL: BuildImageProxyURL(taskID, i, ImageProxyTTL)}
@@ -446,7 +443,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		})
 	}
 
-	runCtx, cancel := context.WithTimeout(c.Request.Context(), 6*time.Minute)
+	runCtx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Minute)
 	defer cancel()
 
 	res := h.Runner.Run(runCtx, image.RunOptions{
@@ -486,10 +483,6 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 
 	// 以 chat 响应返回(content 里内嵌 markdown 图片)。
 	var sb strings.Builder
-	if res.IsPreview {
-		// 未命中 IMG2 灰度,只能返回 IMG1 预览,给用户一个明确的软提示
-		sb.WriteString("> ⚠️ 本次未使用 IMG2 灰度生成,仅返回预览图。\n\n")
-	}
 	for i := range res.SignedURLs {
 		if i > 0 {
 			sb.WriteString("\n\n")
@@ -546,8 +539,6 @@ func localizeImageErr(code, raw string) string {
 		zh = "账号池暂无可用账号,请稍后重试"
 	case image.ErrRateLimited:
 		zh = "上游风控,请稍后再试"
-	case image.ErrPreviewOnly:
-		zh = "上游仅返回预览,请稍后重试(已尝试切换账号)"
 	case image.ErrUnknown, "":
 		zh = "图片生成失败"
 	case "upstream_error":
@@ -804,10 +795,9 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	}
 
 	out := ImageGenResponse{
-		Created:   time.Now().Unix(),
-		TaskID:    taskID,
-		IsPreview: res.IsPreview,
-		Data:      make([]ImageGenData, 0, len(res.SignedURLs)),
+		Created: time.Now().Unix(),
+		TaskID:  taskID,
+		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
 	for i := range res.SignedURLs {
 		d := ImageGenData{URL: BuildImageProxyURL(taskID, i, ImageProxyTTL)}
