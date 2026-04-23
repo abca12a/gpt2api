@@ -49,8 +49,8 @@ type RunOptions struct {
 	Prompt            string
 	N                 int              // 期望返回的图片张数;够数 Poll 就立即返回(速度优先)
 	MaxAttempts       int              // 跨账号重试次数,仅用于无账号/限流等硬错误,默认 1
-	PerAttemptTimeout time.Duration    // 单次尝试总超时,默认 2min
-	PollMaxWait       time.Duration    // SSE 没直出时,轮询 conversation 的最长等待,默认 60s
+	PerAttemptTimeout time.Duration    // 单次尝试总超时,默认 6min(覆盖 SSE + PollMaxWait + 缓冲)
+	PollMaxWait       time.Duration    // SSE 没直出时,轮询 conversation 的最长等待,默认 300s
 	References        []ReferenceImage // 图生图/编辑:参考图
 }
 
@@ -77,10 +77,10 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 		opt.MaxAttempts = 1
 	}
 	if opt.PerAttemptTimeout <= 0 {
-		opt.PerAttemptTimeout = 2 * time.Minute
+		opt.PerAttemptTimeout = 6 * time.Minute
 	}
 	if opt.PollMaxWait <= 0 {
-		opt.PollMaxWait = 60 * time.Second
+		opt.PollMaxWait = 300 * time.Second
 	}
 	if opt.UpstreamModel == "" {
 		// 对齐浏览器抓包 + 参考实现:图像走 f/conversation 时 model 字段和

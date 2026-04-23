@@ -85,7 +85,7 @@
 | 分类 | 能力 |
 |------|------|
 | **上游协议** | 完整逆向 `chatgpt.com` `f/conversation` 两步 sentinel(`/prepare` + `/finalize`)、PoW、`conduit_token`、全套 `oai-*` / `Sec-Ch-Ua-*` 指纹头 |
-| **图片生成** | 文生图、**图生图 / 多图参考**、**IMG2 正式版直出**(速度优先,SSE 够数即返回,60s 短轮询补齐)、**本地 2K/4K PNG 高清放大**(Catmull-Rom 插值,按需触发 + 进程内 LRU)、轮询 + SSE 直出双通道 |
+| **图片生成** | 文生图、**图生图 / 多图参考**、**IMG2 正式版直出**(速度优先,SSE 够数即返回,最长 300s 补齐轮询兜底)、**本地 2K/4K PNG 高清放大**(Catmull-Rom 插值,按需触发 + 进程内 LRU)、轮询 + SSE 直出双通道 |
 | **账号池** | JSON / AT / RT / ST 四种方式批量导入,**自动刷新**、**额度探测**、**风控熔断**、按账号稳定绑定 `oai-device-id` / `oai-session-id` |
 | **代理池** | 支持 HTTP / SOCKS5,健康分自动探测,按账号强绑定代理,避免 IP 指纹混用 |
 | **调度器** | 串行 lease + Redis 分布式锁,`min_interval_sec` 单号最小间隔、`daily_usage_ratio` 日熔断、`cooldown_429_sec` 限速退避 |
@@ -182,7 +182,7 @@ flowchart LR
 3. Scheduler 从账号池挑一个 `idle` 且满足 `min_interval_sec` 的账号,拿 Redis 锁建立 lease;
 4. 通过账号绑定的代理,走 `utls` TLS 指纹,按真实 Edge 143 浏览器的 header/payload 访问 `chatgpt.com`;
 5. 两步 sentinel 换 chat-requirements token → `/f/conversation/prepare` 拿 `conduit_token` → SSE 上游生图;
-6. 解析 tool message 拿 `fids` / `sids`,够 N 张立即短路下载,不够再短轮询 60s 补齐;
+6. 解析 tool message 拿 `fids` / `sids`,够 N 张立即短路下载,不够再短轮询最多 300s 补齐;
 7. 所有图片 URL 经 HMAC 签名,返回 `https://<your-domain>/p/img/<task>/<idx>?exp=…&sig=…`;
 8. 扣费结算 + 写 usage_logs + 释放 lease + 更新账号状态。
 
@@ -296,11 +296,22 @@ docker compose logs -f server
 2. 跑 `goose up` 应用全部迁移(用户 / 账号 / 审计 / 备份元数据等十余张表);
 3. 启动 HTTP 服务 `:8080`。
 
+> ### ⚠️ 没有默认账号 / 密码 —— 首位注册者自动成为管理员
+>
+> **本项目 *不* 预置任何"默认管理员账号"或"默认密码"。** 部署起来后请按以下步骤走:
+>
+> 1. 浏览器打开 **`http://<服务器IP>:8080/register`**
+> 2. 用自己的邮箱 + 自设密码完成第一次注册
+> 3. **这第一个账号会自动拿到 `admin` 角色**(见 `internal/auth/service.go` 的 `Register` Bootstrap 规则)
+> 4. 之后再注册的账号都是普通用户
+> 5. 首位 admin 登录后,强烈建议去**管理后台 → 系统设置**把"允许开放注册"关掉,避免被陌生人占用
+>
+> 如果你在网上看到"Admin123456" / "admin@smoke.test" 这类字样,那是 `scripts/smoke.mjs` 冒烟测试脚本自己创建测试账号时用的参数,**与部署默认凭证无关**。
+
 ### 5. 首次登录
 
 - 前端站点地址:`http://<服务器IP>:8080/`
-- **本项目不内置任何默认账号密码**。采用"**首位注册者自动为 admin**"的 Bootstrap 机制(见 `internal/auth/service.go` 中的 `Register`)—— 第一次访问站点时直接打开 `http://<服务器IP>:8080/register` 完成注册,这个账号自动获得 `admin` 角色,后续注册都只是普通用户。
-- 完成首位 admin 注册后,强烈建议在**管理后台 → 系统设置**里关闭"允许开放注册",避免陌生人自助注册占用资源。
+- 按上面的 ⚠️ 框完成首位 admin 注册即可登录。
 - 忘记管理员密码、或需要把某个普通用户提权为 admin,见「FAQ · 管理员密码找回 / 提权」。
 
 ### 6. 日常更新流程速查
@@ -441,7 +452,7 @@ curl https://your-domain.com/v1/images/tasks/img_xxx \
 `chatgpt.com` 的 **IMG2 管线已正式上线**:Plus / Team 账号单次调用可返回 1~2 张高清图,体感就是**出图更快、画质更好**。`gpt2api` 的生图链路已全面对齐正式版协议,不再做"灰度命中判定 / preview_only 重试"这类节流:
 
 - **速度优先**:SSE 里出现 `file-service` / `sediment` 引用立即下载,**不等齐 N 张**;
-- **单轮单账号**:一次 `f/conversation` 最多短轮询 60 秒补齐,超时仍有 ≥ 1 张也按成功返回;
+- **单轮单账号**:一次 `f/conversation` SSE 之后最多再短轮询 300 秒补齐(per-attempt 总上限 6 分钟,外层 handler 上限 7 分钟),超时仍有 ≥ 1 张也按成功返回;
 - **硬错误才切账号**:只有 `rate_limited` / `no_available_account` / `auth_required` 才会触发一次跨账号重试,其他错误直接暴露给调用方便于排障。
 
 #### 如何判断本次成功出图?
@@ -455,7 +466,7 @@ image runner poll done                   poll_status=success poll_fids=[file_xxx
 image runner result summary              refs=[...] signed_count=2
 ```
 
-如果 Poll 超时(60s 内没拿到任何图),会直接落到 `poll_timeout`,不再悄悄换账号重试。
+如果 Poll 超时(默认 300 秒内没拿到任何图),会直接落到 `poll_timeout`,不再悄悄换账号重试。
 
 #### 数据库里复盘
 
@@ -730,7 +741,7 @@ chatgpt.com 的实际上游 slug 会随账号等级微调(例如 Plus 用 `gpt-5
 <details>
 <summary><b>Q2. 出图偶尔 poll_timeout 怎么办?</b></summary>
 
-IMG2 正式上线后,`gpt2api` 默认 SSE 解析完成后最多短轮询 60 秒补齐图片。如果依然没拿到任何 `file-service` / `sediment` 引用,会直接抛 `poll_timeout` 给调用方,**不会再悄悄换账号重试**(那样只会吞掉用户时间)。常见处理:
+IMG2 正式上线后,`gpt2api` 默认 SSE 解析完成后最多短轮询 **300 秒**补齐图片(per-attempt 硬上限 6 分钟,handler 硬上限 7 分钟)。如果依然没拿到任何 `file-service` / `sediment` 引用,会直接抛 `poll_timeout` 给调用方,**不会再悄悄换账号重试**(那样只会吞掉用户时间)。常见处理:
 
 1. 在「管理后台 → GPT账号」对该账号做「全部探测」,确认代理 / 账号本身可用;
 2. 把长期 `poll_timeout` 的账号绑定到更快的代理,或移出主力池;

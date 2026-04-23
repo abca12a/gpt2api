@@ -500,7 +500,7 @@ func ExtractImageToolMsgs(mapping map[string]interface{}) []ImageToolMsg {
 type PollOpts struct {
 	BaselineToolIDs map[string]struct{} // 发送前已存在的 tool 消息 id,本次回合只看新增
 	ExpectedN       int                 // 期望返回的图片张数,够了立即短路,默认 1
-	MaxWait         time.Duration       // 总超时,默认 60s
+	MaxWait         time.Duration       // 总超时,默认 300s(上游渲染慢时兜底补齐)
 	Interval        time.Duration       // 轮询间隔,默认 3s
 }
 
@@ -522,7 +522,7 @@ func (c *Client) PollConversationForImages(ctx context.Context, convID string, o
 		opt.ExpectedN = 1
 	}
 	if opt.MaxWait <= 0 {
-		opt.MaxWait = 60 * time.Second
+		opt.MaxWait = 300 * time.Second
 	}
 	if opt.Interval <= 0 {
 		opt.Interval = 3 * time.Second
