@@ -44,15 +44,7 @@ type taskView struct {
 
 func toView(t *Task) taskView {
 	fids := t.DecodeFileIDs()
-	urls := t.DecodeResultURLs()
-	count := len(urls)
-	if count == 0 {
-		count = len(fids)
-	}
-	proxyURLs := make([]string, 0, count)
-	for i := 0; i < count; i++ {
-		proxyURLs = append(proxyURLs, BuildImageProxyURL(t.TaskID, i, ImageProxyTTL))
-	}
+	imageURLs := BuildTaskImageURLs(t, ImageProxyTTL)
 	isPreview := len(fids) > 0
 	for _, id := range fids {
 		if !IsPreviewRef(id) {
@@ -67,8 +59,8 @@ func toView(t *Task) taskView {
 		ID: t.ID, TaskID: t.TaskID, UserID: t.UserID, ModelID: t.ModelID,
 		AccountID: t.AccountID, Prompt: t.Prompt, N: t.N, Size: t.Size,
 		Upscale: t.Upscale,
-		Status: t.Status, ConversationID: t.ConversationID, Error: t.Error,
-		CreditCost: t.CreditCost, IsPreview: isPreview, ImageURLs: proxyURLs, FileIDs: fids,
+		Status:  t.Status, ConversationID: t.ConversationID, Error: t.Error,
+		CreditCost: t.CreditCost, IsPreview: isPreview, ImageURLs: imageURLs, FileIDs: fids,
 		CreatedAt: t.CreatedAt, StartedAt: t.StartedAt, FinishedAt: t.FinishedAt,
 	}
 }

@@ -46,7 +46,7 @@ func (h *AdminHandler) List(c *gin.Context) {
 		return
 	}
 
-	// 把 result_urls JSON bytes 解成可读字符串数组后输出
+	// 把任务图片转成前端可加载的本站签名代理 URL。
 	type rowOut struct {
 		AdminTaskRow
 		ResultURLsParsed []string `json:"result_urls_parsed"`
@@ -55,7 +55,7 @@ func (h *AdminHandler) List(c *gin.Context) {
 	for _, r := range rows {
 		out = append(out, rowOut{
 			AdminTaskRow:     r,
-			ResultURLsParsed: r.DecodeResultURLs(),
+			ResultURLsParsed: BuildTaskImageURLs(&r.Task, ImageProxyTTL),
 		})
 	}
 

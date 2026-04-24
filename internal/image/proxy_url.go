@@ -41,6 +41,31 @@ func BuildImageProxyURL(taskID string, idx int, ttl time.Duration) string {
 	return fmt.Sprintf("/p/img/%s/%d?exp=%d&sig=%s", taskID, idx, expMs, sig)
 }
 
+// BuildTaskImageURLs 返回任务对前端可展示的图片 URL。
+// 有 file_ids 的任务统一返回本站签名代理 URL,避免后台/个人历史页直接暴露
+// 上游短期直链导致刷新后 403、过期或缺少鉴权而加载失败。
+// 极老任务若没有 file_ids,则保留 result_urls 作为兼容兜底。
+func BuildTaskImageURLs(t *Task, ttl time.Duration) []string {
+	if t == nil {
+		return nil
+	}
+	fids := t.DecodeFileIDs()
+	urls := t.DecodeResultURLs()
+	count := len(fids)
+	if len(urls) > count {
+		count = len(urls)
+	}
+	out := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		if i < len(fids) {
+			out = append(out, BuildImageProxyURL(t.TaskID, i, ttl))
+			continue
+		}
+		out = append(out, urls[i])
+	}
+	return out
+}
+
 // VerifyImageProxySig 校验图片代理 URL 的 HMAC 签名和过期时间。
 func VerifyImageProxySig(taskID string, idx int, expMs int64, sig string) bool {
 	if expMs < time.Now().UnixMilli() {
