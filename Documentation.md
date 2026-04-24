@@ -7,6 +7,13 @@
 
 ## 最近变更
 
+### 2026-04-24 CLIProxyAPI 账号导入 gpt2api
+
+- 结论：`/home/ubuntu/CLIProxyAPI/200.zip` 当前未在服务器文件系统中找到；本次改用已存在的 `/home/ubuntu/CLIProxyAPI/auths/*.json` 作为账号来源。
+- 决策：通过 gpt2api 项目自身 `internal/account.Service.ImportBatch` 逻辑导入账号，而不是直接拼 SQL，确保 `AT / RT` 按当前 `CRYPTO_AES_KEY` 加密，重复邮箱按现有导入规则更新。
+- 结果：识别并导入 14 个账号文件，14 个新建、0 个失败；导入后 `oai_accounts` 总数为 15，未删除账号数为 15。
+- 边界：本次只导入了 `auths` 目录下实际存在的 14 个 JSON 账号；没有导入不存在的 `200.zip`，也没有把 token 明文写入仓库或日志。
+
 ### 2026-04-24 gpt2api 外网主页分流修正
 
 - 结论：`https://lmage2.dimilinks.com/` 已恢复为 gpt2api 项目主页；`https://cliproxyapi.845817074.xyz/` 继续进入 CLIProxyAPI。
