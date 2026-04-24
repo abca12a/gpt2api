@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +16,12 @@ import (
 	"github.com/432539/gpt2api/pkg/logger"
 )
 
+// QuotaDecrementor 允许 Runner 在生图成功后立即扣减账号剩余额度,
+// 无需等待下一次后台探测即可在前端看到正确数字。
+type QuotaDecrementor interface {
+	DecrQuota(ctx context.Context, accountID uint64, n int) error
+}
+
 // Runner 单次/多次生图的执行器。封装完整的 chatgpt.com 协议链路:
 //
 //	ChatRequirements → PrepareFConversation → StreamFConversation (SSE) →
@@ -23,14 +30,18 @@ import (
 // IMG2 已正式上线,不再做"灰度命中判定 / preview_only 换账号重试"这些节流操作,
 // 拿到任意 file-service / sediment 引用即算成功,以速度和效率优先。
 type Runner struct {
-	sched *scheduler.Scheduler
-	dao   *DAO
+	sched     *scheduler.Scheduler
+	dao       *DAO
+	quotaDecr QuotaDecrementor // 生图成功后立即扣减账号额度(可空,空时跳过)
 }
 
 // NewRunner 构造 Runner。
 func NewRunner(sched *scheduler.Scheduler, dao *DAO) *Runner {
 	return &Runner{sched: sched, dao: dao}
 }
+
+// SetQuotaDecrementor 注入额度扣减器。
+func (r *Runner) SetQuotaDecrementor(qd QuotaDecrementor) { r.quotaDecr = qd }
 
 // ReferenceImage 是图生图/编辑的一张参考图输入。
 // 只需要提供原始字节 + 可选的文件名,Runner 会在运行时调用 chatgpt Client 上传。
@@ -45,12 +56,12 @@ type RunOptions struct {
 	UserID            uint64
 	KeyID             uint64
 	ModelID           uint64
-	UpstreamModel     string           // 默认 "auto"(由上游根据 system_hints 挑选图像模型)
+	UpstreamModel     string // 默认 "auto"(由上游根据 system_hints 挑选图像模型)
 	Prompt            string
 	N                 int              // 期望返回的图片张数;够数 Poll 就立即返回(速度优先)
 	MaxAttempts       int              // 跨账号重试次数,仅用于无账号/限流等硬错误,默认 1
-	PerAttemptTimeout time.Duration    // 单次尝试总超时,默认 2min
-	PollMaxWait       time.Duration    // SSE 没直出时,轮询 conversation 的最长等待,默认 60s
+	PerAttemptTimeout time.Duration    // 单次尝试总超时,默认 6min(覆盖 SSE + PollMaxWait + 缓冲)
+	PollMaxWait       time.Duration    // SSE 没直出时,轮询 conversation 的最长等待,默认 300s
 	References        []ReferenceImage // 图生图/编辑:参考图
 }
 
@@ -69,23 +80,21 @@ type RunResult struct {
 }
 
 // Run 执行生图。会同步阻塞直到完成/失败;调用方自行做超时控制(传 ctx)。
+//
+// N > 1 时并发启动 N 个独立 goroutine,每个各自走完整链路出 1 张图,
+// 最终合并结果——比向单一会话请求 N 张快得多(ChatGPT f/conversation 每轮只产 1 张)。
 func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 	start := time.Now()
 	if opt.MaxAttempts <= 0 {
-		// 默认只跑 1 次,不为"没命中"做跨账号重试。
-		// 仅当首轮因为没调度到账号 / 账号被硬限流时,才会用 MaxAttempts>1 做 1 次换账号重试。
 		opt.MaxAttempts = 1
 	}
 	if opt.PerAttemptTimeout <= 0 {
-		opt.PerAttemptTimeout = 2 * time.Minute
+		opt.PerAttemptTimeout = 6 * time.Minute
 	}
 	if opt.PollMaxWait <= 0 {
-		opt.PollMaxWait = 60 * time.Second
+		opt.PollMaxWait = 300 * time.Second
 	}
 	if opt.UpstreamModel == "" {
-		// 对齐浏览器抓包 + 参考实现:图像走 f/conversation 时 model 字段和
-		// 普通 chat 一致用 "auto",通过 system_hints=["picture_v2"] 让上游知道
-		// 这是图像任务。硬写 "gpt-5-3" 在免费/新账号上会直接 404。
 		opt.UpstreamModel = "auto"
 	}
 	if opt.N <= 0 {
@@ -94,41 +103,52 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 
 	result := &RunResult{Status: StatusFailed, ErrorCode: ErrUnknown}
 
-	for attempt := 1; attempt <= opt.MaxAttempts; attempt++ {
-		result.Attempts = attempt
-		if err := ctx.Err(); err != nil {
-			result.ErrorCode = ErrUnknown
-			result.ErrorMessage = err.Error()
-			break
-		}
+	// 仅当有 DAO 和 taskID 时才落库
+	if r.dao != nil && opt.TaskID != "" {
+		_ = r.dao.MarkRunning(ctx, opt.TaskID, 0)
+	}
 
-		attemptCtx, cancel := context.WithTimeout(ctx, opt.PerAttemptTimeout)
-		ok, status, err := r.runOnce(attemptCtx, opt, result)
-		cancel()
+	if opt.N > 1 {
+		// 并发模式:N 个 goroutine 各独立出 1 张
+		r.runParallel(ctx, opt, start, result)
+	} else {
+		// 串行模式(原逻辑):带跨账号重试
+		for attempt := 1; attempt <= opt.MaxAttempts; attempt++ {
+			result.Attempts = attempt
+			if err := ctx.Err(); err != nil {
+				result.ErrorCode = ErrUnknown
+				result.ErrorMessage = err.Error()
+				break
+			}
 
-		if ok {
-			result.Status = StatusSuccess
-			result.ErrorCode = ""
-			result.ErrorMessage = ""
-			break
-		}
-		if err != nil {
-			result.ErrorMessage = err.Error()
-		}
-		result.ErrorCode = status
+			attemptCtx, cancel := context.WithTimeout(ctx, opt.PerAttemptTimeout)
+			ok, status, err := r.runOnce(attemptCtx, opt, result)
+			cancel()
 
-		// 仅对"账号级硬错误"做一次跨账号重试:限流 / 无账号 / 鉴权失败。
-		// 其他错误(poll 超时 / 上游 5xx / 网络错)直接抛给用户,不再悄悄吞掉时间。
-		if attempt >= opt.MaxAttempts {
-			break
+			if ok {
+				result.Status = StatusSuccess
+				result.ErrorCode = ""
+				result.ErrorMessage = ""
+				break
+			}
+			if err != nil {
+				result.ErrorMessage = err.Error()
+			}
+			result.ErrorCode = status
+
+			if attempt >= opt.MaxAttempts {
+				break
+			}
+			retryable := status == ErrRateLimited || status == ErrNoAccount ||
+				status == ErrAuthRequired || status == ErrNetworkTransient
+			if !retryable {
+				break
+			}
+			logger.L().Info("image runner retry with another account",
+				zap.String("task_id", opt.TaskID),
+				zap.String("reason", status),
+				zap.Int("attempt", attempt))
 		}
-		if status != ErrRateLimited && status != ErrNoAccount && status != ErrAuthRequired {
-			break
-		}
-		logger.L().Info("image runner retry with another account",
-			zap.String("task_id", opt.TaskID),
-			zap.String("reason", status),
-			zap.Int("attempt", attempt))
 	}
 
 	result.DurationMs = time.Since(start).Milliseconds()
@@ -138,11 +158,115 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 		if result.Status == StatusSuccess {
 			_ = r.dao.MarkSuccess(ctx, opt.TaskID, result.ConversationID,
 				result.FileIDs, result.SignedURLs, 0 /* credit_cost 由网关负责写 */)
+			if r.quotaDecr != nil && result.AccountID > 0 {
+				n := len(result.FileIDs)
+				if n == 0 {
+					n = opt.N
+				}
+				_ = r.quotaDecr.DecrQuota(context.Background(), result.AccountID, n)
+			}
 		} else {
 			_ = r.dao.MarkFailed(ctx, opt.TaskID, result.ErrorCode)
 		}
 	}
 	return result
+}
+
+// runParallel 并发启动 opt.N 个独立请求,每个各出 1 张图,最终合并到 result。
+// 只要有 ≥1 张成功就算整体成功;全部失败才返回失败。
+// 各 goroutine 不写 DAO(TaskID 置空),写库由外层 Run 统一完成。
+func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Time, result *RunResult) {
+	type subResult struct {
+		ok         bool
+		fileIDs    []string
+		signedURLs []string
+		convID     string
+		accountID  uint64
+		errCode    string
+		errMsg     string
+	}
+
+	n := opt.N
+	ch := make(chan subResult, n)
+
+	// 子任务:单张、不写 DAO
+	subOpt := opt
+	subOpt.N = 1
+	subOpt.TaskID = "" // 禁用 DAO,避免多 goroutine 互相覆盖
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sub := &RunResult{Status: StatusFailed, ErrorCode: ErrUnknown}
+			attemptCtx, cancel := context.WithTimeout(ctx, opt.PerAttemptTimeout)
+			defer cancel()
+			ok, status, err := r.runOnce(attemptCtx, subOpt, sub)
+			msg := ""
+			if err != nil {
+				msg = err.Error()
+			}
+			if !ok && status == "" {
+				status = sub.ErrorCode
+			}
+			ch <- subResult{
+				ok:         ok,
+				fileIDs:    sub.FileIDs,
+				signedURLs: sub.SignedURLs,
+				convID:     sub.ConversationID,
+				accountID:  sub.AccountID,
+				errCode:    status,
+				errMsg:     msg,
+			}
+		}()
+	}
+
+	// 等待全部完成后关闭 channel
+	go func() { wg.Wait(); close(ch) }()
+
+	var (
+		successCount int
+		lastErrCode  string
+		lastErrMsg   string
+	)
+	for sr := range ch {
+		if sr.ok {
+			successCount++
+			result.FileIDs = append(result.FileIDs, sr.fileIDs...)
+			result.SignedURLs = append(result.SignedURLs, sr.signedURLs...)
+			if result.ConversationID == "" {
+				result.ConversationID = sr.convID
+			}
+			if result.AccountID == 0 {
+				result.AccountID = sr.accountID
+			}
+		} else {
+			lastErrCode = sr.errCode
+			lastErrMsg = sr.errMsg
+		}
+	}
+	result.Attempts = n
+
+	if successCount > 0 {
+		result.Status = StatusSuccess
+		result.ErrorCode = ""
+		result.ErrorMessage = ""
+		logger.L().Info("image runner parallel done",
+			zap.String("task_id", opt.TaskID),
+			zap.Int("requested", n),
+			zap.Int("succeeded", successCount),
+			zap.Int("got_images", len(result.FileIDs)),
+		)
+	} else {
+		result.ErrorCode = lastErrCode
+		result.ErrorMessage = lastErrMsg
+		logger.L().Warn("image runner parallel all failed",
+			zap.String("task_id", opt.TaskID),
+			zap.Int("requested", n),
+			zap.String("last_err", lastErrCode),
+		)
+	}
 }
 
 // runOnce 一次完整的尝试。返回 (ok, errorCode, err)。
@@ -245,16 +369,18 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	messageID := uuid.NewString()
 
 	// 统一把 model 强制为 "auto":对齐参考实现(只通过 system_hints=["picture_v2"]
-	// 区分图像任务),避免 chatgpt-freeaccount / chatgpt-paid 之间的 model slug 差异。
+	// 区分图像任务)。
+	// 注意:免费账号(persona=chatgpt-freeaccount)也可以生成图片,只要 daily_image_quota > 0。
+	// 不再按 persona 拒绝请求;persona 仅做日志记录。
 	upstreamModel := "auto"
-	if opt.UpstreamModel != "" && opt.UpstreamModel != "auto" && !cr.IsFreeAccount() {
-		// 付费账号如果明确传了 upstream slug 且不是 auto,可以尊重用户传入
-		// (但我们现有模型库没有 image 专用 slug,保留扩展点)
-		upstreamModel = opt.UpstreamModel
-	} else if cr.IsFreeAccount() && opt.UpstreamModel != "" && opt.UpstreamModel != "auto" {
-		logger.L().Warn("image: free account requesting premium model, downgrade to auto",
-			zap.Uint64("account_id", lease.Account.ID),
-			zap.String("requested_model", opt.UpstreamModel))
+	if opt.UpstreamModel != "" && opt.UpstreamModel != "auto" {
+		if cr.IsFreeAccount() {
+			logger.L().Info("image: free account, force upstream model to auto",
+				zap.Uint64("account_id", lease.Account.ID),
+				zap.String("requested_model", opt.UpstreamModel))
+		} else {
+			upstreamModel = opt.UpstreamModel
+		}
 	}
 
 	// 5) 单轮 picture_v2:SSE 里直接给图就走 SSE 结果,没给就短轮询补一下。
@@ -420,8 +546,16 @@ func (r *Runner) classifyUpstream(err error) string {
 		}
 		return ErrUpstream
 	}
-	if strings.Contains(err.Error(), "deadline exceeded") {
+	msg := err.Error()
+	if strings.Contains(msg, "deadline exceeded") {
 		return ErrPollTimeout
+	}
+	// uTLS 握手被对端强制关闭 (EOF / connection reset) 属于瞬态网络故障,允许重试。
+	if strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "broken pipe") {
+		return ErrNetworkTransient
 	}
 	return ErrUpstream
 }

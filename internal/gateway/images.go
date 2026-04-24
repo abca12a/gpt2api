@@ -268,6 +268,14 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		}
 	}
 
+	// 若本地模型配置了外置渠道(OpenAI DALL·E / Gemini imagen 等),优先走渠道。
+	// 参考图场景(reference_images)仍走原 ChatGPT 账号池 Runner。
+	if h.Channels != nil {
+		if handled := h.dispatchImageToChannel(c, ak, m, &req, rec, ratio); handled {
+			return
+		}
+	}
+
 	// 3) 预扣(图像按定价,est = actual)
 	cost := billing.ComputeImageCost(m, req.N, ratio)
 	if cost > 0 {
@@ -325,9 +333,10 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 
 	// 5) 执行(同步阻塞)
 	//
-	// 单请求硬上限 3 分钟:Runner 默认 per-attempt 2 分钟,留出 1 分钟给
-	// 账号调度 + 签名 URL 换取等周边耗时。IMG2 已正式上线,不再做 preview_only 重试。
-	runCtx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Minute)
+	// 单请求硬上限 7 分钟:Runner 默认 per-attempt 6 分钟
+	// (SSE ~60s + PollMaxWait 300s + 缓冲),外层再留 1 分钟
+	// 给账号调度 + 签名 URL 换取等周边耗时。IMG2 已正式上线,不再做 preview_only 重试。
+	runCtx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
 	defer cancel()
 
 	// 带参考图时,多轮重试没什么意义(反而会重复上传参考图),只留 1 次尝试。
@@ -563,7 +572,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		})
 	}
 
-	runCtx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Minute)
+	runCtx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
 	defer cancel()
 
 	res := h.Runner.Run(runCtx, image.RunOptions{

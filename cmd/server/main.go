@@ -18,6 +18,7 @@ import (
 	"github.com/432539/gpt2api/internal/auth"
 	"github.com/432539/gpt2api/internal/backup"
 	"github.com/432539/gpt2api/internal/billing"
+	"github.com/432539/gpt2api/internal/channel"
 	"github.com/432539/gpt2api/internal/config"
 	"github.com/432539/gpt2api/internal/db"
 	"github.com/432539/gpt2api/internal/gateway"
@@ -109,6 +110,11 @@ func main() {
 		log.Warn("model preload failed", zap.Error(err))
 	}
 
+	channelDAO := channel.NewDAO(sqldb)
+	channelSvc := channel.NewService(channelDAO, cipher)
+	channelRouter := channel.NewRouter(channelSvc)
+	channelH := channel.NewHandler(channelSvc, channelRouter)
+
 	rl := lock.NewRedisLock(rdb)
 	sched := scheduler.New(accSvc, proxySvc, rl, cfg.Scheduler)
 
@@ -139,10 +145,12 @@ func main() {
 		Limiter:   limiter,
 		Usage:     usageLogger,
 		AccSvc:    accSvc,
+		Channels:  channelRouter,
 	}
 
 	imageDAO := image.NewDAO(sqldb)
 	imageRunner := image.NewRunner(sched, imageDAO)
+	imageRunner.SetQuotaDecrementor(accDAO) // 生图成功后立即扣减账号额度
 	imagesH := &gateway.ImagesHandler{
 		Handler: gwH,
 		Runner:  imageRunner,
@@ -172,6 +180,7 @@ func main() {
 	adminUsageH := usage.NewAdminHandler(usageQDAO)
 	meUsageH := usage.NewMeHandler(usageQDAO)
 	meImageH := image.NewMeHandler(imageDAO)
+	adminImageH := image.NewAdminHandler(imageDAO)
 
 	mailSvc := mailer.New(mailer.Config{
 		Host:     cfg.SMTP.Host,
@@ -266,6 +275,8 @@ func main() {
 		ProxyH:   proxyH,
 		AccountH: accountH,
 
+		ChannelH: channelH,
+
 		GatewayH: gwH,
 		ImagesH:  imagesH,
 
@@ -279,8 +290,9 @@ func main() {
 		AdminKeyH:   adminKeyH,
 		AdminUsageH: adminUsageH,
 
-		MeUsageH: meUsageH,
-		MeImageH: meImageH,
+		MeUsageH:    meUsageH,
+		MeImageH:    meImageH,
+		AdminImageH: adminImageH,
 
 		RechargeH:      rechargeH,
 		AdminRechargeH: adminRechargeH,
