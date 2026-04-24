@@ -7,6 +7,48 @@
 
 ## 最近变更
 
+### 2026-04-24 gpt2api 外网主页分流修正
+
+- 结论：`https://lmage2.dimilinks.com/` 已恢复为 gpt2api 项目主页；`https://cliproxyapi.845817074.xyz/` 继续进入 CLIProxyAPI。
+- 决策：
+  - 将 gpt2api 默认 HTTPS 站点显式声明为 `listen 443 ssl default_server`，并把 `lmage2.dimilinks.com` 写入该站点的 `server_name`。
+  - 将默认 HTTP 站点显式声明为 `listen 80 default_server`，避免非 `cliproxyapi.845817074.xyz` 的域名落入 CLIProxyAPI 入口。
+  - 因 Docker 文件绑定挂载保留旧 inode，修改 `deploy/nginx.conf` 后需要重建 `gpt2api-nginx` 容器，而不是只执行 `nginx -s reload`。
+- 原因：
+  - 之前 `cliproxyapi.845817074.xyz` 的 443 server 块排在 gpt2api 默认站点前面，而 gpt2api 站点没有显式 `default_server`，导致 `lmage2.dimilinks.com` 外网访问误落到 CLIProxyAPI。
+- 影响：
+  - 公网访问 `https://lmage2.dimilinks.com/` 返回 gpt2api 前端 HTML。
+  - 公网访问 `https://cliproxyapi.845817074.xyz/` 仍返回 CLIProxyAPI，不影响 CLIProxyAPI 独立入口。
+
+### 2026-04-22 CLIProxyAPI 公网入口接入
+
+- 结论：`cliproxyapi.845817074.xyz` 已改由当前服务器接管，并通过现有 `gpt2api-nginx` 统一处理 `80/443` 入口。
+- 决策：
+  - 为 `cliproxyapi.845817074.xyz` 单独签发 Let’s Encrypt 证书，并让 Nginx 按域名分流到 `cli-proxy-api:8317`。
+  - `cli-proxy-api` 额外加入 `deploy_default` 共享 Docker 网络，避免把其本地监听端口直接暴露到公网。
+  - Nginx 上游改为通过 Docker 内置 DNS `127.0.0.11` 动态解析，而不是在启动时固化容器 IP。
+  - 公网反代显式屏蔽 `/management.html` 与 `/v0/management*`，管理功能继续只走本机 `127.0.0.1:8317`。
+  - `gpt2api-nginx` 挂载 `/etc/letsencrypt`，并通过 certbot renewal hook 在证书续期后自动 `nginx -s reload`。
+- 原因：
+  - Cloudflare Zone 当前使用 `SSL=Strict`，原有 Nginx 证书不覆盖 `cliproxyapi.845817074.xyz`，仅改 DNS 会导致回源 TLS 校验失败。
+  - 复用现有前置 Nginx 比额外开放新公网端口更简单，也更便于统一管理 TLS。
+- 影响：
+  - 外网访问 `https://cliproxyapi.845817074.xyz` 现在会进入 CLIProxyAPI，而不是落到旧目标机器。
+  - `gpt2api` 默认站点流量保持不变，因为新入口使用独立 `server_name` 分流。
+  - CLIProxyAPI 的管理面既可在本机使用，也可通过公网域名访问；因此必须依赖管理密钥做鉴权。
+  - 后续即使 `gpt2api-server` 或 `cli-proxy-api` 容器因重建而更换 Docker IP，Nginx 也能自动跟随解析，不必手工改 upstream IP。
+
+### 2026-04-22 CLIProxyAPI 管理界面外网开放
+
+- 决策：
+  - 移除 `cliproxyapi.845817074.xyz` 站点中对 `/management.html` 与 `/v0/management*` 的 Nginx 层拦截。
+  - 在放开公网入口前，先把 CLIProxyAPI 的管理密钥轮换为新的强随机值。
+- 原因：
+  - 之前公网仅开放 API，不开放管理面；若直接取消拦截而继续沿用示例风格密钥，风险过高。
+- 影响：
+  - 现在可直接从公网访问管理页面并登录。
+  - 旧的本地示例管理密钥失效，后续应使用新的管理密钥。
+
 ### 2026-04-22 个人图片任务结果改走代理 / preview 判定修正
 
 - 结论：网页“在线体验”和个人图片面板里的裂图/空白，不是任务没成功，而是 `/api/me/images/tasks` 与 `/api/me/images/tasks/:id` 之前直接返回了 `image_tasks.result_urls` 里的上游临时直链。对 `sediment / estuary` 这类需要账号鉴权的图片，浏览器直接拿来做 `<img src>` 会 403 或坏图。
