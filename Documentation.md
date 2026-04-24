@@ -7,6 +7,14 @@
 
 ## 最近变更
 
+### 2026-04-24 gpt2api/200.zip 账号导入
+
+- 结论：`/home/ubuntu/gpt2api/200.zip` 内含 200 个 `codex-*.json` token 文件，格式与现有账号导入器兼容。
+- 决策：继续通过 gpt2api 项目自身 `internal/account.Service.ImportBatch` 导入，避免绕过 AES 加密、邮箱去重、状态复活等现有规则。
+- 结果：解析 200 个账号，导入 200 个账号，200 个新建、0 个失败；导入后 `oai_accounts` 总数为 215，其中本次 zip 账号 200 个均为未删除 `healthy` 状态。
+- 安全处理：导入后将含密钥的压缩包从仓库根目录移动到已忽略的 `tmp/200.zip`，避免作为未跟踪文件被误提交。
+- 边界：导入前已存在的 15 条账号记录当前为软删除状态，未在本次导入中恢复；本次只保证 zip 内 200 个账号已加入并处于可调度状态。
+
 ### 2026-04-24 CLIProxyAPI 账号导入 gpt2api
 
 - 结论：`/home/ubuntu/CLIProxyAPI/200.zip` 当前未在服务器文件系统中找到；本次改用已存在的 `/home/ubuntu/CLIProxyAPI/auths/*.json` 作为账号来源。
