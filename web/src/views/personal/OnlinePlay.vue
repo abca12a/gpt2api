@@ -330,6 +330,7 @@ watch(t2iRatio, (nv) => {
 const t2iSending = ref(false)
 const t2iResult = ref<PlayImageData[]>([])
 const t2iError = ref('')
+const t2iPreview = ref(false)
 const t2iAbort = ref<AbortController | null>(null)
 
 const imgExamples = [
@@ -761,6 +762,7 @@ watch(i2iRatio, (nv) => {
 const i2iSending = ref(false)
 const i2iResult = ref<PlayImageData[]>([])
 const i2iError = ref('')
+const i2iPreview = ref(false)
 const i2iAbort = ref<AbortController | null>(null)
 const MAX_REF_BYTES = 4 * 1024 * 1024 // 4MB
 

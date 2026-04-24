@@ -66,6 +66,7 @@ venv/
 # 历史部署产物(运维自己 build 即可,不要带进仓库)
 /deploy/bin/
 /deploy/logs/
+/deploy/certs/
 /deploy/updates/
 /deploy/web/
 

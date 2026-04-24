@@ -40,7 +40,9 @@ if [ "$FORCE" = "1" ] || [ ! -x "$GOOSE" ]; then
     trap 'rm -rf "$TMP"' EXIT
     pushd "$TMP" >/dev/null
     go mod init goose-wrapper >/dev/null 2>&1
-    go get github.com/pressly/goose/v3/cmd/goose@v3.20.0 >/dev/null 2>&1
+    # v3.20.0 依赖链里引用了已失效的 nhooyr.io/websocket v1.8.10,
+    # 这里固定到当前可正常构建的版本,避免本地构建直接失败。
+    go get github.com/pressly/goose/v3/cmd/goose@v3.27.0 >/dev/null 2>&1
     GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
         go build -ldflags "-s -w" -o "$GOOSE" github.com/pressly/goose/v3/cmd/goose
     popd >/dev/null

@@ -4,7 +4,7 @@
 
 1. 等 MySQL 健康
 2. 跑 `goose up` 应用所有迁移(包含用户表、账号池、审计、备份元数据等)
-3. 启动 HTTP 服务(`:8080`)
+3. 启动 HTTP 服务(`:8080`),再由 nginx 对外提供 `80/443`
 
 ## ⚠️ 架构说明:宿主预编译 + 容器运行
 
@@ -74,11 +74,14 @@ docker compose logs -f server  # 观察迁移 + 启动日志
 默认暴露端口:
 
 
-| 服务     | 端口     | 说明                   |
-| ------ | ------ | -------------------- |
-| server | `8080` | OpenAI 兼容网关 + 后台 API |
-| mysql  | `3306` | 业务数据库                |
-| redis  | `6379` | 锁 / 限流 / 缓存          |
+| 服务     | 端口                | 说明                            |
+| ------ | ----------------- | ----------------------------- |
+| nginx  | `80` / `443`      | 对外访问入口,反代到 server            |
+| server | `127.0.0.1:8080`  | OpenAI 兼容网关 + 后台 API(仅本机)    |
+| mysql  | `127.0.0.1:3306`  | 业务数据库(仅本机)                   |
+| redis  | `127.0.0.1:6379`  | 锁 / 限流 / 缓存(仅本机)             |
+
+若要启用 `443`,请先准备 `deploy/certs/origin.crt` 与 `deploy/certs/origin.key`。
 
 
 ## 目录与数据卷
@@ -151,4 +154,3 @@ docker compose exec server mysqldump -hmysql -ugpt2api -p \
 - `server` 可直接 `docker compose up -d --scale server=3`(需前面加 nginx/traefik)
 - `backups` 卷改成共享存储(NFS / S3 fuse),否则每个副本只能看到自己创建的备份
 - Redis 分布式锁已天然支持多副本,MySQL 和 JWT 密钥需统一
-

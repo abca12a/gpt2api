@@ -19,7 +19,7 @@ services:
       # mariadb-client 附带的 mariadb-dump(无 caching_sha2_password 插件)。
       - --default-authentication-plugin=mysql_native_password
     ports:
-      - "${MYSQL_PORT:-3306}:3306"
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -34,7 +34,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -73,7 +73,7 @@ services:
       GPT2API_JWT_SECRET: ${JWT_SECRET:-dev_secret_change_me_in_production_please_32b}
       GPT2API_CRYPTO_AES_KEY: ${CRYPTO_AES_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
     ports:
-      - "${HTTP_PORT:-8080}:8080"
+      - "127.0.0.1:${HTTP_PORT:-8080}:8080"
     # 给容器指定独立公共 DNS,避免宿主 Clash/V2Ray 等梯子劫持了
     # 代理供应商(如 *.arxlabs.io / *.luminati.io 等)的域名解析,
     # 同时 chatgpt.com 也由外部 DNS 统一解析,确保路径一致。
@@ -85,6 +85,21 @@ services:
       - backups:/app/data/backups
       - ./logs:/app/logs
     command: ["/app/gpt2api", "-c", "/app/configs/config.yaml"]
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: gpt2api-nginx
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
 
 volumes:
   mysql_data:

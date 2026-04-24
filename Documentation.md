@@ -7,6 +7,14 @@
 
 ## 最近变更
 
+### 2026-04-24 升级到 upstream/main 最新版
+
+- 结论：本地 `main` 已合并 `github.com/432539/gpt2api` 的 `upstream/main`，最新上游提交为 `d36db51 feat(channel): multi-upstream channels with OpenAI/Gemini adapters + text/image routing`。
+- 决策：合并时保留本地 OAuth 账号导入、额度汇总、个人图片代理与 nginx/端口部署定制，同时接入上游新增的多上游渠道、移动端响应式、图片任务后台与 N>1 并发生图修复。
+- 冲突处理：`internal/image/runner.go` 保留上游并发生图与本地额度即时扣减逻辑；`internal/server/router.go` 接入 `ChannelH`；`web/src/views/admin/Accounts.vue` 同时保留 OAuth 回调监听与额度汇总加载。
+- 验证：`go test ./...` 通过；`cd web && npm run build` 通过，构建期间仅出现 Sass legacy JS API 与大 chunk 体积警告。
+- 边界：本地部署改动仍以独立提交保留，默认不 push；如需要线上生效，还需重建前端/后端产物并重启 Docker Compose 服务。
+
 ### 2026-04-24 gpt2api/200.zip 账号导入
 
 - 结论：`/home/ubuntu/gpt2api/200.zip` 内含 200 个 `codex-*.json` token 文件，格式与现有账号导入器兼容。
