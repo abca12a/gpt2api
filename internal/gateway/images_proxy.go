@@ -91,8 +91,15 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	ref := image.StripPreviewRef(fids[idx]) // 可能是 "sed:xxxx" 或 "xxxx"
-	if t.AccountID == 0 || h.ImageAccResolver == nil {
+	accountID, conversationID, ref := image.DecodeImageRefMeta(fids[idx])
+	ref = image.StripPreviewRef(ref) // 可能是 "sed:xxxx" 或 "xxxx"
+	if accountID == 0 {
+		accountID = t.AccountID
+	}
+	if conversationID == "" {
+		conversationID = t.ConversationID
+	}
+	if accountID == 0 || conversationID == "" || h.ImageAccResolver == nil {
 		c.AbortWithStatus(http.StatusServiceUnavailable)
 		return
 	}
@@ -100,14 +107,14 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
 
-	at, deviceID, cookies, err := h.ImageAccResolver.AuthToken(ctx, t.AccountID)
+	at, deviceID, cookies, err := h.ImageAccResolver.AuthToken(ctx, accountID)
 	if err != nil {
 		logger.L().Warn("image proxy resolve account",
-			zap.Error(err), zap.Uint64("account_id", t.AccountID))
+			zap.Error(err), zap.Uint64("account_id", accountID))
 		c.AbortWithStatus(http.StatusBadGateway)
 		return
 	}
-	proxyURL := h.ImageAccResolver.ProxyURL(ctx, t.AccountID)
+	proxyURL := h.ImageAccResolver.ProxyURL(ctx, accountID)
 
 	cli, err := chatgpt.New(chatgpt.Options{
 		AuthToken: at,
@@ -122,7 +129,7 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 		return
 	}
 
-	signedURL, err := cli.ImageDownloadURL(ctx, t.ConversationID, ref)
+	signedURL, err := cli.ImageDownloadURL(ctx, conversationID, ref)
 	if err != nil {
 		logger.L().Warn("image proxy download_url",
 			zap.Error(err), zap.String("task_id", taskID), zap.String("ref", ref))

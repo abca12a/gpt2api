@@ -7,6 +7,14 @@
 
 ## 最近变更
 
+### 2026-04-24 修复 N>1 图片历史缩略图不可见
+
+- 结论：图片任务历史中 `n=3` 成功任务显示破图，后端日志显示 `/p/img/...` 返回 `503/502`；根因是并发生图时每张图可能来自不同账号和 conversation，但旧逻辑只在 `image_tasks` 里保存单个 `account_id/conversation_id`，且并发子任务没有回写任务账号，代理下载无法定位对应账号。
+- 决策：在 `file_ids` 的单图元素内写入 `account_id + conversation_id + file_ref` 元信息，图片代理优先读取单图元信息回源；非新格式继续兼容旧任务，仍回退到任务级 `account_id/conversation_id`。
+- 影响：后续 `N>1` 并发生图的历史缩略图、打开原图和下载都会按每张图的真实账号下载，不再因为 `account_id=0` 或旧账号软删而破图。
+- 线上处理：已重新编译并重建 `gpt2api-server`；同时把 2026-04-24 19:50:53 的 `33333` 任务根据运行日志补写了三张图的单图元信息。
+- 验证：`go test ./...` 通过；`bash deploy/build-local.sh` 前后端产物构建通过；`docker compose -f deploy/docker-compose.yml up -d --build server` 后服务健康。
+
 ### 2026-04-24 升级到 upstream/main 最新版
 
 - 结论：本地 `main` 已合并 `github.com/432539/gpt2api` 的 `upstream/main`，最新上游提交为 `d36db51 feat(channel): multi-upstream channels with OpenAI/Gemini adapters + text/image routing`。

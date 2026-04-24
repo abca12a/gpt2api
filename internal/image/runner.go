@@ -233,7 +233,9 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 	for sr := range ch {
 		if sr.ok {
 			successCount++
-			result.FileIDs = append(result.FileIDs, sr.fileIDs...)
+			for _, fileID := range sr.fileIDs {
+				result.FileIDs = append(result.FileIDs, EncodeImageRefMeta(sr.accountID, sr.convID, fileID))
+			}
 			result.SignedURLs = append(result.SignedURLs, sr.signedURLs...)
 			if result.ConversationID == "" {
 				result.ConversationID = sr.convID
