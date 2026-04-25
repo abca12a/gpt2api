@@ -129,9 +129,9 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 			}
 		}()
 
-		ctx, cancel := context.WithTimeout(context.Background(), asyncImageTaskTimeout(job.MaxAttempts))
+		ctx, cancel := context.WithTimeout(context.Background(), asyncImageTaskTimeout(job.MaxAttempts, len(job.References) > 0))
 		defer cancel()
-		maxAttempts, perAttemptTimeout, pollMaxWait := asyncImageRunTuning(job.MaxAttempts, len(job.References) > 0)
+		maxAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(job.MaxAttempts, len(job.References) > 0)
 
 		res := h.Runner.Run(ctx, image.RunOptions{
 			TaskID:            job.TaskID,
@@ -142,6 +142,7 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 			Prompt:            job.Prompt,
 			N:                 job.N,
 			MaxAttempts:       maxAttempts,
+			DispatchTimeout:   dispatchTimeout,
 			PerAttemptTimeout: perAttemptTimeout,
 			PollMaxWait:       pollMaxWait,
 			References:        job.References,
@@ -173,12 +174,10 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 	}()
 }
 
-func asyncImageTaskTimeout(maxAttempts int) time.Duration {
-	if maxAttempts <= 0 {
-		maxAttempts = 1
-	}
-	timeout := time.Duration(maxAttempts) * 6 * time.Minute
-	if timeout < 6*time.Minute {
+func asyncImageTaskTimeout(maxAttempts int, hasReferences bool) time.Duration {
+	attempts, perAttemptTimeout, _, _ := asyncImageRunTuning(maxAttempts, hasReferences)
+	timeout := time.Duration(attempts)*perAttemptTimeout + 30*time.Second
+	if hasReferences && timeout < 6*time.Minute {
 		return 6 * time.Minute
 	}
 	if timeout > 15*time.Minute {
@@ -187,17 +186,20 @@ func asyncImageTaskTimeout(maxAttempts int) time.Duration {
 	return timeout
 }
 
-func asyncImageRunTuning(maxAttempts int, hasReferences bool) (int, time.Duration, time.Duration) {
+func asyncImageRunTuning(maxAttempts int, hasReferences bool) (int, time.Duration, time.Duration, time.Duration) {
 	if maxAttempts <= 0 {
 		maxAttempts = 1
 	}
 	if hasReferences {
-		return maxAttempts, 6 * time.Minute, 300 * time.Second
+		return maxAttempts, 6 * time.Minute, 300 * time.Second, 30 * time.Second
 	}
-	if maxAttempts < 4 {
-		maxAttempts = 4
+	if maxAttempts < 3 {
+		maxAttempts = 3
 	}
-	return maxAttempts, 2 * time.Minute, 90 * time.Second
+	if maxAttempts > 3 {
+		maxAttempts = 3
+	}
+	return maxAttempts, 90 * time.Second, 60 * time.Second, 10 * time.Second
 }
 
 // ImageGenerations POST /v1/images/generations。
@@ -400,16 +402,20 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		return
 	}
 
+	runAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(maxAttempts, len(refs) > 0)
 	res := h.Runner.Run(runCtx, image.RunOptions{
-		TaskID:        taskID,
-		UserID:        ak.UserID,
-		KeyID:         ak.ID,
-		ModelID:       m.ID,
-		UpstreamModel: m.UpstreamModelSlug,
-		Prompt:        maybeAppendClaritySuffix(req.Prompt),
-		N:             req.N,
-		MaxAttempts:   maxAttempts,
-		References:    refs,
+		TaskID:            taskID,
+		UserID:            ak.UserID,
+		KeyID:             ak.ID,
+		ModelID:           m.ID,
+		UpstreamModel:     m.UpstreamModelSlug,
+		Prompt:            maybeAppendClaritySuffix(req.Prompt),
+		N:                 req.N,
+		MaxAttempts:       runAttempts,
+		DispatchTimeout:   dispatchTimeout,
+		PerAttemptTimeout: perAttemptTimeout,
+		PollMaxWait:       pollMaxWait,
+		References:        refs,
 	})
 	rec.AccountID = res.AccountID
 
@@ -638,15 +644,19 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 	runCtx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
 	defer cancel()
 
+	runAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(2, false)
 	res := h.Runner.Run(runCtx, image.RunOptions{
-		TaskID:        taskID,
-		UserID:        ak.UserID,
-		KeyID:         ak.ID,
-		ModelID:       m.ID,
-		UpstreamModel: m.UpstreamModelSlug,
-		Prompt:        maybeAppendClaritySuffix(prompt),
-		N:             1,
-		MaxAttempts:   2,
+		TaskID:            taskID,
+		UserID:            ak.UserID,
+		KeyID:             ak.ID,
+		ModelID:           m.ID,
+		UpstreamModel:     m.UpstreamModelSlug,
+		Prompt:            maybeAppendClaritySuffix(prompt),
+		N:                 1,
+		MaxAttempts:       runAttempts,
+		DispatchTimeout:   dispatchTimeout,
+		PerAttemptTimeout: perAttemptTimeout,
+		PollMaxWait:       pollMaxWait,
 	})
 	rec.AccountID = res.AccountID
 
@@ -1050,16 +1060,20 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	runCtx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Minute)
 	defer cancel()
 
+	runAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(1, true)
 	res := h.Runner.Run(runCtx, image.RunOptions{
-		TaskID:        taskID,
-		UserID:        ak.UserID,
-		KeyID:         ak.ID,
-		ModelID:       m.ID,
-		UpstreamModel: m.UpstreamModelSlug,
-		Prompt:        maybeAppendClaritySuffix(prompt),
-		N:             n,
-		MaxAttempts:   1, // 带参考图时只跑一次,避免重复上传
-		References:    refs,
+		TaskID:            taskID,
+		UserID:            ak.UserID,
+		KeyID:             ak.ID,
+		ModelID:           m.ID,
+		UpstreamModel:     m.UpstreamModelSlug,
+		Prompt:            maybeAppendClaritySuffix(prompt),
+		N:                 n,
+		MaxAttempts:       runAttempts, // 带参考图时只跑一次,避免重复上传
+		DispatchTimeout:   dispatchTimeout,
+		PerAttemptTimeout: perAttemptTimeout,
+		PollMaxWait:       pollMaxWait,
+		References:        refs,
 	})
 	rec.AccountID = res.AccountID
 

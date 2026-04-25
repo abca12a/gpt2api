@@ -60,6 +60,7 @@ type RunOptions struct {
 	Prompt            string
 	N                 int              // 期望返回的图片张数;够数 Poll 就立即返回(速度优先)
 	MaxAttempts       int              // 跨账号重试次数,用于无账号/限流/轮询超时等可恢复错误,默认 1
+	DispatchTimeout   time.Duration    // 单次尝试中等待账号调度的最长时间,默认 30s
 	PerAttemptTimeout time.Duration    // 单次尝试总超时,默认 6min(覆盖 SSE + PollMaxWait + 缓冲)
 	PollMaxWait       time.Duration    // SSE 没直出时,轮询 conversation 的最长等待,默认 300s
 	References        []ReferenceImage // 图生图/编辑:参考图
@@ -90,6 +91,9 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 	}
 	if opt.PerAttemptTimeout <= 0 {
 		opt.PerAttemptTimeout = 6 * time.Minute
+	}
+	if opt.DispatchTimeout <= 0 {
+		opt.DispatchTimeout = 30 * time.Second
 	}
 	if opt.PollMaxWait <= 0 {
 		opt.PollMaxWait = 300 * time.Second
@@ -275,7 +279,9 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 // result 会被就地更新(ConversationID / FileIDs / SignedURLs / AccountID 等)。
 func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult) (bool, string, error) {
 	// 1) 调度账号
-	lease, err := r.sched.Dispatch(ctx, "image")
+	dispatchCtx, cancelDispatch := context.WithTimeout(ctx, opt.DispatchTimeout)
+	defer cancelDispatch()
+	lease, err := r.sched.Dispatch(dispatchCtx, "image")
 	if err != nil {
 		if errors.Is(err, scheduler.ErrNoAvailable) {
 			return false, ErrNoAccount, err
@@ -440,6 +446,16 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		fileRefs = append(fileRefs, "sed:"+s)
 	}
 
+	if shouldSkipImagePoll(sseResult, fileRefs) {
+		r.sched.MarkWarned(context.Background(), lease.Account.ID)
+		logger.L().Warn("image runner SSE missing image task, retry account",
+			zap.String("task_id", opt.TaskID),
+			zap.Uint64("account_id", lease.Account.ID),
+			zap.String("conv_id", convID),
+			zap.String("finish_type", sseResult.FinishType))
+		return false, ErrPollTimeout, errors.New("sse completed without image task")
+	}
+
 	// SSE 已经把期望数量的图带回来了 → 直接下载,跳过 Poll,省时间
 	if len(fileRefs) >= opt.N {
 		logger.L().Info("image runner enough refs from SSE, skip polling",
@@ -536,6 +552,10 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	result.SignedURLs = signedURLs
 	result.ContentTypes = contentTypes
 	return true, "", nil
+}
+
+func shouldSkipImagePoll(sseResult chatgpt.ImageSSEResult, fileRefs []string) bool {
+	return len(fileRefs) == 0 && strings.TrimSpace(sseResult.ImageGenTaskID) == ""
 }
 
 // classifyUpstream 把上游错误转成内部 error code。

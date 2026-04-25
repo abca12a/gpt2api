@@ -52,6 +52,35 @@ func TestAsyncImageSubmissionUsesOKForUpstreamGatewayCompatibility(t *testing.T)
 	}
 }
 
+func TestAsyncImageRunTuningUsesFastNoReferenceDefaults(t *testing.T) {
+	attempts, perAttempt, pollMaxWait, dispatchTimeout := asyncImageRunTuning(0, false)
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+	if perAttempt != 90*time.Second {
+		t.Fatalf("perAttempt = %s, want 90s", perAttempt)
+	}
+	if pollMaxWait != 60*time.Second {
+		t.Fatalf("pollMaxWait = %s, want 60s", pollMaxWait)
+	}
+	if dispatchTimeout != 10*time.Second {
+		t.Fatalf("dispatchTimeout = %s, want 10s", dispatchTimeout)
+	}
+}
+
+func TestAsyncImageRunTuningCapsNoReferenceAttempts(t *testing.T) {
+	attempts, _, _, _ := asyncImageRunTuning(10, false)
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+}
+
+func TestAsyncImageTaskTimeoutUsesTunedNoReferenceWindow(t *testing.T) {
+	if got := asyncImageTaskTimeout(0, false); got != 5*time.Minute {
+		t.Fatalf("asyncImageTaskTimeout = %s, want 5m", got)
+	}
+}
+
 func TestBuildImageTaskCompatPayloadSuccess(t *testing.T) {
 	created := time.Unix(1777040000, 0)
 	finished := created.Add(time.Minute)
