@@ -13,8 +13,8 @@
 - `file_ids` 的单图元素可携带 `account_id / conversation_id / file_ref`；图片代理优先使用单图元信息回源，兼容旧任务的任务级账号信息。
 - 本地已合并上游多渠道能力，并保留 OAuth 导入、额度汇总、个人图片代理、nginx/端口等本地定制。
 - `deploy/nginx.conf` 当前由同一个 `gpt2api-nginx` 处理公网入口：`lmage2.dimilinks.com` 进入 gpt2api，`cliproxyapi.845817074.xyz` 进入 CLIProxyAPI。
-- 当前号池生产机为 `43.165.170.99`，仓库路径 `/home/ubuntu/gpt2api`；默认使用已配置私钥连接：`ssh -i ~/.ssh/han_backend_inspect_20260422 ubuntu@43.165.170.99`。
-- 下游 `new-api` 后端生产机为 `212.50.232.214:22222`，排查跨服务日志时再通过 `ssh -i ~/.ssh/han_backend_inspect_20260422 -p 22222 root@212.50.232.214` 连接。
+- 2026-04-25 用户纠正：`43.165.170.99` 是下游 `new-api` 后端机器，不要再默认当作 `gpt2api` 号池生产机；当前 Codex 工作目录 `/home/ubuntu/gpt2api` 只是本地项目目录，是否为实际线上部署需另行确认。
+- 如需确认 `gpt2api` 线上是否已部署当前提交，先向用户确认实际部署机器、仓库路径和可用 SSH 凭据；不要沿用旧记录中的主机归属。
 
 ## 长期注意事项
 
