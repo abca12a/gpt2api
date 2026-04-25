@@ -483,6 +483,42 @@ func (h *ImagesHandler) ImageTask(c *gin.Context) {
 	})
 }
 
+// ImageTaskCompat GET /v1/tasks/:id。
+//
+// 这是给下游任务型网关的 OpenAI/Sora 风格兼容响应。保留原
+// /v1/images/tasks/:id 的历史响应不变,避免影响已接入客户端。
+func (h *ImagesHandler) ImageTaskCompat(c *gin.Context) {
+	ak, ok := apikey.FromCtx(c)
+	if !ok {
+		openAIError(c, http.StatusUnauthorized, "missing_api_key", "缺少 API Key")
+		return
+	}
+	id := c.Param("id")
+	if id == "" {
+		openAIError(c, http.StatusBadRequest, "invalid_request_error", "task id 不能为空")
+		return
+	}
+	if h.DAO == nil {
+		openAIError(c, http.StatusInternalServerError, "not_configured", "图片任务存储未初始化,请联系管理员")
+		return
+	}
+	t, err := h.DAO.Get(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, image.ErrNotFound) {
+			openAIError(c, http.StatusNotFound, "not_found", "任务不存在")
+			return
+		}
+		openAIError(c, http.StatusInternalServerError, "internal_error", "查询任务失败:"+err.Error())
+		return
+	}
+	if t.UserID != ak.UserID {
+		openAIError(c, http.StatusNotFound, "not_found", "任务不存在")
+		return
+	}
+
+	c.JSON(http.StatusOK, buildImageTaskCompatPayload(t))
+}
+
 // handleChatAsImage 是 /v1/chat/completions 发现 model.type=image 时的转派点。
 // 行为:
 //   - 取最后一条 user message 作为 prompt
@@ -654,6 +690,63 @@ func ifEmpty(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+func buildImageTaskCompatPayload(t *image.Task) gin.H {
+	status, progress := imageTaskCompatStatus(t.Status)
+	out := gin.H{
+		"id":         t.TaskID,
+		"task_id":    t.TaskID,
+		"object":     "image.task",
+		"status":     status,
+		"progress":   progress,
+		"created_at": t.CreatedAt.Unix(),
+	}
+	if t.FinishedAt != nil && !t.FinishedAt.IsZero() {
+		out["completed_at"] = t.FinishedAt.Unix()
+	}
+
+	if t.Status == image.StatusSuccess {
+		urls := t.DecodeResultURLs()
+		fileIDs := t.DecodeFileIDs()
+		data := make([]ImageGenData, 0, len(urls))
+		for i := range urls {
+			d := ImageGenData{URL: image.BuildImageProxyURL(t.TaskID, i, image.ImageProxyTTL)}
+			if i < len(fileIDs) {
+				d.FileID = image.PublicFileID(fileIDs[i])
+			}
+			data = append(data, d)
+		}
+		out["result"] = gin.H{
+			"created": t.CreatedAt.Unix(),
+			"data":    data,
+		}
+		return out
+	}
+
+	if t.Status == image.StatusFailed {
+		code := ifEmpty(t.Error, "task_failed")
+		out["error"] = gin.H{
+			"code":    code,
+			"message": localizeImageErr(code, ""),
+		}
+	}
+	return out
+}
+
+func imageTaskCompatStatus(status string) (string, int) {
+	switch status {
+	case image.StatusSuccess:
+		return "succeeded", 100
+	case image.StatusFailed:
+		return "failed", 100
+	case image.StatusRunning:
+		return "in_progress", 50
+	case image.StatusQueued, image.StatusDispatched:
+		return "queued", 0
+	default:
+		return "pending", 0
+	}
 }
 
 func shouldWaitForImageResult(c *gin.Context, req ImageGenRequest) bool {
