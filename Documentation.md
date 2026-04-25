@@ -41,6 +41,7 @@
 - 2026-04-25 14:20 CST 最终观察：代理兜底部署后 `img_1a72127054f04401994bf6ad / img_f2f50dc04258465d8ef95240 / img_c2472ba5a58c46ab8d5b8ba9 / img_5d58ca4eb2a44d1fbce339d0` 连续成功，耗时约 50-105 秒；当前无 `queued / dispatched / running` 残留，账号快照约 285 healthy / 115 warned，可调度候选约 390，未绑定代理账号 0。
 - 2026-04-25 14:24 CST 追加观察：`img_57600ab66ab14951bf6116a0` 四图 177 秒成功，`img_d99abc6a395a496b923cc847` 143 秒成功，`img_a8fdcb388c604d1f8fda88e9` 117 秒成功；当前无任务长时间卡住。发现一次 `/p/img` 代理取图 60 秒超时但同任务其他取图成功，后续若用户反馈“图已成功但加载慢/502”，优先考虑为原图代理增加短期缓存或优化回源超时策略。
 - 2026-04-25 针对 `gpt-image-2` 4K/尺寸参数兼容性确认：官方原生控参应走 Image API `/v1/images/generations` 或 Responses API 的 `image_generation` tool；本项目的 ChatGPT 号池反代只能通过网页 `f/conversation` 间接出图，不能保证原生遵守 `size / quality / output_format`。当前代码已让外置 OpenAI 图片渠道透传这些参数；Chat 入口转图片也会保留 `n / size / quality / output_format / output_compression / background / moderation`，并在号池路径把 2K/4K 尺寸降级映射为本地代理放大兜底，但这不是真正的上游原生 4K/精确构图。
+- 2026-04-25 4K 放大补充修复：显式传 `upscale=2k/4k` 时不再走外置图片渠道直返，避免绕过 `/p/img` 本地放大代理；`upscale` 现在会 trim 并忽略大小写，兼容下游传 `4K`。
 
 ## 已清理的历史流水
 

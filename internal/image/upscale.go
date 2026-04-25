@@ -8,6 +8,7 @@ import (
 	gimage "image"
 	"image/png"
 	"runtime"
+	"strings"
 	"sync"
 
 	_ "image/gif"
@@ -34,9 +35,9 @@ const (
 
 // ValidateUpscale 规整前端 / 上游传入的档位字符串,非法值一律视为空(原图)。
 func ValidateUpscale(s string) string {
-	switch s {
+	switch strings.ToLower(strings.TrimSpace(s)) {
 	case Upscale2K, Upscale4K:
-		return s
+		return strings.ToLower(strings.TrimSpace(s))
 	default:
 		return UpscaleNone
 	}

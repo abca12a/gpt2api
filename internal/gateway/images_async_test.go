@@ -120,6 +120,9 @@ func TestNormalizeImageUpscaleInfers2KAnd4KFromSize(t *testing.T) {
 	if got := normalizeImageUpscale("3840x2160", "2k"); got != imagepkg.Upscale2K {
 		t.Fatalf("explicit upscale should win, got %q", got)
 	}
+	if got := normalizeImageUpscale("1024x1024", " 4K "); got != imagepkg.Upscale4K {
+		t.Fatalf("explicit uppercase upscale = %q, want 4k", got)
+	}
 }
 
 func TestBuildImageTaskCompatPayloadSuccess(t *testing.T) {

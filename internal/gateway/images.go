@@ -240,7 +240,8 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	if req.Size == "" {
 		req.Size = "1024x1024"
 	}
-	req.Upscale = normalizeImageUpscale(req.Size, req.Upscale)
+	explicitUpscale := image.ValidateUpscale(req.Upscale)
+	req.Upscale = explicitUpscale
 
 	refID := uuid.NewString()
 	rec := &usage.Log{
@@ -310,11 +311,12 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 
 	// 若本地模型配置了外置渠道(OpenAI DALL·E / Gemini imagen 等),优先走渠道。
 	// 参考图场景(reference_images)仍走原 ChatGPT 账号池 Runner。
-	if h.Channels != nil {
+	if h.Channels != nil && explicitUpscale == image.UpscaleNone {
 		if handled := h.dispatchImageToChannel(c, ak, m, &req, rec, ratio); handled {
 			return
 		}
 	}
+	req.Upscale = normalizeImageUpscale(req.Size, explicitUpscale)
 
 	// 3) 预扣(图像按定价,est = actual)
 	cost := billing.ComputeImageCost(m, req.N, ratio)
@@ -583,6 +585,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 			"图像模型需要用户消息作为 prompt,请检查 messages 内容")
 		return
 	}
+	explicitUpscale := image.ValidateUpscale(req.Upscale)
 	imgReq := normalizeChatImageRequest(prompt, req)
 
 	refID := uuid.NewString()
@@ -607,7 +610,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 			return
 		}
 	}
-	if h.Channels != nil {
+	if h.Channels != nil && explicitUpscale == image.UpscaleNone {
 		if handled := h.dispatchChatImageToChannel(c, ak, m, imgReq, rec, ratio, startAt); handled {
 			return
 		}
