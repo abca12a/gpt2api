@@ -51,17 +51,18 @@ type ChatStream = <-chan ChatChunk
 
 // ImageRequest 统一的图片生成请求。
 type ImageRequest struct {
-	Model             string `json:"model"`
-	Prompt            string `json:"prompt"`
-	N                 int    `json:"n,omitempty"`
-	Size              string `json:"size,omitempty"`
-	Quality           string `json:"quality,omitempty"`
-	Style             string `json:"style,omitempty"`
-	Format            string `json:"format,omitempty"` // legacy response_format: url / b64_json
-	OutputFormat      string `json:"output_format,omitempty"`
-	OutputCompression *int   `json:"output_compression,omitempty"`
-	Background        string `json:"background,omitempty"`
-	Moderation        string `json:"moderation,omitempty"`
+	Model             string   `json:"model"`
+	Prompt            string   `json:"prompt"`
+	N                 int      `json:"n,omitempty"`
+	Size              string   `json:"size,omitempty"`
+	Images            []string `json:"images,omitempty"`
+	Quality           string   `json:"quality,omitempty"`
+	Style             string   `json:"style,omitempty"`
+	Format            string   `json:"format,omitempty"` // legacy response_format: url / b64_json
+	OutputFormat      string   `json:"output_format,omitempty"`
+	OutputCompression *int     `json:"output_compression,omitempty"`
+	Background        string   `json:"background,omitempty"`
+	Moderation        string   `json:"moderation,omitempty"`
 }
 
 type ImageResult struct {

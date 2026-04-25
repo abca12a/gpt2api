@@ -207,6 +207,18 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 		"n":      n,
 		"size":   size,
 	}
+	path := "/images/generations"
+	if len(req.Images) > 0 {
+		path = "/images/edits"
+		images := make([]map[string]string, 0, len(req.Images))
+		for _, imageURL := range req.Images {
+			if strings.TrimSpace(imageURL) == "" {
+				continue
+			}
+			images = append(images, map[string]string{"image_url": imageURL})
+		}
+		payload["images"] = images
+	}
 	if req.Quality != "" {
 		payload["quality"] = req.Quality
 	}
@@ -230,7 +242,7 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 	}
 	body, _ := json.Marshal(payload)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		a.endpoint("/images/generations"), bytes.NewReader(body))
+		a.endpoint(path), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

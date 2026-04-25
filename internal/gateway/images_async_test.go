@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -203,6 +204,19 @@ func TestImageRequestForChannelSanitizesQualityResolutionAlias(t *testing.T) {
 	}
 	if req.Quality != "4K" {
 		t.Fatalf("original request mutated: %#v", req)
+	}
+}
+
+func TestImageAdapterRequestIncludesReferenceDataURLs(t *testing.T) {
+	pngBytes := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\b\x02\x00\x00\x00")
+	got := imageAdapterRequest(nil, &ImageGenRequest{Prompt: "edit", Size: "1024x1024"}, []imagepkg.ReferenceImage{
+		{Data: pngBytes},
+	})
+	if len(got.Images) != 1 {
+		t.Fatalf("Images len = %d, want 1", len(got.Images))
+	}
+	if !strings.HasPrefix(got.Images[0], "data:image/png;base64,") {
+		t.Fatalf("unexpected data URL: %q", got.Images[0])
 	}
 }
 

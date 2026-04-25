@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"strings"
@@ -30,13 +31,9 @@ import (
 // 仅覆盖纯 prompt 文生图场景;reference_images 分支继续走原 Runner(ChatGPT 账号池)。
 func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	ak *apikey.APIKey, m *modelpkg.Model, req *ImageGenRequest,
-	rec *usage.Log, ratio float64,
+	rec *usage.Log, ratio float64, refs []imagepkg.ReferenceImage,
 ) bool {
 	if h.Channels == nil {
-		return false
-	}
-	// 参考图 / 图像编辑场景不走渠道(需要上游 file upload 能力,后续再接入)。
-	if len(req.referenceInputs()) > 0 {
 		return false
 	}
 	routes, err := h.Channels.Resolve(c.Request.Context(), m.Slug, channel.ModalityImage)
@@ -80,7 +77,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "image refund")
 	}
 
-	ir := imageAdapterRequest(m, req)
+	ir := imageAdapterRequest(m, req, refs)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
 	defer cancel()
@@ -152,7 +149,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 
 func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 	ak *apikey.APIKey, m *modelpkg.Model, req *ImageGenRequest,
-	rec *usage.Log, ratio float64,
+	rec *usage.Log, ratio float64, refs []imagepkg.ReferenceImage,
 ) (bool, bool) {
 	if h.Channels == nil {
 		return false, false
@@ -223,7 +220,7 @@ func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 		Model:   m,
 		Ratio:   ratio,
 		Routes:  routes,
-		Request: imageAdapterRequest(m, req),
+		Request: imageAdapterRequest(m, req, refs),
 		Cost:    cost,
 		RefID:   refID,
 		IP:      c.ClientIP(),
@@ -386,7 +383,7 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 		_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "chat->image channel refund")
 	}
 
-	ir := imageAdapterRequest(m, req)
+	ir := imageAdapterRequest(m, req, nil)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
 	defer cancel()
 
@@ -441,12 +438,17 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	return true
 }
 
-func imageAdapterRequest(m *modelpkg.Model, req *ImageGenRequest) *adapter.ImageRequest {
+func imageAdapterRequest(m *modelpkg.Model, req *ImageGenRequest, refs []imagepkg.ReferenceImage) *adapter.ImageRequest {
+	model := ""
+	if m != nil {
+		model = m.Slug
+	}
 	return &adapter.ImageRequest{
-		Model:             m.Slug,
+		Model:             model,
 		Prompt:            req.Prompt,
 		N:                 req.N,
 		Size:              req.Size,
+		Images:            referenceImageDataURLs(refs),
 		Quality:           req.Quality,
 		Style:             req.Style,
 		Format:            req.ResponseFormat,
@@ -455,6 +457,27 @@ func imageAdapterRequest(m *modelpkg.Model, req *ImageGenRequest) *adapter.Image
 		Background:        req.Background,
 		Moderation:        req.Moderation,
 	}
+}
+
+func referenceImageDataURLs(refs []imagepkg.ReferenceImage) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if len(ref.Data) == 0 {
+			continue
+		}
+		contentType := http.DetectContentType(ref.Data)
+		if i := strings.Index(contentType, ";"); i >= 0 {
+			contentType = strings.TrimSpace(contentType[:i])
+		}
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		out = append(out, "data:"+contentType+";base64,"+base64.StdEncoding.EncodeToString(ref.Data))
+	}
+	return out
 }
 
 func imageChannelChatResponse(model string, result *adapter.ImageResult) ChatCompletionResponse {

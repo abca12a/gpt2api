@@ -86,3 +86,43 @@ func TestOpenAIImageGenerateKeepsLegacyResponseFormatForDalle(t *testing.T) {
 		t.Fatalf("response_format = %#v, want url; payload=%#v", got["response_format"], got)
 	}
 }
+
+func TestOpenAIImageGenerateUsesEditsEndpointForReferenceImages(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/images/edits" {
+			t.Fatalf("path = %s, want /v1/images/edits", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"abc"}]}`))
+	}))
+	defer srv.Close()
+
+	a := NewOpenAI(Params{BaseURL: srv.URL, APIKey: "test-key"})
+	_, err := a.ImageGenerate(context.Background(), "gpt-image-2", &ImageRequest{
+		Prompt: "edit",
+		Size:   "2048x1152",
+		Images: []string{"data:image/png;base64,aaa", "data:image/jpeg;base64,bbb"},
+	})
+	if err != nil {
+		t.Fatalf("ImageGenerate: %v", err)
+	}
+
+	if got["model"] != "gpt-image-2" || got["prompt"] != "edit" || got["size"] != "2048x1152" {
+		t.Fatalf("unexpected payload basics: %#v", got)
+	}
+	images, ok := got["images"].([]any)
+	if !ok || len(images) != 2 {
+		t.Fatalf("images = %#v, want 2 entries", got["images"])
+	}
+	first, ok := images[0].(map[string]any)
+	if !ok || first["image_url"] != "data:image/png;base64,aaa" {
+		t.Fatalf("first image = %#v", images[0])
+	}
+	if _, ok := got["response_format"]; ok {
+		t.Fatalf("response_format should be omitted for GPT Image edits: %#v", got)
+	}
+}

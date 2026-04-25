@@ -364,26 +364,34 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		}
 	}
 
-	// 若本地模型配置了外置渠道(OpenAI DALL·E / Gemini imagen / Codex image 等),优先走渠道。
-	// 参考图场景(reference_images)仍走原 ChatGPT 账号池 Runner。
+	// 3) 解析 reference_images(图生图 / 图像编辑入口都走到这里)。
+	// 必须在落任务前完成,否则参数错误会留下无人执行的 dispatched 任务。
 	referenceInputs := req.referenceInputs()
+	refs, err := decodeReferenceInputs(c.Request.Context(), referenceInputs)
+	if err != nil {
+		fail("invalid_request_error")
+		openAIError(c, http.StatusBadRequest, "invalid_reference_image", "参考图解析失败:"+err.Error())
+		return
+	}
+
+	// 若本地模型配置了外置渠道(OpenAI DALL·E / Gemini imagen / Codex image 等),优先走渠道。
 	waitForResult := shouldWaitForImageResult(c, req)
-	if h.Channels != nil && len(referenceInputs) == 0 {
+	if h.Channels != nil {
 		channelReq := imageRequestForChannel(&req, explicitUpscale)
 		if !waitForResult {
-			if handled, submitted := h.dispatchImageToChannelAsync(c, ak, m, channelReq, rec, ratio); handled {
+			if handled, submitted := h.dispatchImageToChannelAsync(c, ak, m, channelReq, rec, ratio, refs); handled {
 				if submitted {
 					writeUsageOnReturn = false
 				}
 				return
 			}
-		} else if handled := h.dispatchImageToChannel(c, ak, m, channelReq, rec, ratio); handled {
+		} else if handled := h.dispatchImageToChannel(c, ak, m, channelReq, rec, ratio, refs); handled {
 			return
 		}
 	}
 	req.Upscale = normalizeImageUpscale(req.Size, explicitUpscale)
 
-	// 3) 预扣(图像按定价,est = actual)
+	// 4) 预扣(图像按定价,est = actual)
 	cost := billing.ComputeImageCost(m, req.N, ratio)
 	if cost > 0 {
 		if err := h.Billing.PreDeduct(c.Request.Context(), ak.UserID, ak.ID, cost, refID, "image prepay"); err != nil {
@@ -406,15 +414,6 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		}
 		refunded = true
 		_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "image refund")
-	}
-
-	// 4) 解析 reference_images(图生图 / 图像编辑入口都走到这里)。
-	// 必须在落任务前完成,否则参数错误会留下无人执行的 dispatched 任务。
-	refs, err := decodeReferenceInputs(c.Request.Context(), referenceInputs)
-	if err != nil {
-		refund("invalid_request_error")
-		openAIError(c, http.StatusBadRequest, "invalid_reference_image", "参考图解析失败:"+err.Error())
-		return
 	}
 
 	// 5) 落任务
@@ -1239,7 +1238,12 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	if size == "" {
 		size = "1024x1024"
 	}
-	upscale := normalizeImageUpscale(size, c.Request.FormValue("upscale"))
+	quality := c.Request.FormValue("quality")
+	resolution := c.Request.FormValue("resolution")
+	imageSize := c.Request.FormValue("image_size")
+	scale := c.Request.FormValue("scale")
+	explicitUpscale := requestedUpscaleFromOptions(c.Request.FormValue("upscale"), resolution, imageSize, scale, quality)
+	upscale := normalizeImageUpscale(size, explicitUpscale)
 
 	// 主图 + 可能的多张
 	files, err := collectEditFiles(c.Request.MultipartForm)
@@ -1334,6 +1338,29 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 			fail("rate_limit_rpm")
 			openAIError(c, http.StatusTooManyRequests, "rate_limit_rpm",
 				"触发每分钟请求数限制 (RPM),请稍后再试")
+			return
+		}
+	}
+
+	if h.Channels != nil {
+		editReq := &ImageGenRequest{
+			Model:          model,
+			Prompt:         prompt,
+			N:              n,
+			Size:           size,
+			Quality:        quality,
+			ResponseFormat: c.Request.FormValue("response_format"),
+			OutputFormat:   c.Request.FormValue("output_format"),
+			Background:     c.Request.FormValue("background"),
+			Moderation:     c.Request.FormValue("moderation"),
+			Resolution:     resolution,
+			ImageSize:      imageSize,
+			Scale:          scale,
+			Upscale:        explicitUpscale,
+			User:           c.Request.FormValue("user"),
+		}
+		channelReq := imageRequestForChannel(editReq, explicitUpscale)
+		if handled := h.dispatchImageToChannel(c, ak, m, channelReq, rec, ratio, refs); handled {
 			return
 		}
 	}
