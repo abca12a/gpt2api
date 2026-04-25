@@ -46,6 +46,12 @@ func TestShouldWaitForImageResultAsyncCompatibility(t *testing.T) {
 
 func boolPtr(v bool) *bool { return &v }
 
+func TestAsyncImageSubmissionUsesOKForUpstreamGatewayCompatibility(t *testing.T) {
+	if asyncImageSubmitStatusCode() != http.StatusOK {
+		t.Fatalf("async submit status = %d, want %d", asyncImageSubmitStatusCode(), http.StatusOK)
+	}
+}
+
 func TestBuildImageTaskCompatPayloadSuccess(t *testing.T) {
 	created := time.Unix(1777040000, 0)
 	finished := created.Add(time.Minute)

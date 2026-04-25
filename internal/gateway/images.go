@@ -362,7 +362,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 			IP:            c.ClientIP(),
 			UA:            c.Request.UserAgent(),
 		})
-		c.JSON(http.StatusAccepted, ImageGenResponse{
+		c.JSON(asyncImageSubmitStatusCode(), ImageGenResponse{
 			Created: time.Now().Unix(),
 			TaskID:  taskID,
 			Data:    []ImageGenData{},
@@ -691,6 +691,8 @@ func ifEmpty(s, fallback string) string {
 	}
 	return s
 }
+
+func asyncImageSubmitStatusCode() int { return http.StatusOK }
 
 func buildImageTaskCompatPayload(t *image.Task) gin.H {
 	status, progress := imageTaskCompatStatus(t.Status)
