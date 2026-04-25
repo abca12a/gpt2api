@@ -28,6 +28,8 @@ import (
 // ErrNoAvailable 没有任何账号可用。
 var ErrNoAvailable = errors.New("scheduler: no available account")
 
+const dispatchCandidateLimit = 500
+
 // Lease 代表一次账号占用的租约。
 type Lease struct {
 	Account     *account.Account
@@ -200,9 +202,8 @@ func (s *Scheduler) Dispatch(ctx context.Context, modelType string) (*Lease, err
 // tryDispatchOnce 扫一遍 candidate,尝试为其中一个加锁;
 // 全部 candidate 都被锁 / 不满足 min_interval / 日配额时返回 ErrNoAvailable。
 func (s *Scheduler) tryDispatchOnce(ctx context.Context, modelType string) (*Lease, error) {
-	limit := 30
 	dao := s.accSvc.DAO()
-	candidates, err := dao.ListDispatchable(ctx, limit)
+	candidates, err := dao.ListDispatchable(ctx, dispatchCandidateLimit)
 	if err != nil {
 		return nil, fmt.Errorf("scheduler list: %w", err)
 	}

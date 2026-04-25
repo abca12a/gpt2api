@@ -93,6 +93,22 @@ UPDATE image_tasks
 	return err
 }
 
+// MarkInterruptedBefore 把当前进程启动前遗留的非终态任务标记为失败。
+// 异步生图任务运行在进程内 goroutine 中；如果服务重启，旧的 queued / dispatched /
+// running 记录已经没有执行者，除非后续引入外部队列，否则它们不可能再自然完成。
+func (d *DAO) MarkInterruptedBefore(ctx context.Context, before time.Time) (int64, error) {
+	res, err := d.db.ExecContext(ctx, `
+UPDATE image_tasks
+   SET status='failed', error=?, finished_at=NOW()
+ WHERE status IN ('queued','dispatched','running')
+   AND created_at < ?`, ErrInterrupted, before)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // Get 根据对外 task_id 查询。
 func (d *DAO) Get(ctx context.Context, taskID string) (*Task, error) {
 	var t Task

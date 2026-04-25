@@ -51,6 +51,8 @@ var (
 )
 
 func main() {
+	bootAt := time.Now()
+
 	flag.Parse()
 	if *showVer {
 		fmt.Printf("gpt2api %s (build %s)\n", version, buildTime)
@@ -149,6 +151,11 @@ func main() {
 	}
 
 	imageDAO := image.NewDAO(sqldb)
+	if n, err := imageDAO.MarkInterruptedBefore(context.Background(), bootAt); err != nil {
+		log.Warn("mark interrupted image tasks failed", zap.Error(err))
+	} else if n > 0 {
+		log.Warn("marked interrupted image tasks failed", zap.Int64("count", n))
+	}
 	imageRunner := image.NewRunner(sched, imageDAO)
 	imageRunner.SetQuotaDecrementor(accDAO) // 生图成功后立即扣减账号额度
 	imagesH := &gateway.ImagesHandler{

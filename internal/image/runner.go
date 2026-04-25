@@ -59,7 +59,7 @@ type RunOptions struct {
 	UpstreamModel     string // 默认 "auto"(由上游根据 system_hints 挑选图像模型)
 	Prompt            string
 	N                 int              // 期望返回的图片张数;够数 Poll 就立即返回(速度优先)
-	MaxAttempts       int              // 跨账号重试次数,仅用于无账号/限流等硬错误,默认 1
+	MaxAttempts       int              // 跨账号重试次数,用于无账号/限流/轮询超时等可恢复错误,默认 1
 	PerAttemptTimeout time.Duration    // 单次尝试总超时,默认 6min(覆盖 SSE + PollMaxWait + 缓冲)
 	PollMaxWait       time.Duration    // SSE 没直出时,轮询 conversation 的最长等待,默认 300s
 	References        []ReferenceImage // 图生图/编辑:参考图
@@ -140,7 +140,7 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 				break
 			}
 			retryable := status == ErrRateLimited || status == ErrNoAccount ||
-				status == ErrAuthRequired || status == ErrNetworkTransient
+				status == ErrAuthRequired || status == ErrNetworkTransient || status == ErrPollTimeout
 			if !retryable {
 				break
 			}

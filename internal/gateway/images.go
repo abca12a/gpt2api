@@ -129,7 +129,7 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 			}
 		}()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), asyncImageTaskTimeout(job.MaxAttempts))
 		defer cancel()
 
 		res := h.Runner.Run(ctx, image.RunOptions{
@@ -168,6 +168,20 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 		rec.Status = usage.StatusSuccess
 		rec.CreditCost = job.Cost
 	}()
+}
+
+func asyncImageTaskTimeout(maxAttempts int) time.Duration {
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	timeout := time.Duration(maxAttempts) * 6 * time.Minute
+	if timeout < 6*time.Minute {
+		return 6 * time.Minute
+	}
+	if timeout > 15*time.Minute {
+		return 15 * time.Minute
+	}
+	return timeout
 }
 
 // ImageGenerations POST /v1/images/generations。
@@ -800,6 +814,8 @@ func localizeImageErr(code, raw string) string {
 		zh = "上游风控,请稍后再试"
 	case image.ErrUnknown, "":
 		zh = "图片生成失败"
+	case image.ErrInterrupted:
+		zh = "任务被服务重启中断,请重新提交"
 	case "upstream_error":
 		zh = "上游返回错误"
 	default:
