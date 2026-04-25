@@ -171,32 +171,55 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 			return
 		}
 
-		// 并发闸:避免 4K 请求风暴打满外部超分服务并发
-		imageUpscaleCache.Acquire()
-		upResult, err := h.SuperResolution.Upscale(ctx, body, ct, scale, taskID)
-		imageUpscaleCache.Release()
+		started := time.Now()
+		upBytes, upCT, upNoop, err, shared := imageUpscaleCache.Do(cacheKey, func() ([]byte, string, bool, error) {
+			// 并发闸:避免 4K 请求风暴打满外部超分服务并发
+			imageUpscaleCache.Acquire()
+			defer imageUpscaleCache.Release()
+
+			// 阿里异步超分可能超过浏览器/Cloudflare 单次等待窗口;这里脱离请求上下文,
+			// 让首次请求即使断开也尽量把结果写入进程缓存,后续刷新可命中。
+			srCtx, srCancel := context.WithTimeout(context.Background(), h.SuperResolution.RequestTimeout())
+			defer srCancel()
+			upResult, upErr := h.SuperResolution.Upscale(srCtx, body, ct, scale, taskID)
+			if upErr != nil {
+				return nil, "", false, upErr
+			}
+			if upResult.Noop {
+				return nil, "", true, nil
+			}
+			if len(upResult.Data) > 0 {
+				imageUpscaleCache.Put(cacheKey, upResult.Data, upResult.ContentType)
+			}
+			logger.L().Info("image proxy super resolution success",
+				zap.String("task_id", taskID),
+				zap.String("scale", scale),
+				zap.String("job_id", upResult.JobID),
+				zap.Duration("cost", time.Since(started)))
+			return upResult.Data, upResult.ContentType, false, nil
+		})
 		if err != nil {
 			logger.L().Warn("image proxy super resolution",
 				zap.Error(err), zap.String("task_id", taskID),
-				zap.String("scale", scale))
+				zap.String("scale", scale), zap.Bool("shared", shared),
+				zap.Duration("cost", time.Since(started)))
 			// 超分失败:回落到原图,不让用户看到白屏;不再回退到本地插值。
 			c.Header("Cache-Control", "private, max-age=1800")
 			c.Header("X-Upscale", scale+";provider=aliyun;err")
 			c.Data(http.StatusOK, ct, body)
 			return
 		}
-		if upResult.Noop {
+		if upNoop {
 			c.Header("Cache-Control", "private, max-age=3600")
 			c.Header("X-Upscale", scale+";provider=aliyun;noop")
 			c.Data(http.StatusOK, ct, body)
 			return
 		}
-		if upResult.ContentType != "" {
-			ct = upResult.ContentType
+		if upCT != "" {
+			ct = upCT
 		}
-		if len(upResult.Data) > 0 {
-			body = upResult.Data
-			imageUpscaleCache.Put(cacheKey, body, ct)
+		if len(upBytes) > 0 {
+			body = upBytes
 			c.Header("X-Upscale", scale+";provider=aliyun;cache=miss")
 		} else {
 			c.Header("X-Upscale", scale+";provider=aliyun;err")

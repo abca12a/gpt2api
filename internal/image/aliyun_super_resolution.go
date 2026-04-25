@@ -112,6 +112,17 @@ func newAliyunSuperResolutionClient(api aliyunSuperResolutionAPI, cfg AliyunSupe
 	}
 }
 
+func (c *AliyunSuperResolutionClient) RequestTimeout() time.Duration {
+	if c == nil {
+		return 3 * time.Minute
+	}
+	timeout := c.cfg.PollTimeout + 60*time.Second
+	if timeout < 3*time.Minute {
+		return 3 * time.Minute
+	}
+	return timeout
+}
+
 func normalizeAliyunSuperResolutionConfig(cfg AliyunSuperResolutionConfig) AliyunSuperResolutionConfig {
 	if strings.TrimSpace(cfg.RegionID) == "" {
 		cfg.RegionID = aliyunDefaultRegionID

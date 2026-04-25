@@ -57,13 +57,22 @@ type UpscaleCache struct {
 	maxBytes int64
 	curBytes int64
 
-	sem chan struct{}
+	sem     chan struct{}
+	flights map[string]*upscaleFlight
 }
 
 type upscaleEntry struct {
 	key         string
 	data        []byte
 	contentType string
+}
+
+type upscaleFlight struct {
+	done        chan struct{}
+	data        []byte
+	contentType string
+	noop        bool
+	err         error
 }
 
 // NewUpscaleCache 初始化 LRU。maxBytes ≤ 0 时使用默认 512MB;并发上限默认 NumCPU。
@@ -84,6 +93,7 @@ func NewUpscaleCache(maxBytes int64, concurrency int) *UpscaleCache {
 		order:    list.New(),
 		maxBytes: maxBytes,
 		sem:      make(chan struct{}, concurrency),
+		flights:  make(map[string]*upscaleFlight),
 	}
 }
 
@@ -130,6 +140,27 @@ func (c *UpscaleCache) Put(key string, data []byte, contentType string) {
 		delete(c.items, old.key)
 		c.curBytes -= int64(len(old.data))
 	}
+}
+
+// Do 对同一个 key 合并并发计算,避免多次请求同一张图时重复调用外部超分服务。
+func (c *UpscaleCache) Do(key string, fn func() ([]byte, string, bool, error)) ([]byte, string, bool, error, bool) {
+	c.mu.Lock()
+	if f, ok := c.flights[key]; ok {
+		c.mu.Unlock()
+		<-f.done
+		return f.data, f.contentType, f.noop, f.err, true
+	}
+	f := &upscaleFlight{done: make(chan struct{})}
+	c.flights[key] = f
+	c.mu.Unlock()
+
+	f.data, f.contentType, f.noop, f.err = fn()
+
+	c.mu.Lock()
+	delete(c.flights, key)
+	c.mu.Unlock()
+	close(f.done)
+	return f.data, f.contentType, f.noop, f.err, false
 }
 
 // Acquire 占用一格并发配额;请与 Release 成对使用。
