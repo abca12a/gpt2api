@@ -491,6 +491,11 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 				fileRefs = append(fileRefs, key)
 			}
 		case chatgpt.PollStatusTimeout:
+			r.sched.MarkWarned(context.Background(), lease.Account.ID)
+			logger.L().Warn("image runner poll timeout, pause account",
+				zap.String("task_id", opt.TaskID),
+				zap.Uint64("account_id", lease.Account.ID),
+				zap.String("conv_id", convID))
 			return false, ErrPollTimeout, errors.New("poll timeout without any image")
 		default:
 			return false, ErrUpstream, errors.New("poll error")

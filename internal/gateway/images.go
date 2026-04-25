@@ -131,17 +131,20 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), asyncImageTaskTimeout(job.MaxAttempts))
 		defer cancel()
+		maxAttempts, perAttemptTimeout, pollMaxWait := asyncImageRunTuning(job.MaxAttempts, len(job.References) > 0)
 
 		res := h.Runner.Run(ctx, image.RunOptions{
-			TaskID:        job.TaskID,
-			UserID:        job.UserID,
-			KeyID:         job.KeyID,
-			ModelID:       job.ModelID,
-			UpstreamModel: job.UpstreamModel,
-			Prompt:        job.Prompt,
-			N:             job.N,
-			MaxAttempts:   job.MaxAttempts,
-			References:    job.References,
+			TaskID:            job.TaskID,
+			UserID:            job.UserID,
+			KeyID:             job.KeyID,
+			ModelID:           job.ModelID,
+			UpstreamModel:     job.UpstreamModel,
+			Prompt:            job.Prompt,
+			N:                 job.N,
+			MaxAttempts:       maxAttempts,
+			PerAttemptTimeout: perAttemptTimeout,
+			PollMaxWait:       pollMaxWait,
+			References:        job.References,
 		})
 		rec.AccountID = res.AccountID
 
@@ -182,6 +185,19 @@ func asyncImageTaskTimeout(maxAttempts int) time.Duration {
 		return 15 * time.Minute
 	}
 	return timeout
+}
+
+func asyncImageRunTuning(maxAttempts int, hasReferences bool) (int, time.Duration, time.Duration) {
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	if hasReferences {
+		return maxAttempts, 6 * time.Minute, 300 * time.Second
+	}
+	if maxAttempts < 4 {
+		maxAttempts = 4
+	}
+	return maxAttempts, 2 * time.Minute, 90 * time.Second
 }
 
 // ImageGenerations POST /v1/images/generations。
