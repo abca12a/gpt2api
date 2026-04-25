@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -78,13 +79,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "image refund")
 	}
 
-	ir := &adapter.ImageRequest{
-		Model:  m.Slug,
-		Prompt: req.Prompt,
-		N:      req.N,
-		Size:   req.Size,
-		Format: req.ResponseFormat,
-	}
+	ir := imageAdapterRequest(m, req)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
 	defer cancel()
@@ -152,6 +147,162 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		Data:    data,
 	})
 	return true
+}
+
+func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
+	ak *apikey.APIKey, m *modelpkg.Model, req *ImageGenRequest,
+	rec *usage.Log, ratio float64, startAt time.Time,
+) bool {
+	if h.Channels == nil {
+		return false
+	}
+	routes, err := h.Channels.Resolve(c.Request.Context(), m.Slug, channel.ModalityImage)
+	if err != nil {
+		if errors.Is(err, channel.ErrNoRoute) {
+			return false
+		}
+		logger.L().Warn("channel resolve chat image", zap.Error(err), zap.String("model", m.Slug))
+		return false
+	}
+	if len(routes) == 0 {
+		return false
+	}
+
+	refID := uuid.NewString()
+	rec.RequestID = refID
+
+	cost := billing.ComputeImageCost(m, req.N, ratio)
+	if cost > 0 {
+		if err := h.Billing.PreDeduct(c.Request.Context(), ak.UserID, ak.ID, cost, refID, "chat->image channel prepay"); err != nil {
+			rec.Status = usage.StatusFailed
+			if errors.Is(err, billing.ErrInsufficient) {
+				rec.ErrorCode = "insufficient_balance"
+				openAIError(c, http.StatusPaymentRequired, "insufficient_balance",
+					"积分不足,请前往「账单与充值」充值后再试")
+				return true
+			}
+			rec.ErrorCode = "billing_error"
+			openAIError(c, http.StatusInternalServerError, "billing_error", "计费异常:"+err.Error())
+			return true
+		}
+	}
+	refunded := false
+	refund := func(code string) {
+		rec.Status = usage.StatusFailed
+		rec.ErrorCode = code
+		if refunded || cost == 0 {
+			return
+		}
+		refunded = true
+		_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "chat->image channel refund")
+	}
+
+	ir := imageAdapterRequest(m, req)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
+	defer cancel()
+
+	var lastErr error
+	var result *adapter.ImageResult
+	var selected *channel.Route
+	for _, rt := range routes {
+		r, err := rt.Adapter.ImageGenerate(ctx, rt.UpstreamModel, ir)
+		if err != nil {
+			lastErr = err
+			_ = h.Channels.Svc().MarkHealth(context.Background(), rt.Channel, false, err.Error())
+			logger.L().Warn("channel chat image fail, try next",
+				zap.Uint64("channel_id", rt.Channel.ID),
+				zap.String("channel_name", rt.Channel.Name),
+				zap.Error(err))
+			continue
+		}
+		result = r
+		selected = rt
+		break
+	}
+
+	if result == nil {
+		refund("upstream_error")
+		msg := "所有上游渠道均不可用"
+		if lastErr != nil {
+			msg += ":" + lastErr.Error()
+		}
+		openAIError(c, http.StatusBadGateway, "upstream_error", msg)
+		return true
+	}
+	_ = h.Channels.Svc().MarkHealth(context.Background(), selected.Channel, true, "")
+
+	channelRatio := selected.Channel.Ratio
+	if channelRatio <= 0 {
+		channelRatio = 1.0
+	}
+	finalCost := billing.ComputeImageCost(m, actualCount(result), ratio*channelRatio)
+	if finalCost > 0 {
+		if err := h.Billing.Settle(context.Background(), ak.UserID, ak.ID, cost, finalCost, refID, "chat->image channel settle"); err != nil {
+			logger.L().Error("billing settle chat image channel", zap.Error(err), zap.String("ref", refID))
+		}
+	}
+	_ = h.Keys.DAO().TouchUsage(context.Background(), ak.ID, c.ClientIP(), finalCost)
+
+	rec.Status = usage.StatusSuccess
+	rec.ModelID = m.ID
+	rec.CreditCost = finalCost
+	rec.DurationMs = int(time.Since(startAt).Milliseconds())
+
+	c.JSON(http.StatusOK, imageChannelChatResponse(m.Slug, result))
+	return true
+}
+
+func imageAdapterRequest(m *modelpkg.Model, req *ImageGenRequest) *adapter.ImageRequest {
+	return &adapter.ImageRequest{
+		Model:             m.Slug,
+		Prompt:            req.Prompt,
+		N:                 req.N,
+		Size:              req.Size,
+		Quality:           req.Quality,
+		Style:             req.Style,
+		Format:            req.ResponseFormat,
+		OutputFormat:      req.OutputFormat,
+		OutputCompression: req.OutputCompression,
+		Background:        req.Background,
+		Moderation:        req.Moderation,
+	}
+}
+
+func imageChannelChatResponse(model string, result *adapter.ImageResult) ChatCompletionResponse {
+	var sb strings.Builder
+	if result != nil {
+		for _, u := range result.URLs {
+			if sb.Len() > 0 {
+				sb.WriteString("\n\n")
+			}
+			sb.WriteString("![generated](")
+			sb.WriteString(u)
+			sb.WriteString(")")
+		}
+		for _, b := range result.B64s {
+			if sb.Len() > 0 {
+				sb.WriteString("\n\n")
+			}
+			sb.WriteString("![generated](data:image/png;base64,")
+			sb.WriteString(b)
+			sb.WriteString(")")
+		}
+	}
+	return ChatCompletionResponse{
+		ID:      "chatcmpl-" + uuid.NewString(),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []ChatCompletionChoice{{
+			Index: 0,
+			Message: chatMsg{
+				Role:    "assistant",
+				Content: sb.String(),
+			},
+			FinishReason: "stop",
+		}},
+		Usage: ChatCompletionUsage{},
+	}
 }
 
 func actualCount(r *adapter.ImageResult) int {

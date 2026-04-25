@@ -207,6 +207,27 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 		"n":      n,
 		"size":   size,
 	}
+	if req.Quality != "" {
+		payload["quality"] = req.Quality
+	}
+	if req.Style != "" {
+		payload["style"] = req.Style
+	}
+	if req.Format != "" && supportsImageResponseFormat(upstreamModel) {
+		payload["response_format"] = req.Format
+	}
+	if req.OutputFormat != "" {
+		payload["output_format"] = req.OutputFormat
+	}
+	if req.OutputCompression != nil {
+		payload["output_compression"] = *req.OutputCompression
+	}
+	if req.Background != "" {
+		payload["background"] = req.Background
+	}
+	if req.Moderation != "" {
+		payload["moderation"] = req.Moderation
+	}
 	body, _ := json.Marshal(payload)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		a.endpoint("/images/generations"), bytes.NewReader(body))
@@ -226,8 +247,8 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 	}
 	var obj struct {
 		Data []struct {
-			URL    string `json:"url"`
-			B64    string `json:"b64_json"`
+			URL string `json:"url"`
+			B64 string `json:"b64_json"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&obj); err != nil {
@@ -246,6 +267,10 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 		return nil, errors.New("openai: empty image response")
 	}
 	return r, nil
+}
+
+func supportsImageResponseFormat(model string) bool {
+	return !strings.HasPrefix(strings.ToLower(model), "gpt-image-")
 }
 
 // Ping 发一次 /v1/models 探活。大部分兼容站都实现了这个端点。

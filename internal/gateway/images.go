@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,15 +60,19 @@ type ImagesHandler struct {
 //   - data:<mime>;base64,xxxx   dataURL
 //   - 纯 base64 字符串            兼容
 type ImageGenRequest struct {
-	Model           string   `json:"model"`
-	Prompt          string   `json:"prompt"`
-	N               int      `json:"n"`
-	Size            string   `json:"size"`
-	Quality         string   `json:"quality,omitempty"`
-	Style           string   `json:"style,omitempty"`
-	ResponseFormat  string   `json:"response_format,omitempty"` // url | b64_json(暂仅支持 url)
-	User            string   `json:"user,omitempty"`
-	ReferenceImages []string `json:"reference_images,omitempty"` // 非标准扩展,见注释
+	Model             string   `json:"model"`
+	Prompt            string   `json:"prompt"`
+	N                 int      `json:"n"`
+	Size              string   `json:"size"`
+	Quality           string   `json:"quality,omitempty"`
+	Style             string   `json:"style,omitempty"`
+	ResponseFormat    string   `json:"response_format,omitempty"` // url | b64_json(暂仅支持 url)
+	OutputFormat      string   `json:"output_format,omitempty"`
+	OutputCompression *int     `json:"output_compression,omitempty"`
+	Background        string   `json:"background,omitempty"`
+	Moderation        string   `json:"moderation,omitempty"`
+	User              string   `json:"user,omitempty"`
+	ReferenceImages   []string `json:"reference_images,omitempty"` // 非标准扩展,见注释
 	// Upscale 非标准扩展:控制"本服务对原图做本地高清放大"的目标档位。
 	// 可选值:""(原图直出,默认)/ "2k"(长边 2560) / "4k"(长边 3840)。
 	// 算法:golang.org/x/image/draw.CatmullRom(传统插值,不是 AI 超分)。
@@ -235,7 +240,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	if req.Size == "" {
 		req.Size = "1024x1024"
 	}
-	req.Upscale = image.ValidateUpscale(req.Upscale)
+	req.Upscale = normalizeImageUpscale(req.Size, req.Upscale)
 
 	refID := uuid.NewString()
 	rec := &usage.Log{
@@ -578,6 +583,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 			"图像模型需要用户消息作为 prompt,请检查 messages 内容")
 		return
 	}
+	imgReq := normalizeChatImageRequest(prompt, req)
 
 	refID := uuid.NewString()
 
@@ -601,9 +607,14 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 			return
 		}
 	}
+	if h.Channels != nil {
+		if handled := h.dispatchChatImageToChannel(c, ak, m, imgReq, rec, ratio, startAt); handled {
+			return
+		}
+	}
 
 	// 预扣
-	cost := billing.ComputeImageCost(m, 1, ratio)
+	cost := billing.ComputeImageCost(m, imgReq.N, ratio)
 	if cost > 0 {
 		if err := h.Billing.PreDeduct(c.Request.Context(), ak.UserID, ak.ID, cost, refID, "chat->image prepay"); err != nil {
 			rec.Status = usage.StatusFailed
@@ -636,9 +647,10 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 			UserID:          ak.UserID,
 			KeyID:           ak.ID,
 			ModelID:         m.ID,
-			Prompt:          prompt,
-			N:               1,
-			Size:            "1024x1024",
+			Prompt:          imgReq.Prompt,
+			N:               imgReq.N,
+			Size:            imgReq.Size,
+			Upscale:         imgReq.Upscale,
 			Status:          image.StatusDispatched,
 			EstimatedCredit: cost,
 		})
@@ -654,8 +666,8 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		KeyID:             ak.ID,
 		ModelID:           m.ID,
 		UpstreamModel:     m.UpstreamModelSlug,
-		Prompt:            maybeAppendClaritySuffix(prompt),
-		N:                 1,
+		Prompt:            maybeAppendClaritySuffix(imgReq.Prompt),
+		N:                 imgReq.N,
 		MaxAttempts:       runAttempts,
 		DispatchTimeout:   dispatchTimeout,
 		PerAttemptTimeout: perAttemptTimeout,
@@ -724,6 +736,73 @@ func extractLastUserPrompt(msgs []chatMsg) string {
 		}
 	}
 	return ""
+}
+
+func normalizeChatImageRequest(prompt string, req *ChatCompletionsRequest) *ImageGenRequest {
+	n := req.N
+	if n <= 0 {
+		n = 1
+	}
+	if n > 4 {
+		n = 4
+	}
+	size := req.Size
+	if size == "" {
+		size = "1024x1024"
+	}
+	return &ImageGenRequest{
+		Model:             req.Model,
+		Prompt:            prompt,
+		N:                 n,
+		Size:              size,
+		Quality:           req.Quality,
+		Style:             req.Style,
+		ResponseFormat:    req.ResponseFormat,
+		OutputFormat:      req.OutputFormat,
+		OutputCompression: req.OutputCompression,
+		Background:        req.Background,
+		Moderation:        req.Moderation,
+		User:              req.User,
+		Upscale:           normalizeImageUpscale(size, req.Upscale),
+	}
+}
+
+func normalizeImageUpscale(size, requested string) string {
+	if v := image.ValidateUpscale(requested); v != image.UpscaleNone {
+		return v
+	}
+	width, height, ok := parseImageSize(size)
+	if !ok {
+		return image.UpscaleNone
+	}
+	longSide := width
+	if height > longSide {
+		longSide = height
+	}
+	if longSide >= 3840 {
+		return image.Upscale4K
+	}
+	if longSide >= 2048 {
+		return image.Upscale2K
+	}
+	return image.UpscaleNone
+}
+
+func parseImageSize(size string) (int, int, bool) {
+	s := strings.ToLower(strings.TrimSpace(size))
+	if s == "" || s == "auto" {
+		return 0, 0, false
+	}
+	parts := strings.Split(s, "x")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	width, errW := strconv.Atoi(strings.TrimSpace(parts[0]))
+	height, errH := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errW != nil || errH != nil || width <= 0 || height <= 0 {
+		return 0, 0, false
+	}
+	return width, height, true
 }
 
 // --- helpers ---
@@ -921,7 +1000,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	if size == "" {
 		size = "1024x1024"
 	}
-	upscale := image.ValidateUpscale(c.Request.FormValue("upscale"))
+	upscale := normalizeImageUpscale(size, c.Request.FormValue("upscale"))
 
 	// 主图 + 可能的多张
 	files, err := collectEditFiles(c.Request.MultipartForm)

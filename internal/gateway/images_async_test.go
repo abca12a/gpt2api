@@ -81,6 +81,47 @@ func TestAsyncImageTaskTimeoutUsesTunedNoReferenceWindow(t *testing.T) {
 	}
 }
 
+func TestNormalizeChatImageRequestPreservesImageParameters(t *testing.T) {
+	compression := 50
+	req := &ChatCompletionsRequest{
+		Model:             "gpt-image-2",
+		N:                 9,
+		Size:              "3840x2160",
+		Quality:           "high",
+		ResponseFormat:    "url",
+		OutputFormat:      "jpeg",
+		OutputCompression: &compression,
+		Background:        "auto",
+		Moderation:        "low",
+	}
+
+	got := normalizeChatImageRequest("draw", req)
+	if got.Prompt != "draw" || got.N != 4 || got.Size != "3840x2160" || got.Upscale != imagepkg.Upscale4K {
+		t.Fatalf("unexpected normalized request: %#v", got)
+	}
+	if got.Quality != "high" || got.ResponseFormat != "url" || got.OutputFormat != "jpeg" || got.OutputCompression == nil || *got.OutputCompression != 50 || got.Background != "auto" || got.Moderation != "low" {
+		t.Fatalf("parameters not preserved: %#v", got)
+	}
+}
+
+func TestNormalizeImageUpscaleInfers2KAnd4KFromSize(t *testing.T) {
+	if got := normalizeImageUpscale("1536x1024", ""); got != imagepkg.UpscaleNone {
+		t.Fatalf("1536x1024 inferred upscale = %q, want none", got)
+	}
+	if got := normalizeImageUpscale("2048x2048", ""); got != imagepkg.Upscale2K {
+		t.Fatalf("2048x2048 inferred upscale = %q, want 2k", got)
+	}
+	if got := normalizeImageUpscale("2560x1440", ""); got != imagepkg.Upscale2K {
+		t.Fatalf("2560x1440 inferred upscale = %q, want 2k", got)
+	}
+	if got := normalizeImageUpscale("2160x3840", ""); got != imagepkg.Upscale4K {
+		t.Fatalf("2160x3840 inferred upscale = %q, want 4k", got)
+	}
+	if got := normalizeImageUpscale("3840x2160", "2k"); got != imagepkg.Upscale2K {
+		t.Fatalf("explicit upscale should win, got %q", got)
+	}
+}
+
 func TestBuildImageTaskCompatPayloadSuccess(t *testing.T) {
 	created := time.Unix(1777040000, 0)
 	finished := created.Add(time.Minute)
