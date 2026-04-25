@@ -158,10 +158,29 @@ func main() {
 	}
 	imageRunner := image.NewRunner(sched, imageDAO)
 	imageRunner.SetQuotaDecrementor(accDAO) // 生图成功后立即扣减账号额度
+	superResolution, err := image.NewAliyunSuperResolutionClient(image.AliyunSuperResolutionConfig{
+		Enabled:         cfg.ImageSuperResolution.Enabled,
+		AccessKeyID:     cfg.ImageSuperResolution.AccessKeyID,
+		AccessKeySecret: cfg.ImageSuperResolution.AccessKeySecret,
+		RegionID:        cfg.ImageSuperResolution.RegionID,
+		Endpoint:        cfg.ImageSuperResolution.Endpoint,
+		OutputFormat:    cfg.ImageSuperResolution.OutputFormat,
+		OutputQuality:   cfg.ImageSuperResolution.OutputQuality,
+		PollInterval:    time.Duration(cfg.ImageSuperResolution.PollIntervalSec) * time.Second,
+		PollTimeout:     time.Duration(cfg.ImageSuperResolution.PollTimeoutSec) * time.Second,
+	})
+	if err != nil {
+		log.Warn("image super resolution disabled", zap.Error(err))
+	} else if superResolution != nil {
+		log.Info("image super resolution ready",
+			zap.String("provider", "aliyun"),
+			zap.String("endpoint", cfg.ImageSuperResolution.Endpoint))
+	}
 	imagesH := &gateway.ImagesHandler{
-		Handler: gwH,
-		Runner:  imageRunner,
-		DAO:     imageDAO,
+		Handler:         gwH,
+		Runner:          imageRunner,
+		DAO:             imageDAO,
+		SuperResolution: superResolution,
 	}
 	gwH.Images = imagesH // chat/completions 识别到图像模型时转派
 

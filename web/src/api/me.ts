@@ -242,8 +242,8 @@ export interface PlayImageRequest {
   n?: number
   size?: string
   reference_images?: string[] // base64 data:image/png;base64,... 支持多张参考图
-  // 本地 Catmull-Rom 高清放大档位:"" 原图 / "2k" 长边 2560 / "4k" 长边 3840。
-  // 服务端仅保存标记,放大在图片代理 URL 首次被请求时做,PNG 输出并进程内缓存。
+  // AI 超分档位:"" 原图 / "2k" 长边 2560 / "4k" 长边 3840。
+  // 服务端仅保存标记,超分在图片代理 URL 首次被请求时做,PNG 输出并进程内缓存。
   upscale?: '' | '2k' | '4k'
   wait_for_result?: boolean
 }

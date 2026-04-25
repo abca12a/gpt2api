@@ -126,7 +126,7 @@ Content-Type: application/json
 - `prompt` 必填。
 - `model` 为空时 gpt2api 默认使用 `gpt-image-2`。
 - `n` 默认 `1`，最大按 `4` 处理；`n > 1` 时 gpt2api 会并发启动多个单图任务，可能来自不同 ChatGPT 账号和 conversation。
-- `size` 默认 `1024x1024`；`2048` 级和 `3840` 级尺寸会触发本地 2K/4K 代理放大逻辑。
+- `size` 默认 `1024x1024`；`2048` 级和 `3840` 级尺寸会触发阿里云 2K/4K 代理超分逻辑。
 - `response_format=b64_json` 当前不要依赖；当前稳定返回是 `url`。
 - 同步请求可能阻塞较久，Nginx 当前读写超时是 600 秒；下游如不想占连接，建议用异步模式。
 
@@ -302,7 +302,7 @@ const absoluteUrl = new URL(item.url, GPT2API_ORIGIN).toString()
 - 不要丢掉 `exp` 和 `sig`。
 - 签名 URL 默认有效期约 24 小时。
 - gpt2api 进程重启后，旧签名 URL 会失效；如果前端历史图裂了，应让后端重新查询任务拿新 URL，而不是复用旧 URL。
-- `/p/img` 第一次访问会回源到 chatgpt.com 换取短期下载链接；开启 2K/4K 时还会在本进程做一次 CPU 放大并缓存。
+- `/p/img` 第一次访问会回源到 chatgpt.com 换取短期下载链接；开启 2K/4K 时还会调用阿里云生成式图像超分并把结果缓存在本进程。
 
 ## 5. new-api 推荐实现
 

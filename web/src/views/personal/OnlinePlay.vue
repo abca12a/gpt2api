@@ -317,8 +317,8 @@ const t2iSize = computed(() =>
   RATIOS.find((r) => r.ratio === t2iRatio.value)?.size ?? '1024x1024',
 )
 const t2iN = ref(1)
-// 本地高清放大档位(空=原图 / '2k' / '4k')。
-// 仅在图片代理 URL 首次请求时触发 decode + Catmull-Rom + PNG 编码,
+// AI 超分档位(空=原图 / '2k' / '4k')。
+// 仅在图片代理 URL 首次请求时触发阿里云生成式图像超分,
 // 进程内 LRU 缓存命中后毫秒级返回。
 type UpscaleLevel = '' | '2k' | '4k'
 const t2iUpscale = ref<UpscaleLevel>('')
@@ -1132,9 +1132,9 @@ watch(activeTab, (v) => {
                 <el-tooltip placement="top" effect="light">
                   <template #content>
                     <div style="max-width:260px;line-height:1.55;">
-                      上游原生出图为 1024 或 1792 px;选择 2K/4K 会在图片加载时用本地
-                      <b>Catmull-Rom 插值</b>放大并以 PNG 输出。<br>
-                      <span style="color:#a16207;">注意:这是传统算法放大,不是 AI 超分,</span>不会补出新的纹理或毛发,只会让画面更大更平滑。4K 首次加载约 +0.5~1.5s,之后命中缓存。
+                      上游原生出图为 1024 或 1792 px;选择 2K/4K 会在图片加载时调用
+                      <b>阿里云生成式图像超分</b>并以 PNG 输出。<br>
+                      <span style="color:#047857;">这是 AI 超分,会尝试补充细节;</span>首次加载取决于阿里云任务耗时,之后命中本进程缓存。
                     </div>
                   </template>
                   <el-icon style="margin-left:4px;color:#94a3b8;cursor:help;"><InfoFilled /></el-icon>
@@ -1310,9 +1310,9 @@ watch(activeTab, (v) => {
                 <el-tooltip placement="top" effect="light">
                   <template #content>
                     <div style="max-width:260px;line-height:1.55;">
-                      上游原生出图为 1024 或 1792 px;选择 2K/4K 会在图片加载时用本地
-                      <b>Catmull-Rom 插值</b>放大并以 PNG 输出。<br>
-                      <span style="color:#a16207;">注意:这是传统算法放大,不是 AI 超分,</span>不会补出新的纹理或毛发,只会让画面更大更平滑。4K 首次加载约 +0.5~1.5s,之后命中缓存。
+                      上游原生出图为 1024 或 1792 px;选择 2K/4K 会在图片加载时调用
+                      <b>阿里云生成式图像超分</b>并以 PNG 输出。<br>
+                      <span style="color:#047857;">这是 AI 超分,会尝试补充细节;</span>首次加载取决于阿里云任务耗时,之后命中本进程缓存。
                     </div>
                   </template>
                   <el-icon style="margin-left:4px;color:#94a3b8;cursor:help;"><InfoFilled /></el-icon>
@@ -1518,7 +1518,7 @@ watch(activeTab, (v) => {
 .gen-btn { box-shadow: 0 6px 18px -6px rgba(64, 158, 255, 0.55); }
 .opt-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 
-/* ---- 输出尺寸(本地高清放大)单选组 ---- */
+/* ---- 输出尺寸(AI 超分)单选组 ---- */
 .upscale-group { display: flex; width: 100%; }
 .upscale-group :deep(.el-radio-button) { flex: 1; }
 .upscale-group :deep(.el-radio-button__inner) {

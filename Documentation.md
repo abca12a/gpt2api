@@ -11,6 +11,7 @@
 - 无参考图的异步生图已改为更快换号：默认最多 4 次尝试、单次 2 分钟、轮询 90 秒；某账号 `poll_timeout` 后会临时降级暂停调度，避免坏账号连续拖慢任务。
 - 图片任务对前端展示时优先返回本站 `/p/img/<task_id>/<idx>` 签名代理 URL，不直接暴露上游临时 `result_urls`；缺少 `file_ids` 的极老任务才兜底旧直链。
 - `file_ids` 的单图元素可携带 `account_id / conversation_id / file_ref`；图片代理优先使用单图元信息回源，兼容旧任务的任务级账号信息。
+- 2026-04-25 已将 `upscale=2k/4k` 从本地 Catmull-Rom 插值切换为阿里云生成式图像超分：`/p/img` 首次访问拉取 ChatGPT 原图后调用 `GenerateSuperResolutionImage`，轮询 `GetAsyncJobResult` 并立即下载结果；失败回落原图且不再回退本地插值，成功结果仍只缓存在当前进程 LRU。阿里 AK/SK 只写本机忽略文件 `deploy/.env` 和环境变量，不写入 Git。
 - 本地已合并上游多渠道能力，并保留 OAuth 导入、额度汇总、个人图片代理、nginx/端口等本地定制。
 - `deploy/nginx.conf` 当前由同一个 `gpt2api-nginx` 处理公网入口：`lmage2.dimilinks.com` 进入 gpt2api，`cliproxyapi.845817074.xyz` 进入 CLIProxyAPI。
 - 2026-04-25 已新增 `docs/DOWNSTREAM_INTEGRATION.md`，作为下游 `new-api` 后端和前端对接文档；当前确认对外是 `gpt2api -> chatgpt.com` Web 反代路线，不是 OpenAI 官方 API，也不是 `cliproxyapi` 路线。线上快照显示 `gpt-image-2 -> gpt-5-3`，外置渠道为空，活跃账号池为 400 个 `codex/free` 账号。
