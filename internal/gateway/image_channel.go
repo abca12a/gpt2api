@@ -86,7 +86,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	var result *adapter.ImageResult
 	var selected *channel.Route
 	for _, rt := range routes {
-		r, err := rt.Adapter.ImageGenerate(ctx, rt.UpstreamModel, ir)
+		r, err := imageChannelGenerateWithRetry(ctx, rt, ir, "", nil)
 		if err != nil {
 			lastErr = err
 			if adapter.IsContentModerationError(err) {
@@ -281,7 +281,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		var result *adapter.ImageResult
 		var selected *channel.Route
 		for _, rt := range job.Routes {
-			r, err := rt.Adapter.ImageGenerate(ctx, rt.UpstreamModel, job.Request)
+			r, err := imageChannelGenerateWithRetry(ctx, rt, job.Request, job.TaskID, nil)
 			if err != nil {
 				lastErr = err
 				if adapter.IsContentModerationError(err) {
@@ -396,7 +396,7 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	var result *adapter.ImageResult
 	var selected *channel.Route
 	for _, rt := range routes {
-		r, err := rt.Adapter.ImageGenerate(ctx, rt.UpstreamModel, ir)
+		r, err := imageChannelGenerateWithRetry(ctx, rt, ir, "", nil)
 		if err != nil {
 			lastErr = err
 			if adapter.IsContentModerationError(err) {
@@ -557,6 +557,77 @@ type imageChannelFailure struct {
 	HTTPStatus int
 	Message    string
 	Detail     string
+}
+
+func imageChannelGenerateWithRetry(ctx context.Context, rt *channel.Route, req *adapter.ImageRequest, taskID string, sleep func(context.Context, time.Duration) error) (*adapter.ImageResult, error) {
+	if sleep == nil {
+		sleep = sleepWithContext
+	}
+	const maxAttempts = 2
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		result, err := rt.Adapter.ImageGenerate(ctx, rt.UpstreamModel, req)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if attempt >= maxAttempts || !isRetryableImageChannelError(err) {
+			return nil, err
+		}
+		logger.L().Warn("channel image transient fail, retry same channel",
+			zap.Uint64("channel_id", rt.Channel.ID),
+			zap.String("channel_name", rt.Channel.Name),
+			zap.String("task_id", taskID),
+			zap.Int("attempt", attempt),
+			zap.Error(err))
+		if err := sleep(ctx, imageChannelRetryDelay(attempt)); err != nil {
+			return nil, lastErr
+		}
+	}
+	return nil, lastErr
+}
+
+func isRetryableImageChannelError(err error) bool {
+	if err == nil || adapter.IsContentModerationError(err) {
+		return false
+	}
+	var upstream *adapter.UpstreamHTTPError
+	if errors.As(err, &upstream) {
+		if upstream.Status == http.StatusRequestTimeout || upstream.Status >= http.StatusInternalServerError {
+			return true
+		}
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "stream disconnected before completion") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "eof") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "broken pipe")
+}
+
+func imageChannelRetryDelay(attempt int) time.Duration {
+	if attempt <= 0 {
+		return 0
+	}
+	return time.Duration(attempt) * 500 * time.Millisecond
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func imageChannelFailureFromErr(err error) imageChannelFailure {
