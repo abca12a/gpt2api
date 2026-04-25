@@ -163,6 +163,28 @@ Prefer: respond-async
 }
 ```
 
+如果下游已经复用 APIMart 的提交解析器，可以显式打开兼容返回；该模式也会自动按异步提交处理：
+
+```http
+POST /v1/images/generations?async=true&compat=apimart
+```
+
+也可以使用 `response_schema=apimart` 查询参数，或请求头 `X-Response-Format: apimart` / `X-API-Format: apimart` / `X-Compat-Mode: apimart`。开启后异步提交响应变为 APIMart 风格的 `code/data` 包装：
+
+```json
+{
+  "code": 200,
+  "data": [
+    {
+      "status": "submitted",
+      "task_id": "img_0af0fe5de388490597197ee8"
+    }
+  ]
+}
+```
+
+注意：兼容模式需要显式开启，默认响应仍保持现有 OpenAI 兼容形态，避免破坏已接入客户端。
+
 为什么不是 `202`：部分下游网关会把上游 `202` 当错误处理，所以当前 gpt2api 为兼容下游固定返回 `200`。如果 `new-api` 想对自己的前端返回 `202`，那是 `new-api` 自己的协议，不应反向要求 gpt2api 返回 `202`。
 
 ### 3.5 查询异步任务（推荐路径）
@@ -378,6 +400,10 @@ async function getImageTask(taskId: string) {
 
 ## 7. 常见错误码
 
+HTTP 错误响应默认仍保留 OpenAI 兼容结构：`error.code` 是 gpt2api 的稳定字符串错误码，`error.type` 已按 APIMart 常见类型归类（如 `authentication_error`、`payment_required`、`rate_limit_error`、`server_error`、`service_unavailable`）。若请求开启 `compat=apimart` 等兼容模式，HTTP 错误里的 `error.code` 会改为 HTTP 状态码数字，便于复用 APIMart 客户端分支。
+
+Codex/OpenAI 兼容图片渠道如果明确返回 `content_policy_violation`、`content_moderation`、`moderation_blocked`、`safety system` 等内容安全信号，gpt2api 会归因为 `content_moderation`，不会把对应渠道标记为故障，也不会继续换渠道绕过上游安全策略。未出现明确安全信号的 `poll_timeout / upstream_error / no image ref produced` 仍只代表上游未明确失败原因，不能当成违规。
+
 | HTTP / 任务状态 | code | 含义 | 下游建议 |
 | --- | --- | --- | --- |
 | 401 | `missing_api_key` / `invalid_api_key` | gpt2api API Key 缺失或错误 | 检查 new-api 环境变量 |
@@ -386,6 +412,7 @@ async function getImageTask(taskId: string) {
 | 400 | `invalid_request_error` | 参数错误 | 前端/后端参数校验 |
 | 402 | `insufficient_balance` | gpt2api 用户积分不足 | 充值或调整计费 |
 | 429 | `rate_limit_rpm` | API Key RPM 超限 | 降低并发或提高限额 |
+| 400 / failed | `content_moderation` | 上游内容安全策略拒绝本次生图 | 提示用户调整 prompt / 参考图，不按系统故障重试 |
 | 503 | `no_available_account` | 当前没有可调度账号 | 后端排队/稍后重试 |
 | 503 | `rate_limited` | 上游账号限流 | 稍后重试，观察账号池 |
 | 502 / failed | `poll_timeout` | 上游生成后轮询超时 | 可提示用户重试 |

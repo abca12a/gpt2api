@@ -12,7 +12,10 @@
 // Stream 基础设施;等并发压力上来后再把 Runner 接到 Stream 消费者即可。
 package image
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // 任务状态。
 const (
@@ -25,20 +28,66 @@ const (
 
 // 错误码(短字符串,便于排查 & 计费对账)。
 const (
-	ErrUnknown          = "unknown"
-	ErrNoAccount        = "no_available_account"
-	ErrAuthRequired     = "auth_required"
-	ErrRateLimited      = "rate_limited"
-	ErrNetworkTransient = "network_transient" // 瞬态网络错误(EOF / reset),可自动重试
-	ErrPOWTimeout       = "pow_timeout"
-	ErrPOWFailed        = "pow_failed"
-	ErrTurnstile        = "turnstile_required"
-	ErrUpstream         = "upstream_error"
-	ErrPollTimeout      = "poll_timeout"
-	ErrInterrupted      = "interrupted"
-	ErrDownload         = "download_failed"
-	ErrInvalidResponse  = "invalid_response"
+	ErrUnknown           = "unknown"
+	ErrNoAccount         = "no_available_account"
+	ErrAuthRequired      = "auth_required"
+	ErrRateLimited       = "rate_limited"
+	ErrNetworkTransient  = "network_transient" // 瞬态网络错误(EOF / reset),可自动重试
+	ErrPOWTimeout        = "pow_timeout"
+	ErrPOWFailed         = "pow_failed"
+	ErrTurnstile         = "turnstile_required"
+	ErrUpstream          = "upstream_error"
+	ErrPollTimeout       = "poll_timeout"
+	ErrInterrupted       = "interrupted"
+	ErrDownload          = "download_failed"
+	ErrInvalidResponse   = "invalid_response"
+	ErrContentModeration = "content_moderation"
 )
+
+// FormatTaskError 把稳定错误码和原始错误详情合并进 image_tasks.error。
+// 该列历史上只存短错误码；保留前缀码便于计费/统计，同时把详情留给任务查询排障。
+func FormatTaskError(code, detail string) string {
+	code = strings.TrimSpace(code)
+	detail = strings.Join(strings.Fields(strings.TrimSpace(detail)), " ")
+	if code == "" {
+		code = ErrUnknown
+	}
+	if detail == "" || detail == code {
+		return code
+	}
+	return code + ": " + detail
+}
+
+// SplitTaskError 拆分 FormatTaskError 的结果；也兼容历史上直接落库的上游原始错误。
+func SplitTaskError(value string) (code, detail string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", ""
+	}
+	if idx := strings.Index(value, ":"); idx > 0 {
+		candidate := strings.TrimSpace(value[:idx])
+		if isTaskErrorCode(candidate) {
+			return candidate, strings.TrimSpace(value[idx+1:])
+		}
+	}
+	if strings.HasPrefix(strings.ToLower(value), "upstream ") {
+		return ErrUpstream, value
+	}
+	return value, ""
+}
+
+func isTaskErrorCode(value string) bool {
+	if value == "" || len(value) > 80 || strings.ContainsAny(value, " \t\n\r") {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
 
 // Task 对应 image_tasks 表。
 type Task struct {

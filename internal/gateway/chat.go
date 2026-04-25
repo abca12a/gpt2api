@@ -1,12 +1,12 @@
 // Package gateway 实现 OpenAI 兼容的 /v1/* 入口。
 //
 // 职责:
-//   1. 鉴权(API Key,IP/模型白名单)
-//   2. 查模型 → 预扣积分
-//   3. 通过调度器拿账号 Lease
-//   4. 转译请求体 → 调用 chatgpt.com 上游
-//   5. 转译响应(流式 or 聚合) → OpenAI 协议
-//   6. 结算(真实 tokens) / 失败退款 / 释放账号锁 / 更新风控状态
+//  1. 鉴权(API Key,IP/模型白名单)
+//  2. 查模型 → 预扣积分
+//  3. 通过调度器拿账号 Lease
+//  4. 转译请求体 → 调用 chatgpt.com 上游
+//  5. 转译响应(流式 or 聚合) → OpenAI 协议
+//  6. 结算(真实 tokens) / 失败退款 / 释放账号锁 / 更新风控状态
 package gateway
 
 import (
@@ -33,6 +33,7 @@ import (
 	"github.com/432539/gpt2api/internal/usage"
 	"github.com/432539/gpt2api/internal/user"
 	"github.com/432539/gpt2api/pkg/logger"
+	"github.com/432539/gpt2api/pkg/oaierr"
 )
 
 // Handler 聚合网关需要的所有依赖。
@@ -635,15 +636,9 @@ func writeChunk(w io.Writer, f http.Flusher, id, model string, delta DeltaMsg, f
 	}
 }
 
-// openAIError 按 OpenAI 规范返回错误。
+// openAIError 按 OpenAI 规范返回错误,并支持 APIMart 兼容错误类型。
 func openAIError(c *gin.Context, httpStatus int, code, msg string) {
-	c.AbortWithStatusJSON(httpStatus, gin.H{
-		"error": gin.H{
-			"message": msg,
-			"type":    "invalid_request_error",
-			"code":    code,
-		},
-	})
+	oaierr.Abort(c, httpStatus, code, msg)
 }
 
 // ListModels GET /v1/models

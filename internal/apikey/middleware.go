@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/432539/gpt2api/pkg/oaierr"
 )
 
 const (
@@ -62,13 +64,7 @@ func FromCtx(c *gin.Context) (*APIKey, bool) {
 	return k, ok
 }
 
-// openAIAuthError 按 OpenAI 规范返回 401 错误。
+// openAIAuthError 按 OpenAI 规范返回 401 错误,并支持 APIMart 兼容错误类型。
 func openAIAuthError(c *gin.Context, code, msg string) {
-	c.AbortWithStatusJSON(401, gin.H{
-		"error": gin.H{
-			"message": msg,
-			"type":    "invalid_request_error",
-			"code":    code,
-		},
-	})
+	oaierr.Abort(c, 401, code, msg)
 }

@@ -170,7 +170,7 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 				_ = r.quotaDecr.DecrQuota(context.Background(), result.AccountID, n)
 			}
 		} else {
-			_ = r.dao.MarkFailed(ctx, opt.TaskID, result.ErrorCode)
+			_ = r.dao.MarkFailedDetail(ctx, opt.TaskID, result.ErrorCode, result.ErrorMessage)
 		}
 	}
 	return result

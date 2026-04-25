@@ -89,6 +89,13 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		r, err := rt.Adapter.ImageGenerate(ctx, rt.UpstreamModel, ir)
 		if err != nil {
 			lastErr = err
+			if adapter.IsContentModerationError(err) {
+				logger.L().Warn("channel image content moderation",
+					zap.Uint64("channel_id", rt.Channel.ID),
+					zap.String("channel_name", rt.Channel.Name),
+					zap.Error(err))
+				break
+			}
 			_ = h.Channels.Svc().MarkHealth(context.Background(), rt.Channel, false, err.Error())
 			logger.L().Warn("channel image fail, try next",
 				zap.Uint64("channel_id", rt.Channel.ID),
@@ -102,12 +109,9 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	}
 
 	if result == nil {
-		refund("upstream_error")
-		msg := "所有上游渠道均不可用"
-		if lastErr != nil {
-			msg += ":" + lastErr.Error()
-		}
-		openAIError(c, http.StatusBadGateway, "upstream_error", msg)
+		failure := imageChannelFailureFromErr(lastErr)
+		refund(failure.Code)
+		openAIError(c, failure.HTTPStatus, failure.Code, failure.Message)
 		return true
 	}
 	_ = h.Channels.Svc().MarkHealth(context.Background(), selected.Channel, true, "")
@@ -226,11 +230,7 @@ func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 		IP:      c.ClientIP(),
 		UA:      c.Request.UserAgent(),
 	})
-	c.JSON(asyncImageSubmitStatusCode(), ImageGenResponse{
-		Created: time.Now().Unix(),
-		TaskID:  taskID,
-		Data:    []ImageGenData{},
-	})
+	writeAsyncImageSubmit(c, taskID)
 	return true, true
 }
 
@@ -284,6 +284,14 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 			r, err := rt.Adapter.ImageGenerate(ctx, rt.UpstreamModel, job.Request)
 			if err != nil {
 				lastErr = err
+				if adapter.IsContentModerationError(err) {
+					logger.L().Warn("channel async image content moderation",
+						zap.Uint64("channel_id", rt.Channel.ID),
+						zap.String("channel_name", rt.Channel.Name),
+						zap.String("task_id", job.TaskID),
+						zap.Error(err))
+					break
+				}
 				_ = h.Channels.Svc().MarkHealth(context.Background(), rt.Channel, false, err.Error())
 				logger.L().Warn("channel async image fail, try next",
 					zap.Uint64("channel_id", rt.Channel.ID),
@@ -298,14 +306,11 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		}
 
 		if result == nil {
+			failure := imageChannelFailureFromErr(lastErr)
 			rec.Status = usage.StatusFailed
-			rec.ErrorCode = "upstream_error"
+			rec.ErrorCode = failure.Code
 			if h.DAO != nil {
-				msg := "upstream_error"
-				if lastErr != nil {
-					msg = lastErr.Error()
-				}
-				_ = h.DAO.MarkFailed(context.Background(), job.TaskID, msg)
+				_ = h.DAO.MarkFailedDetail(context.Background(), job.TaskID, failure.Code, failure.Detail)
 			}
 			if job.Cost > 0 && h.Billing != nil {
 				_ = h.Billing.Refund(context.Background(), job.UserID, job.KeyID, job.Cost, job.RefID, "image channel async refund")
@@ -394,6 +399,13 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 		r, err := rt.Adapter.ImageGenerate(ctx, rt.UpstreamModel, ir)
 		if err != nil {
 			lastErr = err
+			if adapter.IsContentModerationError(err) {
+				logger.L().Warn("channel chat image content moderation",
+					zap.Uint64("channel_id", rt.Channel.ID),
+					zap.String("channel_name", rt.Channel.Name),
+					zap.Error(err))
+				break
+			}
 			_ = h.Channels.Svc().MarkHealth(context.Background(), rt.Channel, false, err.Error())
 			logger.L().Warn("channel chat image fail, try next",
 				zap.Uint64("channel_id", rt.Channel.ID),
@@ -407,12 +419,9 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	}
 
 	if result == nil {
-		refund("upstream_error")
-		msg := "所有上游渠道均不可用"
-		if lastErr != nil {
-			msg += ":" + lastErr.Error()
-		}
-		openAIError(c, http.StatusBadGateway, "upstream_error", msg)
+		failure := imageChannelFailureFromErr(lastErr)
+		refund(failure.Code)
+		openAIError(c, failure.HTTPStatus, failure.Code, failure.Message)
 		return true
 	}
 	_ = h.Channels.Svc().MarkHealth(context.Background(), selected.Channel, true, "")
@@ -541,4 +550,36 @@ func actualCount(r *adapter.ImageResult) int {
 		return 1
 	}
 	return n
+}
+
+type imageChannelFailure struct {
+	Code       string
+	HTTPStatus int
+	Message    string
+	Detail     string
+}
+
+func imageChannelFailureFromErr(err error) imageChannelFailure {
+	detail := ""
+	if err != nil {
+		detail = err.Error()
+	}
+	if adapter.IsContentModerationError(err) {
+		return imageChannelFailure{
+			Code:       imagepkg.ErrContentModeration,
+			HTTPStatus: http.StatusBadRequest,
+			Message:    localizeImageErr(imagepkg.ErrContentModeration, detail),
+			Detail:     detail,
+		}
+	}
+	msg := "所有上游渠道均不可用"
+	if detail != "" {
+		msg += ":" + detail
+	}
+	return imageChannelFailure{
+		Code:       "upstream_error",
+		HTTPStatus: http.StatusBadGateway,
+		Message:    msg,
+		Detail:     detail,
+	}
 }

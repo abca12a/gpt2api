@@ -86,10 +86,15 @@ func (d *DAO) UpdateCost(ctx context.Context, taskID string, cost int64) error {
 
 // MarkFailed 更新失败状态(带错误码)。
 func (d *DAO) MarkFailed(ctx context.Context, taskID, errorCode string) error {
+	return d.MarkFailedDetail(ctx, taskID, errorCode, "")
+}
+
+// MarkFailedDetail 更新失败状态,同时保留原始错误详情方便任务查询排障。
+func (d *DAO) MarkFailedDetail(ctx context.Context, taskID, errorCode, detail string) error {
 	_, err := d.db.ExecContext(ctx, `
 UPDATE image_tasks
    SET status='failed', error=?, finished_at=NOW()
- WHERE task_id=?`, truncate(errorCode, 500), taskID)
+ WHERE task_id=?`, truncate(FormatTaskError(errorCode, detail), 500), taskID)
 	return err
 }
 

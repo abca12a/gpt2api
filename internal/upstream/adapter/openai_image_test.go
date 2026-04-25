@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -124,5 +125,44 @@ func TestOpenAIImageGenerateUsesEditsEndpointForReferenceImages(t *testing.T) {
 	}
 	if _, ok := got["response_format"]; ok {
 		t.Fatalf("response_format should be omitted for GPT Image edits: %#v", got)
+	}
+}
+
+func TestOpenAIImageGenerateClassifiesContentPolicyViolation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":"content_policy_violation","message":"Your request was rejected as a result of our safety system.","type":"invalid_request_error"}}`))
+	}))
+	defer srv.Close()
+
+	a := NewOpenAI(Params{BaseURL: srv.URL, APIKey: "test-key"})
+	_, err := a.ImageGenerate(context.Background(), "gpt-image-2", &ImageRequest{Prompt: "blocked"})
+	if err == nil {
+		t.Fatal("expected image generation error")
+	}
+	if !IsContentModerationError(err) {
+		t.Fatalf("expected content moderation error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "content_policy_violation") {
+		t.Fatalf("error should preserve upstream code for logs, got %v", err)
+	}
+}
+
+func TestOpenAIImageGenerateClassifiesSafetySystemMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"Your request was rejected as a result of our safety system.","type":"invalid_request_error"}}`))
+	}))
+	defer srv.Close()
+
+	a := NewOpenAI(Params{BaseURL: srv.URL, APIKey: "test-key"})
+	_, err := a.ImageGenerate(context.Background(), "gpt-image-2", &ImageRequest{Prompt: "blocked"})
+	if err == nil {
+		t.Fatal("expected image generation error")
+	}
+	if !IsContentModerationError(err) {
+		t.Fatalf("expected safety-system message to classify as content moderation, got %v", err)
 	}
 }

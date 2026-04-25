@@ -25,6 +25,7 @@ import (
 	"github.com/432539/gpt2api/internal/upstream/chatgpt"
 	"github.com/432539/gpt2api/internal/usage"
 	"github.com/432539/gpt2api/pkg/logger"
+	"github.com/432539/gpt2api/pkg/oaierr"
 )
 
 // 单张参考图的硬上限(字节)。chatgpt.com 的 /backend-api/files 实测上限大致 20MB。
@@ -468,11 +469,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 			IP:            c.ClientIP(),
 			UA:            c.Request.UserAgent(),
 		})
-		c.JSON(asyncImageSubmitStatusCode(), ImageGenResponse{
-			Created: time.Now().Unix(),
-			TaskID:  taskID,
-			Data:    []ImageGenData{},
-		})
+		writeAsyncImageSubmit(c, taskID)
 		return
 	}
 
@@ -936,9 +933,18 @@ func nativeImageChannelSize(size string, targetLongSide int) string {
 	if targetLongSide <= 0 {
 		targetLongSide = 1024
 	}
+	const minPixelBudget = 1024 * 1024
 	pixelBudget := targetLongSide * targetLongSide
 	if targetLongSide >= 3840 {
 		pixelBudget = 3840 * 2160
+	}
+	requiredPixelBudget := 0
+	requiredLongSide := 0
+	if targetLongSide <= 1024 {
+		requiredPixelBudget = minPixelBudget
+		if widthRatio != heightRatio {
+			requiredLongSide = 1536
+		}
 	}
 	maxRatioSide := widthRatio
 	if heightRatio > maxRatioSide {
@@ -954,10 +960,27 @@ func nativeImageChannelSize(size string, targetLongSide int) string {
 		if width%16 != 0 || height%16 != 0 {
 			continue
 		}
-		if width*height > pixelBudget {
+		area := width * height
+		if area > pixelBudget {
 			continue
 		}
+		if requiredPixelBudget > 0 && (area < requiredPixelBudget || maxInt(width, height) < requiredLongSide) {
+			break
+		}
 		return fmt.Sprintf("%dx%d", width, height)
+	}
+	if requiredPixelBudget > 0 {
+		upperScale := 3840 / maxRatioSide
+		for scale := maxScale + 1; scale <= upperScale; scale++ {
+			width := widthRatio * scale
+			height := heightRatio * scale
+			if width%16 != 0 || height%16 != 0 {
+				continue
+			}
+			if width*height >= requiredPixelBudget && maxInt(width, height) >= requiredLongSide {
+				return fmt.Sprintf("%dx%d", width, height)
+			}
+		}
 	}
 	return ""
 }
@@ -976,7 +999,28 @@ func parseImageAspectRatio(size string) (int, int, bool) {
 	if errW != nil || errH != nil || width <= 0 || height <= 0 {
 		return 0, 0, false
 	}
+	if div := gcd(width, height); div > 1 {
+		width /= div
+		height /= div
+	}
 	return width, height, true
+}
+
+func gcd(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	if a < 0 {
+		return -a
+	}
+	return a
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func logImageRequestOptions(msg string, req *ImageGenRequest, explicitUpscale string) {
@@ -1049,6 +1093,34 @@ func ifEmpty(s, fallback string) string {
 
 func asyncImageSubmitStatusCode() int { return http.StatusOK }
 
+type apimartImageSubmitResponse struct {
+	Code int                       `json:"code"`
+	Data []apimartImageSubmitEntry `json:"data"`
+}
+
+type apimartImageSubmitEntry struct {
+	Status string `json:"status"`
+	TaskID string `json:"task_id"`
+}
+
+func writeAsyncImageSubmit(c *gin.Context, taskID string) {
+	if oaierr.WantsAPIMart(c) {
+		c.JSON(asyncImageSubmitStatusCode(), apimartImageSubmitResponse{
+			Code: http.StatusOK,
+			Data: []apimartImageSubmitEntry{{
+				Status: "submitted",
+				TaskID: taskID,
+			}},
+		})
+		return
+	}
+	c.JSON(asyncImageSubmitStatusCode(), ImageGenResponse{
+		Created: time.Now().Unix(),
+		TaskID:  taskID,
+		Data:    []ImageGenData{},
+	})
+}
+
 func buildImageTaskCompatPayload(t *image.Task) gin.H {
 	status, progress := imageTaskCompatStatus(t.Status)
 	out := gin.H{
@@ -1073,10 +1145,11 @@ func buildImageTaskCompatPayload(t *image.Task) gin.H {
 	}
 
 	if t.Status == image.StatusFailed {
-		code := ifEmpty(t.Error, "task_failed")
+		code, detail := image.SplitTaskError(t.Error)
+		code = ifEmpty(code, "task_failed")
 		out["error"] = gin.H{
 			"code":    code,
-			"message": localizeImageErr(code, ""),
+			"message": localizeImageErr(code, detail),
 		}
 	}
 	return out
@@ -1124,6 +1197,9 @@ func shouldWaitForImageResult(c *gin.Context, req ImageGenRequest) bool {
 				return false
 			}
 		}
+		if oaierr.WantsAPIMart(c) {
+			return false
+		}
 	}
 	if req.WaitForResult != nil {
 		return *req.WaitForResult
@@ -1162,6 +1238,8 @@ func localizeImageErr(code, raw string) string {
 		zh = "图片生成失败"
 	case image.ErrInterrupted:
 		zh = "任务被服务重启中断,请重新提交"
+	case image.ErrContentModeration:
+		zh = "上游内容安全策略拒绝了本次生图,请调整 prompt 或参考图后重试"
 	case "upstream_error":
 		zh = "上游返回错误"
 	default:

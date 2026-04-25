@@ -307,5 +307,5 @@ func (a *openaiAdapter) Ping(ctx context.Context) error {
 // upstreamErr 读取响应 body 做简要错误归纳。
 func upstreamErr(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
-	return fmt.Errorf("upstream %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	return newUpstreamHTTPError(resp, data)
 }

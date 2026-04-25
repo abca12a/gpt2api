@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,7 @@ func TestShouldWaitForImageResultAsyncCompatibility(t *testing.T) {
 		{name: "default sync", target: "/v1/images/generations", want: true},
 		{name: "query async true", target: "/v1/images/generations?async=true", want: false},
 		{name: "query wait false", target: "/v1/images/generations?wait_for_result=false", want: false},
+		{name: "apimart compat", target: "/v1/images/generations?compat=apimart", want: false},
 		{name: "prefer respond async", target: "/v1/images/generations", header: map[string]string{"Prefer": "respond-async"}, want: false},
 		{name: "body wait false", target: "/v1/images/generations", req: ImageGenRequest{WaitForResult: boolPtr(false)}, want: false},
 	}
@@ -50,6 +52,50 @@ func boolPtr(v bool) *bool { return &v }
 func TestAsyncImageSubmissionUsesOKForUpstreamGatewayCompatibility(t *testing.T) {
 	if asyncImageSubmitStatusCode() != http.StatusOK {
 		t.Fatalf("async submit status = %d, want %d", asyncImageSubmitStatusCode(), http.StatusOK)
+	}
+}
+
+func TestWriteAsyncImageSubmitKeepsDefaultShape(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations?async=true", nil)
+
+	writeAsyncImageSubmit(c, "img_default")
+
+	var got struct {
+		TaskID string         `json:"task_id"`
+		Data   []ImageGenData `json:"data"`
+		Code   *int           `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal default submit payload: %v", err)
+	}
+	if got.TaskID != "img_default" || got.Code != nil || len(got.Data) != 0 {
+		t.Fatalf("unexpected default submit payload: %#v", got)
+	}
+}
+
+func TestWriteAsyncImageSubmitSupportsAPIMartShape(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations?async=true&compat=apimart", nil)
+
+	writeAsyncImageSubmit(c, "task_01KPQ7J7DWB7QZ3WCEK3YVPBRA")
+
+	var got struct {
+		Code int `json:"code"`
+		Data []struct {
+			Status string `json:"status"`
+			TaskID string `json:"task_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal apimart submit payload: %v", err)
+	}
+	if got.Code != http.StatusOK || len(got.Data) != 1 || got.Data[0].Status != "submitted" || got.Data[0].TaskID == "" {
+		t.Fatalf("unexpected APIMart submit payload: %#v", got)
 	}
 }
 
@@ -182,8 +228,8 @@ func TestImageRequestForChannelMaps2KAnd1KRatios(t *testing.T) {
 
 	req = &ImageGenRequest{Size: "16:9", Resolution: "1k"}
 	got = imageRequestForChannel(req, requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality))
-	if got.Size != "1024x576" {
-		t.Fatalf("16:9 1k size = %q, want 1024x576", got.Size)
+	if got.Size != "1536x864" {
+		t.Fatalf("16:9 1k size = %q, want 1536x864", got.Size)
 	}
 
 	req = &ImageGenRequest{Size: "1024x1536", Resolution: "4k"}
@@ -335,5 +381,74 @@ func TestBuildImageTaskCompatPayloadFailureUsesErrorObject(t *testing.T) {
 	}
 	if got.Status != "failed" || got.Error.Code != imagepkg.ErrPollTimeout || got.Error.Message == "" {
 		t.Fatalf("unexpected failure payload: %#v", got)
+	}
+}
+
+func TestBuildImageTaskCompatPayloadFailurePreservesDiagnosticDetail(t *testing.T) {
+	task := &imagepkg.Task{
+		TaskID:    "img_failed",
+		Status:    imagepkg.StatusFailed,
+		Error:     imagepkg.FormatTaskError(imagepkg.ErrUpstream, `upstream 502: stream disconnected before completion`),
+		CreatedAt: time.Unix(1777040000, 0),
+	}
+
+	body, err := json.Marshal(buildImageTaskCompatPayload(task))
+	if err != nil {
+		t.Fatalf("marshal compat payload: %v", err)
+	}
+
+	var got struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal compat payload: %v", err)
+	}
+	if got.Error.Code != imagepkg.ErrUpstream {
+		t.Fatalf("code = %q, want %q", got.Error.Code, imagepkg.ErrUpstream)
+	}
+	if !strings.Contains(got.Error.Message, "stream disconnected before completion") {
+		t.Fatalf("message should preserve upstream detail, got %q", got.Error.Message)
+	}
+}
+
+func TestImageChannelFailureClassifiesContentModeration(t *testing.T) {
+	failure := imageChannelFailureFromErr(errors.New(`upstream 400: {"error":{"code":"content_policy_violation","message":"blocked by policy"}}`))
+	if failure.Code != imagepkg.ErrContentModeration {
+		t.Fatalf("code = %q, want %q", failure.Code, imagepkg.ErrContentModeration)
+	}
+	if failure.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("http status = %d, want 400", failure.HTTPStatus)
+	}
+	if !strings.Contains(failure.Message, "内容安全") {
+		t.Fatalf("message should mention content safety, got %q", failure.Message)
+	}
+	if !strings.Contains(failure.Detail, "content_policy_violation") {
+		t.Fatalf("detail should preserve upstream error, got %q", failure.Detail)
+	}
+}
+
+func TestNativeImageChannelSizeAvoidsCodexMinimumPixelBudget(t *testing.T) {
+	tests := []struct {
+		name           string
+		size           string
+		targetLongSide int
+		want           string
+	}{
+		{name: "square 1k remains 1024", size: "1:1", targetLongSide: 1024, want: "1024x1024"},
+		{name: "wide 1k grows above minimum area", size: "16:9", targetLongSide: 1024, want: "1536x864"},
+		{name: "tall 1k grows above minimum area", size: "9:16", targetLongSide: 1024, want: "864x1536"},
+		{name: "portrait ratio grows above minimum area", size: "2:3", targetLongSide: 1024, want: "1024x1536"},
+		{name: "wide ratio is reduced before sizing", size: "21:9", targetLongSide: 1024, want: "1568x672"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nativeImageChannelSize(tt.size, tt.targetLongSide); got != tt.want {
+				t.Fatalf("nativeImageChannelSize(%q, %d) = %q, want %q", tt.size, tt.targetLongSide, got, tt.want)
+			}
+		})
 	}
 }
