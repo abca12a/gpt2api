@@ -20,6 +20,9 @@ type ChatCompletionsRequest struct {
 	OutputCompression *int                   `json:"output_compression,omitempty"`
 	Background        string                 `json:"background,omitempty"`
 	Moderation        string                 `json:"moderation,omitempty"`
+	Resolution        string                 `json:"resolution,omitempty"`
+	ImageSize         string                 `json:"image_size,omitempty"`
+	Scale             string                 `json:"scale,omitempty"`
 	Upscale           string                 `json:"upscale,omitempty"`
 	Extra             map[string]interface{} `json:"-"`
 }

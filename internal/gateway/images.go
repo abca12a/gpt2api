@@ -71,6 +71,9 @@ type ImageGenRequest struct {
 	OutputCompression *int     `json:"output_compression,omitempty"`
 	Background        string   `json:"background,omitempty"`
 	Moderation        string   `json:"moderation,omitempty"`
+	Resolution        string   `json:"resolution,omitempty"`
+	ImageSize         string   `json:"image_size,omitempty"`
+	Scale             string   `json:"scale,omitempty"`
 	User              string   `json:"user,omitempty"`
 	ReferenceImages   []string `json:"reference_images,omitempty"` // 非标准扩展,见注释
 	// Upscale 非标准扩展:控制"本服务对原图做本地高清放大"的目标档位。
@@ -240,8 +243,9 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	if req.Size == "" {
 		req.Size = "1024x1024"
 	}
-	explicitUpscale := image.ValidateUpscale(req.Upscale)
+	explicitUpscale := requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality)
 	req.Upscale = explicitUpscale
+	logImageRequestOptions("image generation options", &req, explicitUpscale)
 
 	refID := uuid.NewString()
 	rec := &usage.Log{
@@ -585,8 +589,9 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 			"图像模型需要用户消息作为 prompt,请检查 messages 内容")
 		return
 	}
-	explicitUpscale := image.ValidateUpscale(req.Upscale)
+	explicitUpscale := requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality)
 	imgReq := normalizeChatImageRequest(prompt, req)
+	logImageRequestOptions("chat image generation options", imgReq, explicitUpscale)
 
 	refID := uuid.NewString()
 
@@ -765,9 +770,51 @@ func normalizeChatImageRequest(prompt string, req *ChatCompletionsRequest) *Imag
 		OutputCompression: req.OutputCompression,
 		Background:        req.Background,
 		Moderation:        req.Moderation,
+		Resolution:        req.Resolution,
+		ImageSize:         req.ImageSize,
+		Scale:             req.Scale,
 		User:              req.User,
 		Upscale:           normalizeImageUpscale(size, req.Upscale),
 	}
+}
+
+func requestedUpscaleFromOptions(values ...string) string {
+	for _, value := range values {
+		if scale := image.ValidateUpscale(value); scale != image.UpscaleNone {
+			return scale
+		}
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		normalized = strings.ReplaceAll(normalized, " ", "")
+		normalized = strings.ReplaceAll(normalized, "_", "")
+		normalized = strings.ReplaceAll(normalized, "-", "")
+		if strings.Contains(normalized, "4k") || strings.Contains(normalized, "uhd") || strings.Contains(normalized, "2160p") {
+			return image.Upscale4K
+		}
+		if strings.Contains(normalized, "2k") || strings.Contains(normalized, "1440p") {
+			return image.Upscale2K
+		}
+	}
+	return image.UpscaleNone
+}
+
+func logImageRequestOptions(msg string, req *ImageGenRequest, explicitUpscale string) {
+	if req == nil {
+		return
+	}
+	logger.L().Info(msg,
+		zap.String("model", req.Model),
+		zap.Int("n", req.N),
+		zap.String("size", req.Size),
+		zap.String("quality", req.Quality),
+		zap.String("output_format", req.OutputFormat),
+		zap.String("background", req.Background),
+		zap.String("moderation", req.Moderation),
+		zap.String("resolution", req.Resolution),
+		zap.String("image_size", req.ImageSize),
+		zap.String("scale", req.Scale),
+		zap.String("upscale", req.Upscale),
+		zap.String("explicit_upscale", explicitUpscale),
+	)
 }
 
 func normalizeImageUpscale(size, requested string) string {

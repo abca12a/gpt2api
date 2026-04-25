@@ -125,6 +125,21 @@ func TestNormalizeImageUpscaleInfers2KAnd4KFromSize(t *testing.T) {
 	}
 }
 
+func TestRequestedUpscaleFromAliases(t *testing.T) {
+	if got := requestedUpscaleFromOptions("", "UHD"); got != imagepkg.Upscale4K {
+		t.Fatalf("UHD alias = %q, want 4k", got)
+	}
+	if got := requestedUpscaleFromOptions("", "2160p"); got != imagepkg.Upscale4K {
+		t.Fatalf("2160p alias = %q, want 4k", got)
+	}
+	if got := requestedUpscaleFromOptions("", "2K"); got != imagepkg.Upscale2K {
+		t.Fatalf("2K alias = %q, want 2k", got)
+	}
+	if got := requestedUpscaleFromOptions("", "high"); got != imagepkg.UpscaleNone {
+		t.Fatalf("high should not imply upscale, got %q", got)
+	}
+}
+
 func TestBuildImageTaskCompatPayloadSuccess(t *testing.T) {
 	created := time.Unix(1777040000, 0)
 	finished := created.Add(time.Minute)
