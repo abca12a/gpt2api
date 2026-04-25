@@ -364,11 +364,20 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		}
 	}
 
-	// 若本地模型配置了外置渠道(OpenAI DALL·E / Gemini imagen 等),优先走渠道。
+	// 若本地模型配置了外置渠道(OpenAI DALL·E / Gemini imagen / Codex image 等),优先走渠道。
 	// 参考图场景(reference_images)仍走原 ChatGPT 账号池 Runner。
 	referenceInputs := req.referenceInputs()
-	if h.Channels != nil && explicitUpscale == image.UpscaleNone && len(referenceInputs) == 0 {
-		if handled := h.dispatchImageToChannel(c, ak, m, &req, rec, ratio); handled {
+	waitForResult := shouldWaitForImageResult(c, req)
+	if h.Channels != nil && len(referenceInputs) == 0 {
+		channelReq := imageRequestForChannel(&req, explicitUpscale)
+		if !waitForResult {
+			if handled, submitted := h.dispatchImageToChannelAsync(c, ak, m, channelReq, rec, ratio); handled {
+				if submitted {
+					writeUsageOnReturn = false
+				}
+				return
+			}
+		} else if handled := h.dispatchImageToChannel(c, ak, m, channelReq, rec, ratio); handled {
 			return
 		}
 	}
@@ -443,7 +452,6 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	if len(refs) > 0 {
 		maxAttempts = 1
 	}
-	waitForResult := shouldWaitForImageResult(c, req)
 	if !waitForResult {
 		writeUsageOnReturn = false
 		h.runImageTaskAsync(imageAsyncJob{
@@ -563,16 +571,7 @@ func (h *ImagesHandler) ImageTask(c *gin.Context) {
 		return
 	}
 
-	urls := t.DecodeResultURLs()
-	data := make([]ImageGenData, 0, len(urls))
-	fileIDs := t.DecodeFileIDs()
-	for i := range urls {
-		d := ImageGenData{URL: image.BuildImageProxyURL(t.TaskID, i, image.ImageProxyTTL)}
-		if i < len(fileIDs) {
-			d.FileID = image.PublicFileID(fileIDs[i])
-		}
-		data = append(data, d)
-	}
+	data := imageTaskData(t)
 
 	c.JSON(http.StatusOK, gin.H{
 		"task_id":         t.TaskID,
@@ -668,8 +667,9 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 			return
 		}
 	}
-	if h.Channels != nil && explicitUpscale == image.UpscaleNone {
-		if handled := h.dispatchChatImageToChannel(c, ak, m, imgReq, rec, ratio, startAt); handled {
+	if h.Channels != nil {
+		channelReq := imageRequestForChannel(imgReq, explicitUpscale)
+		if handled := h.dispatchChatImageToChannel(c, ak, m, channelReq, rec, ratio, startAt); handled {
 			return
 		}
 	}
@@ -873,6 +873,113 @@ func requestedUpscaleFromOptions(values ...string) string {
 	return image.UpscaleNone
 }
 
+func imageRequestForChannel(req *ImageGenRequest, explicitUpscale string) *ImageGenRequest {
+	if req == nil {
+		return nil
+	}
+	out := *req
+	if size := nativeImageChannelSize(req.Size, imageChannelLongSide(req, explicitUpscale)); size != "" {
+		out.Size = size
+	}
+	if imageResolutionLongSide(out.Quality) > 0 {
+		out.Quality = ""
+	}
+	return &out
+}
+
+func imageChannelLongSide(req *ImageGenRequest, explicitUpscale string) int {
+	switch explicitUpscale {
+	case image.Upscale4K:
+		return 3840
+	case image.Upscale2K:
+		return 2048
+	}
+	if req == nil {
+		return 0
+	}
+	return imageResolutionLongSide(req.Resolution, req.ImageSize, req.Scale, req.Upscale, req.Quality)
+}
+
+func imageResolutionLongSide(values ...string) int {
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		normalized = strings.ReplaceAll(normalized, " ", "")
+		normalized = strings.ReplaceAll(normalized, "_", "")
+		normalized = strings.ReplaceAll(normalized, "-", "")
+		if normalized == "" {
+			continue
+		}
+		if strings.Contains(normalized, "4k") || strings.Contains(normalized, "uhd") || strings.Contains(normalized, "2160p") {
+			return 3840
+		}
+		if strings.Contains(normalized, "2k") || strings.Contains(normalized, "1440p") {
+			return 2048
+		}
+		if strings.Contains(normalized, "1k") || strings.Contains(normalized, "1024p") || normalized == "1024" {
+			return 1024
+		}
+	}
+	return 0
+}
+
+func nativeImageChannelSize(size string, targetLongSide int) string {
+	if _, _, ok := parseImageSize(size); ok {
+		return ""
+	}
+	widthRatio, heightRatio, ok := parseImageAspectRatio(size)
+	if !ok {
+		if strings.EqualFold(strings.TrimSpace(size), "auto") && targetLongSide > 0 {
+			widthRatio, heightRatio, ok = 1, 1, true
+		} else {
+			return ""
+		}
+	}
+	if targetLongSide <= 0 {
+		targetLongSide = 1024
+	}
+	pixelBudget := targetLongSide * targetLongSide
+	if targetLongSide >= 3840 {
+		pixelBudget = 3840 * 2160
+	}
+	maxRatioSide := widthRatio
+	if heightRatio > maxRatioSide {
+		maxRatioSide = heightRatio
+	}
+	maxScale := targetLongSide / maxRatioSide
+	if maxScale <= 0 {
+		return ""
+	}
+	for scale := maxScale; scale > 0; scale-- {
+		width := widthRatio * scale
+		height := heightRatio * scale
+		if width%16 != 0 || height%16 != 0 {
+			continue
+		}
+		if width*height > pixelBudget {
+			continue
+		}
+		return fmt.Sprintf("%dx%d", width, height)
+	}
+	return ""
+}
+
+func parseImageAspectRatio(size string) (int, int, bool) {
+	s := strings.ToLower(strings.TrimSpace(size))
+	if s == "" {
+		return 0, 0, false
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	width, errW := strconv.Atoi(strings.TrimSpace(parts[0]))
+	height, errH := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errW != nil || errH != nil || width <= 0 || height <= 0 {
+		return 0, 0, false
+	}
+	return width, height, true
+}
+
 func logImageRequestOptions(msg string, req *ImageGenRequest, explicitUpscale string) {
 	if req == nil {
 		return
@@ -958,16 +1065,7 @@ func buildImageTaskCompatPayload(t *image.Task) gin.H {
 	}
 
 	if t.Status == image.StatusSuccess {
-		urls := t.DecodeResultURLs()
-		fileIDs := t.DecodeFileIDs()
-		data := make([]ImageGenData, 0, len(urls))
-		for i := range urls {
-			d := ImageGenData{URL: image.BuildImageProxyURL(t.TaskID, i, image.ImageProxyTTL)}
-			if i < len(fileIDs) {
-				d.FileID = image.PublicFileID(fileIDs[i])
-			}
-			data = append(data, d)
-		}
+		data := imageTaskData(t)
 		out["result"] = gin.H{
 			"created": t.CreatedAt.Unix(),
 			"data":    data,
@@ -983,6 +1081,20 @@ func buildImageTaskCompatPayload(t *image.Task) gin.H {
 		}
 	}
 	return out
+}
+
+func imageTaskData(t *image.Task) []ImageGenData {
+	urls := image.BuildTaskImageURLs(t, image.ImageProxyTTL)
+	data := make([]ImageGenData, 0, len(urls))
+	fileIDs := t.DecodeFileIDs()
+	for i, url := range urls {
+		d := ImageGenData{URL: url}
+		if i < len(fileIDs) {
+			d.FileID = image.PublicFileID(fileIDs[i])
+		}
+		data = append(data, d)
+	}
+	return data
 }
 
 func imageTaskCompatStatus(status string) (string, int) {

@@ -140,6 +140,72 @@ func TestRequestedUpscaleFromAliases(t *testing.T) {
 	}
 }
 
+func TestImageRequestForChannelMapsResolutionRatiosToNativeSize(t *testing.T) {
+	req := &ImageGenRequest{Size: "16:9", Resolution: "4k", Quality: "high"}
+	got := imageRequestForChannel(req, requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality))
+	if got == req {
+		t.Fatal("imageRequestForChannel should return a copy")
+	}
+	if got.Size != "3840x2160" {
+		t.Fatalf("16:9 4k size = %q, want 3840x2160", got.Size)
+	}
+	if got.Quality != "high" || req.Size != "16:9" {
+		t.Fatalf("unexpected mutation or quality: got=%#v original=%#v", got, req)
+	}
+
+	req = &ImageGenRequest{Size: "9:16", Resolution: "4k"}
+	got = imageRequestForChannel(req, requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality))
+	if got.Size != "2160x3840" {
+		t.Fatalf("9:16 4k size = %q, want 2160x3840", got.Size)
+	}
+
+	req = &ImageGenRequest{Size: "2:3", Resolution: "4k"}
+	got = imageRequestForChannel(req, requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality))
+	if got.Size != "2336x3504" {
+		t.Fatalf("2:3 4k size = %q, want 2336x3504", got.Size)
+	}
+
+	req = &ImageGenRequest{Size: "1:1", Resolution: "4k"}
+	got = imageRequestForChannel(req, requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality))
+	if got.Size != "2880x2880" {
+		t.Fatalf("1:1 4k size = %q, want 2880x2880", got.Size)
+	}
+}
+
+func TestImageRequestForChannelMaps2KAnd1KRatios(t *testing.T) {
+	req := &ImageGenRequest{Size: "16:9", Resolution: "2k"}
+	got := imageRequestForChannel(req, requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality))
+	if got.Size != "2048x1152" {
+		t.Fatalf("16:9 2k size = %q, want 2048x1152", got.Size)
+	}
+
+	req = &ImageGenRequest{Size: "16:9", Resolution: "1k"}
+	got = imageRequestForChannel(req, requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality))
+	if got.Size != "1024x576" {
+		t.Fatalf("16:9 1k size = %q, want 1024x576", got.Size)
+	}
+
+	req = &ImageGenRequest{Size: "1024x1536", Resolution: "4k"}
+	got = imageRequestForChannel(req, requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality))
+	if got.Size != "1024x1536" {
+		t.Fatalf("pixel size should be preserved, got %q", got.Size)
+	}
+}
+
+func TestImageRequestForChannelSanitizesQualityResolutionAlias(t *testing.T) {
+	req := &ImageGenRequest{Size: "16:9", Quality: "4K", OutputFormat: "png"}
+	got := imageRequestForChannel(req, requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality))
+	if got.Size != "3840x2160" {
+		t.Fatalf("quality alias size = %q, want 3840x2160", got.Size)
+	}
+	if got.Quality != "" {
+		t.Fatalf("quality alias should be stripped before channel dispatch, got %q", got.Quality)
+	}
+	if req.Quality != "4K" {
+		t.Fatalf("original request mutated: %#v", req)
+	}
+}
+
 func TestImageGenRequestReferenceAliases(t *testing.T) {
 	var req ImageGenRequest
 	body := []byte(`{
@@ -201,6 +267,32 @@ func TestBuildImageTaskCompatPayloadSuccess(t *testing.T) {
 	}
 	if len(got.Result.Data) != 1 || got.Result.Data[0].URL == "" || got.Result.Data[0].FileID != "file_123" {
 		t.Fatalf("unexpected result data: %#v", got.Result.Data)
+	}
+}
+
+func TestBuildImageTaskCompatPayloadFallsBackToDirectResultURL(t *testing.T) {
+	task := &imagepkg.Task{
+		TaskID:     "img_channel",
+		Status:     imagepkg.StatusSuccess,
+		ResultURLs: []byte(`["data:image/png;base64,abc"]`),
+		CreatedAt:  time.Unix(1777040000, 0),
+	}
+
+	body, err := json.Marshal(buildImageTaskCompatPayload(task))
+	if err != nil {
+		t.Fatalf("marshal compat payload: %v", err)
+	}
+
+	var got struct {
+		Result struct {
+			Data []ImageGenData `json:"data"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal compat payload: %v", err)
+	}
+	if len(got.Result.Data) != 1 || got.Result.Data[0].URL != "data:image/png;base64,abc" {
+		t.Fatalf("direct result URL not preserved: %#v", got.Result.Data)
 	}
 }
 

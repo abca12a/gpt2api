@@ -14,6 +14,7 @@ import (
 	"github.com/432539/gpt2api/internal/apikey"
 	"github.com/432539/gpt2api/internal/billing"
 	"github.com/432539/gpt2api/internal/channel"
+	imagepkg "github.com/432539/gpt2api/internal/image"
 	modelpkg "github.com/432539/gpt2api/internal/model"
 	"github.com/432539/gpt2api/internal/upstream/adapter"
 	"github.com/432539/gpt2api/internal/usage"
@@ -147,6 +148,194 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		Data:    data,
 	})
 	return true
+}
+
+func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
+	ak *apikey.APIKey, m *modelpkg.Model, req *ImageGenRequest,
+	rec *usage.Log, ratio float64,
+) (bool, bool) {
+	if h.Channels == nil {
+		return false, false
+	}
+	routes, err := h.Channels.Resolve(c.Request.Context(), m.Slug, channel.ModalityImage)
+	if err != nil {
+		if errors.Is(err, channel.ErrNoRoute) {
+			return false, false
+		}
+		logger.L().Warn("channel resolve async image", zap.Error(err), zap.String("model", m.Slug))
+		return false, false
+	}
+	if len(routes) == 0 {
+		return false, false
+	}
+	if h.DAO == nil {
+		rec.Status = usage.StatusFailed
+		rec.ErrorCode = "not_configured"
+		openAIError(c, http.StatusInternalServerError, "not_configured", "图片任务存储未初始化,请联系管理员")
+		return true, false
+	}
+
+	refID := uuid.NewString()
+	rec.RequestID = refID
+	cost := billing.ComputeImageCost(m, req.N, ratio)
+	if cost > 0 {
+		if err := h.Billing.PreDeduct(c.Request.Context(), ak.UserID, ak.ID, cost, refID, "image channel async prepay"); err != nil {
+			rec.Status = usage.StatusFailed
+			if errors.Is(err, billing.ErrInsufficient) {
+				rec.ErrorCode = "insufficient_balance"
+				openAIError(c, http.StatusPaymentRequired, "insufficient_balance",
+					"积分不足,请前往「账单与充值」充值后再试")
+				return true, false
+			}
+			rec.ErrorCode = "billing_error"
+			openAIError(c, http.StatusInternalServerError, "billing_error", "计费异常:"+err.Error())
+			return true, false
+		}
+	}
+
+	taskID := imagepkg.GenerateTaskID()
+	task := &imagepkg.Task{
+		TaskID:          taskID,
+		UserID:          ak.UserID,
+		KeyID:           ak.ID,
+		ModelID:         m.ID,
+		Prompt:          req.Prompt,
+		N:               req.N,
+		Size:            req.Size,
+		Status:          imagepkg.StatusDispatched,
+		EstimatedCredit: cost,
+	}
+	if err := h.DAO.Create(c.Request.Context(), task); err != nil {
+		rec.Status = usage.StatusFailed
+		rec.ErrorCode = "billing_error"
+		if cost > 0 {
+			_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "image channel async create refund")
+		}
+		openAIError(c, http.StatusInternalServerError, "internal_error", "创建任务失败:"+err.Error())
+		return true, false
+	}
+
+	h.runImageChannelTaskAsync(imageChannelAsyncJob{
+		TaskID:  taskID,
+		UserID:  ak.UserID,
+		KeyID:   ak.ID,
+		ModelID: m.ID,
+		Model:   m,
+		Ratio:   ratio,
+		Routes:  routes,
+		Request: imageAdapterRequest(m, req),
+		Cost:    cost,
+		RefID:   refID,
+		IP:      c.ClientIP(),
+		UA:      c.Request.UserAgent(),
+	})
+	c.JSON(asyncImageSubmitStatusCode(), ImageGenResponse{
+		Created: time.Now().Unix(),
+		TaskID:  taskID,
+		Data:    []ImageGenData{},
+	})
+	return true, true
+}
+
+type imageChannelAsyncJob struct {
+	TaskID  string
+	UserID  uint64
+	KeyID   uint64
+	ModelID uint64
+	Model   *modelpkg.Model
+	Ratio   float64
+	Routes  []*channel.Route
+	Request *adapter.ImageRequest
+	Cost    int64
+	RefID   string
+	IP      string
+	UA      string
+}
+
+func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
+	go func() {
+		startAt := time.Now()
+		rec := &usage.Log{
+			UserID:    job.UserID,
+			KeyID:     job.KeyID,
+			ModelID:   job.ModelID,
+			RequestID: job.RefID,
+			Type:      usage.TypeImage,
+			IP:        job.IP,
+			UA:        job.UA,
+		}
+		defer func() {
+			rec.DurationMs = int(time.Since(startAt).Milliseconds())
+			if rec.Status == "" {
+				rec.Status = usage.StatusFailed
+			}
+			if h.Usage != nil {
+				h.Usage.Write(rec)
+			}
+		}()
+
+		if h.DAO != nil {
+			_ = h.DAO.MarkRunning(context.Background(), job.TaskID, 0)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
+		defer cancel()
+
+		var lastErr error
+		var result *adapter.ImageResult
+		var selected *channel.Route
+		for _, rt := range job.Routes {
+			r, err := rt.Adapter.ImageGenerate(ctx, rt.UpstreamModel, job.Request)
+			if err != nil {
+				lastErr = err
+				_ = h.Channels.Svc().MarkHealth(context.Background(), rt.Channel, false, err.Error())
+				logger.L().Warn("channel async image fail, try next",
+					zap.Uint64("channel_id", rt.Channel.ID),
+					zap.String("channel_name", rt.Channel.Name),
+					zap.String("task_id", job.TaskID),
+					zap.Error(err))
+				continue
+			}
+			result = r
+			selected = rt
+			break
+		}
+
+		if result == nil {
+			rec.Status = usage.StatusFailed
+			rec.ErrorCode = "upstream_error"
+			if h.DAO != nil {
+				msg := "upstream_error"
+				if lastErr != nil {
+					msg = lastErr.Error()
+				}
+				_ = h.DAO.MarkFailed(context.Background(), job.TaskID, msg)
+			}
+			if job.Cost > 0 && h.Billing != nil {
+				_ = h.Billing.Refund(context.Background(), job.UserID, job.KeyID, job.Cost, job.RefID, "image channel async refund")
+			}
+			return
+		}
+		_ = h.Channels.Svc().MarkHealth(context.Background(), selected.Channel, true, "")
+
+		channelRatio := selected.Channel.Ratio
+		if channelRatio <= 0 {
+			channelRatio = 1.0
+		}
+		finalCost := billing.ComputeImageCost(job.Model, actualCount(result), job.Ratio*channelRatio)
+		if job.Cost > 0 && h.Billing != nil {
+			if err := h.Billing.Settle(context.Background(), job.UserID, job.KeyID, job.Cost, finalCost, job.RefID, "image channel async settle"); err != nil {
+				logger.L().Error("billing settle async channel image", zap.Error(err), zap.String("ref", job.RefID))
+			}
+		}
+		if h.Keys != nil && h.Keys.DAO() != nil {
+			_ = h.Keys.DAO().TouchUsage(context.Background(), job.KeyID, job.IP, finalCost)
+		}
+		if h.DAO != nil {
+			_ = h.DAO.MarkSuccess(context.Background(), job.TaskID, "", nil, imageChannelResultURLs(result), finalCost)
+		}
+		rec.Status = usage.StatusSuccess
+		rec.CreditCost = finalCost
+	}()
 }
 
 func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
@@ -303,6 +492,21 @@ func imageChannelChatResponse(model string, result *adapter.ImageResult) ChatCom
 		}},
 		Usage: ChatCompletionUsage{},
 	}
+}
+
+func imageChannelResultURLs(result *adapter.ImageResult) []string {
+	if result == nil {
+		return nil
+	}
+	urls := make([]string, 0, len(result.URLs)+len(result.B64s))
+	urls = append(urls, result.URLs...)
+	for _, b := range result.B64s {
+		if strings.TrimSpace(b) == "" {
+			continue
+		}
+		urls = append(urls, "data:image/png;base64,"+b)
+	}
+	return urls
 }
 
 func actualCount(r *adapter.ImageResult) int {
