@@ -73,8 +73,8 @@ type ImageGenRequest struct {
 	// 算法:golang.org/x/image/draw.CatmullRom(传统插值,不是 AI 超分)。
 	// 生效时机:图片代理 URL 首次请求时做一次 decode+放大+PNG 编码,之后进程内
 	// LRU 缓存命中毫秒级返回。仅影响 /v1/images/proxy/... 的出口字节,不改原图。
-	Upscale string `json:"upscale,omitempty"`
-	WaitForResult   *bool    `json:"wait_for_result,omitempty"`  // false=立即返回 task_id,客户端自行轮询
+	Upscale       string `json:"upscale,omitempty"`
+	WaitForResult *bool  `json:"wait_for_result,omitempty"` // false=立即返回 task_id,客户端自行轮询
 }
 
 // ImageGenData 单张图响应。
@@ -344,10 +344,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	if len(refs) > 0 {
 		maxAttempts = 1
 	}
-	waitForResult := true
-	if req.WaitForResult != nil {
-		waitForResult = *req.WaitForResult
-	}
+	waitForResult := shouldWaitForImageResult(c, req)
 	if !waitForResult {
 		writeUsageOnReturn = false
 		h.runImageTaskAsync(imageAsyncJob{
@@ -657,6 +654,44 @@ func ifEmpty(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+func shouldWaitForImageResult(c *gin.Context, req ImageGenRequest) bool {
+	if c != nil && c.Request != nil {
+		if isTruthy(c.Query("async")) {
+			return false
+		}
+		if isFalsey(c.Query("wait_for_result")) {
+			return false
+		}
+		for _, part := range strings.Split(c.GetHeader("Prefer"), ",") {
+			if strings.EqualFold(strings.TrimSpace(part), "respond-async") {
+				return false
+			}
+		}
+	}
+	if req.WaitForResult != nil {
+		return *req.WaitForResult
+	}
+	return true
+}
+
+func isTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func isFalsey(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "no", "off":
+		return true
+	default:
+		return false
+	}
 }
 
 // localizeImageErr 把 runner 返回的英文错误码 + 原始 err.Error() 压成一段中文提示,

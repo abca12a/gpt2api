@@ -375,6 +375,8 @@ func New(d *Deps) *gin.Engine {
 			v1.POST("/images/generations", d.ImagesH.ImageGenerations)
 			v1.POST("/images/edits", d.ImagesH.ImageEdits)
 			v1.GET("/images/tasks/:id", d.ImagesH.ImageTask)
+			// 兼容部分下游网关(OpenAI/Sora 风格任务轮询路径)。
+			v1.GET("/tasks/:id", d.ImagesH.ImageTask)
 		}
 	}
 
