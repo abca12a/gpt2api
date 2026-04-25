@@ -29,12 +29,14 @@
 - 2026-04-25 针对 `img_0af0fe5de388490597197ee8` 的 `poll_timeout` 已完成热修复部署；部署后本机 smoke 任务 `img_3fa25b0cbe914af58b11c27d` 约 26 秒成功返回 1 张图。
 - 2026-04-25 13:12-13:15 CST 生产号池监控检查：`gpt2api-server/mysql/redis/nginx` 均 healthy，`account.refresh_enabled=true`、`account.quota_probe_enabled=true`，刷新/探测无待办欠账；账号池 200 个活跃账号，检查末快照约 185 healthy / 15 warned，0 dead/suspicious/throttled，图片剩余额度合计约 3837。
 - 同次检查发现两个需后续关注点：所有账号 `image_quota_total=-1`，导致 `/api/admin/accounts/quota-summary` 的 `total_capacity` 原始汇总会显示负数；代理池为空且 200 个账号均未绑定代理，出图日志仍有 `turnstile required` 与 `poll_timeout`，会把相关账号临时降为 warned 并冷却 24 小时。
+- 2026-04-25 14:08 CST 按用户提供的临时 zip 向当前本机生产号池导入 200 个新账号；导入前与现有 200 个账号邮箱无重叠，导入结果 `created=200 / failed=0`，新增账号 ID 为 216-415，均已写入 RT 和过期时间；导入后活跃账号 400 个，快照约 298 healthy / 102 warned，0 dead/suspicious/throttled。临时 zip/导入 payload 已从 `/tmp` 清理，凭据未写入仓库。
 - 2026-04-25 已针对“用户出图慢/长时间等待后失败”做快速换号优化：无参考图生图默认最多 5 次尝试、单次 90 秒、总等待封顶约 5 分钟、常规 Poll 60 秒、调度等待 10 秒；如果 SSE 已结束但没有 `image_gen_task_id` 且没有任何图片引用，只缩短为 20 秒 Poll 后再换号，避免直接失败也避免长时间空等。
 - 同次追加多图优化：`n>1` 并发子图不再每张只试一个账号，单张子图失败时也按快速换号预算重试，提高多图任务至少出图/出满图概率。
 - 2026-04-25 继续修复图片任务长期 `running`：`parseSSE` 已真正启用按事件读取超时；无参考图 SSE 单次静默 30 秒超时，参考图 60 秒超时，超时后返回 `sse read timeout` 并进入既有换号/失败链路，避免 goroutine 长期卡在上游 SSE 读取。
 - 2026-04-25 14:02 CST 部署 SSE timeout 修复时，旧进程中 7 个非终态图片任务被启动清理标记为 `interrupted`；部署后服务健康检查正常，队列中无残留 `queued / dispatched / running`。
 - 同次运维修正：发现代理表有 1 个健康启用代理但账号绑定数为 0，已将 200 个活跃账号统一绑定到 `proxy_id=2`；同时清理有剩余额度的 `warned` 账号冷却时间但保留 `warned` 低优先级状态，可调度候选恢复到约 195 个。
 - 修复部署后的首轮观察：`img_1434f47cf8a24c4aa916bd52` 单图 54 秒成功，`img_4deb7b3814c249578a1db985` 四图 37 秒成功；日志仍可见 `turnstile required`，但已能继续产出，后续重点观察代理质量和超时率。
+- 2026-04-25 14:12 CST 发现新导入的 200 个账号未绑定代理并触发连续 `poll_timeout`，已再次批量绑定全部 400 个活跃账号到 `proxy_id=2`；代码层新增未绑定账号的代理兜底，调度、额度探测、刷新和图片代理在无显式绑定时会使用第一个启用且健康分大于 0 的代理。
 
 ## 已清理的历史流水
 

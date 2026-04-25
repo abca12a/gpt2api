@@ -348,11 +348,16 @@ func (r *accountProxyResolver) ProxyURLForAccount(ctx context.Context, accountID
 		return ""
 	}
 	b, err := r.accSvc.GetBinding(ctx, accountID)
-	if err != nil || b == nil {
-		return ""
+	if err == nil && b != nil {
+		p, err := r.proxySvc.Get(ctx, b.ProxyID)
+		if err == nil && p != nil && p.Enabled {
+			if u, err := r.proxySvc.BuildURL(p); err == nil {
+				return u
+			}
+		}
 	}
-	p, err := r.proxySvc.Get(ctx, b.ProxyID)
-	if err != nil || p == nil || !p.Enabled {
+	p, err := r.proxySvc.FirstEnabled(ctx)
+	if err != nil || p == nil {
 		return ""
 	}
 	u, err := r.proxySvc.BuildURL(p)

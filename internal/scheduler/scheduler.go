@@ -301,6 +301,14 @@ func (s *Scheduler) tryLock(ctx context.Context, acc *account.Account) (*Lease, 
 			}
 		}
 	}
+	if proxyURL == "" && s.proxySvc != nil {
+		if p, err := s.proxySvc.FirstEnabled(ctx); err == nil && p != nil {
+			if u, err := s.proxySvc.BuildURL(p); err == nil {
+				proxyURL = u
+				proxyID = p.ID
+			}
+		}
+	}
 
 	accCopy := acc
 	lease := &Lease{

@@ -119,6 +119,27 @@ func (s *Service) List(ctx context.Context, offset, limit int) ([]*Proxy, int64,
 	return s.dao.List(ctx, offset, limit)
 }
 
+// FirstEnabled 返回第一个启用且健康分大于 0 的代理,用于未显式绑定账号的兜底。
+func (s *Service) FirstEnabled(ctx context.Context) (*Proxy, error) {
+	rows, err := s.dao.ListAllEnabled(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if p := firstUsableProxy(rows); p != nil {
+		return p, nil
+	}
+	return nil, ErrNotFound
+}
+
+func firstUsableProxy(rows []*Proxy) *Proxy {
+	for _, p := range rows {
+		if p != nil && p.Enabled && p.HealthScore > 0 {
+			return p
+		}
+	}
+	return nil
+}
+
 // ---------- 批量导入 ----------
 
 // ImportDefaults 批量导入时的公共默认值。
@@ -133,7 +154,7 @@ type ImportDefaults struct {
 // ImportLineResult 单行结果。Status ∈ "created" | "updated" | "skipped" | "invalid"。
 type ImportLineResult struct {
 	Line   int    `json:"line"`
-	Raw    string `json:"raw"`              // 原始输入(密码会被 *** 掉)
+	Raw    string `json:"raw"` // 原始输入(密码会被 *** 掉)
 	Status string `json:"status"`
 	ID     uint64 `json:"id,omitempty"`
 	Error  string `json:"error,omitempty"`
