@@ -177,6 +177,9 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 func asyncImageTaskTimeout(maxAttempts int, hasReferences bool) time.Duration {
 	attempts, perAttemptTimeout, _, _ := asyncImageRunTuning(maxAttempts, hasReferences)
 	timeout := time.Duration(attempts)*perAttemptTimeout + 30*time.Second
+	if !hasReferences && timeout > 5*time.Minute {
+		return 5 * time.Minute
+	}
 	if hasReferences && timeout < 6*time.Minute {
 		return 6 * time.Minute
 	}
@@ -193,11 +196,11 @@ func asyncImageRunTuning(maxAttempts int, hasReferences bool) (int, time.Duratio
 	if hasReferences {
 		return maxAttempts, 6 * time.Minute, 300 * time.Second, 30 * time.Second
 	}
-	if maxAttempts < 3 {
-		maxAttempts = 3
+	if maxAttempts < 5 {
+		maxAttempts = 5
 	}
-	if maxAttempts > 3 {
-		maxAttempts = 3
+	if maxAttempts > 5 {
+		maxAttempts = 5
 	}
 	return maxAttempts, 90 * time.Second, 60 * time.Second, 10 * time.Second
 }

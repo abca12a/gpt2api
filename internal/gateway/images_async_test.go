@@ -54,8 +54,8 @@ func TestAsyncImageSubmissionUsesOKForUpstreamGatewayCompatibility(t *testing.T)
 
 func TestAsyncImageRunTuningUsesFastNoReferenceDefaults(t *testing.T) {
 	attempts, perAttempt, pollMaxWait, dispatchTimeout := asyncImageRunTuning(0, false)
-	if attempts != 3 {
-		t.Fatalf("attempts = %d, want 3", attempts)
+	if attempts != 5 {
+		t.Fatalf("attempts = %d, want 5", attempts)
 	}
 	if perAttempt != 90*time.Second {
 		t.Fatalf("perAttempt = %s, want 90s", perAttempt)
@@ -70,8 +70,8 @@ func TestAsyncImageRunTuningUsesFastNoReferenceDefaults(t *testing.T) {
 
 func TestAsyncImageRunTuningCapsNoReferenceAttempts(t *testing.T) {
 	attempts, _, _, _ := asyncImageRunTuning(10, false)
-	if attempts != 3 {
-		t.Fatalf("attempts = %d, want 3", attempts)
+	if attempts != 5 {
+		t.Fatalf("attempts = %d, want 5", attempts)
 	}
 }
 
