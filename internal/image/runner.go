@@ -33,6 +33,8 @@ type Runner struct {
 	sched     *scheduler.Scheduler
 	dao       *DAO
 	quotaDecr QuotaDecrementor // 生图成功后立即扣减账号额度(可空,空时跳过)
+
+	runOnceHook func(context.Context, RunOptions, *RunResult) (bool, string, error)
 }
 
 // NewRunner 构造 Runner。
@@ -126,7 +128,7 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 			}
 
 			attemptCtx, cancel := context.WithTimeout(ctx, opt.PerAttemptTimeout)
-			ok, status, err := r.runOnce(attemptCtx, opt, result)
+			ok, status, err := r.callRunOnce(attemptCtx, opt, result)
 			cancel()
 
 			if ok {
@@ -143,9 +145,7 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 			if attempt >= opt.MaxAttempts {
 				break
 			}
-			retryable := status == ErrRateLimited || status == ErrNoAccount ||
-				status == ErrAuthRequired || status == ErrNetworkTransient || status == ErrPollTimeout
-			if !retryable {
+			if !isRetryableImageStatus(status) {
 				break
 			}
 			logger.L().Info("image runner retry with another account",
@@ -188,9 +188,18 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 		accountID  uint64
 		errCode    string
 		errMsg     string
+		attempts   int
 	}
 
 	n := opt.N
+	maxAttempts := opt.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	perAttemptTimeout := opt.PerAttemptTimeout
+	if perAttemptTimeout <= 0 {
+		perAttemptTimeout = 6 * time.Minute
+	}
 	ch := make(chan subResult, n)
 
 	// 子任务:单张、不写 DAO
@@ -204,9 +213,33 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 		go func() {
 			defer wg.Done()
 			sub := &RunResult{Status: StatusFailed, ErrorCode: ErrUnknown}
-			attemptCtx, cancel := context.WithTimeout(ctx, opt.PerAttemptTimeout)
-			defer cancel()
-			ok, status, err := r.runOnce(attemptCtx, subOpt, sub)
+			var ok bool
+			var status string
+			var err error
+			attempt := 0
+			for attempt = 1; attempt <= maxAttempts; attempt++ {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					status = ErrUnknown
+					err = ctxErr
+					break
+				}
+				attemptCtx, cancel := context.WithTimeout(ctx, perAttemptTimeout)
+				ok, status, err = r.callRunOnce(attemptCtx, subOpt, sub)
+				cancel()
+				if ok {
+					break
+				}
+				if status == "" {
+					status = sub.ErrorCode
+				}
+				if attempt >= maxAttempts || !isRetryableImageStatus(status) {
+					break
+				}
+				logger.L().Info("image runner parallel retry with another account",
+					zap.String("task_id", opt.TaskID),
+					zap.String("reason", status),
+					zap.Int("attempt", attempt))
+			}
 			msg := ""
 			if err != nil {
 				msg = err.Error()
@@ -222,6 +255,7 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 				accountID:  sub.AccountID,
 				errCode:    status,
 				errMsg:     msg,
+				attempts:   attempt,
 			}
 		}()
 	}
@@ -230,11 +264,13 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 	go func() { wg.Wait(); close(ch) }()
 
 	var (
-		successCount int
-		lastErrCode  string
-		lastErrMsg   string
+		successCount  int
+		lastErrCode   string
+		lastErrMsg    string
+		totalAttempts int
 	)
 	for sr := range ch {
+		totalAttempts += sr.attempts
 		if sr.ok {
 			successCount++
 			for _, fileID := range sr.fileIDs {
@@ -252,7 +288,7 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 			lastErrMsg = sr.errMsg
 		}
 	}
-	result.Attempts = n
+	result.Attempts = totalAttempts
 
 	if successCount > 0 {
 		result.Status = StatusSuccess
@@ -273,6 +309,18 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 			zap.String("last_err", lastErrCode),
 		)
 	}
+}
+
+func (r *Runner) callRunOnce(ctx context.Context, opt RunOptions, result *RunResult) (bool, string, error) {
+	if r.runOnceHook != nil {
+		return r.runOnceHook(ctx, opt, result)
+	}
+	return r.runOnce(ctx, opt, result)
+}
+
+func isRetryableImageStatus(status string) bool {
+	return status == ErrRateLimited || status == ErrNoAccount ||
+		status == ErrAuthRequired || status == ErrNetworkTransient || status == ErrPollTimeout
 }
 
 // runOnce 一次完整的尝试。返回 (ok, errorCode, err)。
