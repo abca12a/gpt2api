@@ -17,6 +17,9 @@
 - 2026-04-25 已新增 `docs/DOWNSTREAM_INTEGRATION.md`，作为下游 `new-api` 后端和前端对接文档；当时确认对外是 `gpt2api -> chatgpt.com` Web 反代路线，不是 OpenAI 官方 API，也不是 `cliproxyapi` 路线。2026-04-25 21:24 CST 起，纯文生图的 `gpt-image-2` 已额外接入本机 CLIProxyAPI Codex 图片渠道作为外置 image channel；2026-04-25 21:42 CST 起，JSON 参考图与 multipart `/v1/images/edits` 也已接入同一 Codex image channel，只有外置渠道不可用时才回退原 ChatGPT Web Runner。
 - 2026-04-25 用户最终纠正：当前 Codex 所在的 `43.165.170.99:/home/ubuntu/gpt2api` 就是线上 `gpt2api` 部署目录；不要再误判为“无法访问生产机”或“只是本地项目”。下游 `new-api` 与前端链路需单独依据请求日志确认。
 - 如需确认 `gpt2api` 线上部署状态，优先在本机 `/home/ubuntu/gpt2api` 使用 `git status`、`docker compose -f deploy/docker-compose.yml ps/logs`、`/healthz` 验证；只有跨机器排查 `new-api` 时才需要额外 SSH/路径信息。
+- 2026-04-25 22:03 CST 环境拓扑更新：当前 Codex 所在环境是号池服务器；`212.50.232.214` 是后端项目 `new-api` 服务器；`43.161.219.135` 是前端服务器。
+- `212.50.232.214` 已授权本机公钥给 `root`，首选 SSH：`ssh -p 22222 -i /home/ubuntu/.ssh/cliproxyapi_212_50_232_214_ed25519 root@212.50.232.214`；若私钥已在 SSH agent 中可用 `ssh -p 22222 root@212.50.232.214`；备用端口 `22` 也监听，但优先使用 `22222`。登录仅允许密钥，密码登录关闭；授权公钥指纹 `SHA256:TyH28jHuPGunWPVweApDlva5rA2xepwHCyg3eNXnnog`，首次连接校验主机 ED25519 指纹 `SHA256:0nL2dQNO9AcxSFdArlpUUHPzP3JZGlbr/TPEiNbI2Js`。
+- `43.161.219.135` 当前已知为前端服务器：HTTP `http://43.161.219.135` 可访问并由 `nginx/1.24.0 (Ubuntu)` 响应，SSH `22` 端口可达但本机尚未获得该服务器有效登录凭据；HTTPS `443` 当时未开放或被过滤。
 
 ## 长期注意事项
 
