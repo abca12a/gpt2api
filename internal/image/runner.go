@@ -446,16 +446,6 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		fileRefs = append(fileRefs, "sed:"+s)
 	}
 
-	if shouldSkipImagePoll(sseResult, fileRefs) {
-		r.sched.MarkWarned(context.Background(), lease.Account.ID)
-		logger.L().Warn("image runner SSE missing image task, retry account",
-			zap.String("task_id", opt.TaskID),
-			zap.Uint64("account_id", lease.Account.ID),
-			zap.String("conv_id", convID),
-			zap.String("finish_type", sseResult.FinishType))
-		return false, ErrPollTimeout, errors.New("sse completed without image task")
-	}
-
 	// SSE 已经把期望数量的图带回来了 → 直接下载,跳过 Poll,省时间
 	if len(fileRefs) >= opt.N {
 		logger.L().Info("image runner enough refs from SSE, skip polling",
@@ -469,9 +459,17 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		// SSE 没给够(常见于 IMG2 只走 tool 消息场景)→ 短轮询补齐。
 		// 单轮新会话,不需要 baseline:conversation 里出现的每条 image_gen tool 消息
 		// 都是本次请求的产物。
+		pollMaxWait := imagePollMaxWait(sseResult, fileRefs, opt.PollMaxWait)
 		pollOpt := chatgpt.PollOpts{
 			ExpectedN: opt.N,
-			MaxWait:   opt.PollMaxWait,
+			MaxWait:   pollMaxWait,
+		}
+		if pollMaxWait < opt.PollMaxWait {
+			logger.L().Warn("image runner SSE missing image task, short poll before retry",
+				zap.String("task_id", opt.TaskID),
+				zap.Uint64("account_id", lease.Account.ID),
+				zap.String("conv_id", convID),
+				zap.Duration("poll_max_wait", pollMaxWait))
 		}
 		status, fids, sids := cli.PollConversationForImages(ctx, convID, pollOpt)
 		logger.L().Info("image runner poll done",
@@ -554,8 +552,18 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	return true, "", nil
 }
 
-func shouldSkipImagePoll(sseResult chatgpt.ImageSSEResult, fileRefs []string) bool {
-	return len(fileRefs) == 0 && strings.TrimSpace(sseResult.ImageGenTaskID) == ""
+func imagePollMaxWait(sseResult chatgpt.ImageSSEResult, fileRefs []string, maxWait time.Duration) time.Duration {
+	if maxWait <= 0 {
+		maxWait = 300 * time.Second
+	}
+	if len(fileRefs) > 0 || strings.TrimSpace(sseResult.ImageGenTaskID) != "" {
+		return maxWait
+	}
+	const missingTaskPollMaxWait = 20 * time.Second
+	if maxWait > missingTaskPollMaxWait {
+		return missingTaskPollMaxWait
+	}
+	return maxWait
 }
 
 // classifyUpstream 把上游错误转成内部 error code。
