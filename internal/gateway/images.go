@@ -399,7 +399,16 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "image refund")
 	}
 
-	// 4) 落任务
+	// 4) 解析 reference_images(图生图 / 图像编辑入口都走到这里)。
+	// 必须在落任务前完成,否则参数错误会留下无人执行的 dispatched 任务。
+	refs, err := decodeReferenceInputs(c.Request.Context(), referenceInputs)
+	if err != nil {
+		refund("invalid_request_error")
+		openAIError(c, http.StatusBadRequest, "invalid_reference_image", "参考图解析失败:"+err.Error())
+		return
+	}
+
+	// 5) 落任务
 	taskID := image.GenerateTaskID()
 	task := &image.Task{
 		TaskID:          taskID,
@@ -421,15 +430,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		}
 	}
 
-	// 4.5) 解析 reference_images(图生图 / 图像编辑入口都走到这里)
-	refs, err := decodeReferenceInputs(c.Request.Context(), referenceInputs)
-	if err != nil {
-		refund("invalid_request_error")
-		openAIError(c, http.StatusBadRequest, "invalid_reference_image", "参考图解析失败:"+err.Error())
-		return
-	}
-
-	// 5) 执行(同步阻塞)
+	// 6) 执行(同步阻塞)
 	//
 	// 单请求硬上限 7 分钟:Runner 默认 per-attempt 6 分钟
 	// (SSE ~60s + PollMaxWait 300s + 缓冲),外层再留 1 分钟
