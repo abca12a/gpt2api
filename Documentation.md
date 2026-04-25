@@ -13,6 +13,7 @@
 - `file_ids` 的单图元素可携带 `account_id / conversation_id / file_ref`；图片代理优先使用单图元信息回源，兼容旧任务的任务级账号信息。
 - 本地已合并上游多渠道能力，并保留 OAuth 导入、额度汇总、个人图片代理、nginx/端口等本地定制。
 - `deploy/nginx.conf` 当前由同一个 `gpt2api-nginx` 处理公网入口：`lmage2.dimilinks.com` 进入 gpt2api，`cliproxyapi.845817074.xyz` 进入 CLIProxyAPI。
+- 2026-04-25 已新增 `docs/DOWNSTREAM_INTEGRATION.md`，作为下游 `new-api` 后端和前端对接文档；当前确认对外是 `gpt2api -> chatgpt.com` Web 反代路线，不是 OpenAI 官方 API，也不是 `cliproxyapi` 路线。线上快照显示 `gpt-image-2 -> gpt-5-3`，外置渠道为空，活跃账号池为 400 个 `codex/free` 账号。
 - 2026-04-25 用户最终纠正：当前 Codex 所在的 `43.165.170.99:/home/ubuntu/gpt2api` 就是线上 `gpt2api` 部署目录；不要再误判为“无法访问生产机”或“只是本地项目”。下游 `new-api` 与前端链路需单独依据请求日志确认。
 - 如需确认 `gpt2api` 线上部署状态，优先在本机 `/home/ubuntu/gpt2api` 使用 `git status`、`docker compose -f deploy/docker-compose.yml ps/logs`、`/healthz` 验证；只有跨机器排查 `new-api` 时才需要额外 SSH/路径信息。
 
