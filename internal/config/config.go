@@ -144,6 +144,7 @@ func Load(path string) (*Config, error) {
 		v.SetEnvPrefix("GPT2API")
 		v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 		v.AutomaticEnv()
+		setDefaults(v)
 		if err := v.ReadInConfig(); err != nil {
 			loadErr = fmt.Errorf("read config: %w", err)
 			return
@@ -164,4 +165,16 @@ func Get() *Config {
 		panic("config not loaded; call config.Load first")
 	}
 	return global
+}
+
+func setDefaults(v *viper.Viper) {
+	v.SetDefault("image_super_resolution.enabled", false)
+	v.SetDefault("image_super_resolution.access_key_id", "")
+	v.SetDefault("image_super_resolution.access_key_secret", "")
+	v.SetDefault("image_super_resolution.region_id", "cn-shanghai")
+	v.SetDefault("image_super_resolution.endpoint", "imageenhan.cn-shanghai.aliyuncs.com")
+	v.SetDefault("image_super_resolution.output_format", "png")
+	v.SetDefault("image_super_resolution.output_quality", 95)
+	v.SetDefault("image_super_resolution.poll_interval_sec", 2)
+	v.SetDefault("image_super_resolution.poll_timeout_sec", 120)
 }
