@@ -31,6 +31,15 @@ func TestImagePollMaxWaitKeepsExistingRefsWindow(t *testing.T) {
 	}
 }
 
+func TestImageSSEReadTimeout(t *testing.T) {
+	if got := imageSSEReadTimeout(false); got != 30*time.Second {
+		t.Fatalf("imageSSEReadTimeout(false) = %s, want 30s", got)
+	}
+	if got := imageSSEReadTimeout(true); got != 60*time.Second {
+		t.Fatalf("imageSSEReadTimeout(true) = %s, want 60s", got)
+	}
+}
+
 func TestRunParallelRetriesSubImageOnPollTimeout(t *testing.T) {
 	var calls int32
 	r := &Runner{

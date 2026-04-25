@@ -2,16 +2,16 @@
 //
 // 完整链路(和文字聊天共用 f/conversation,只通过 system_hints=["picture_v2"] 区分):
 //
-//	0. (可选) GET /                              → 拿 oai-did cookie
-//	1. POST /backend-api/f/conversation/prepare      → conduit_token
-//	2. POST /backend-api/sentinel/chat-requirements → chat_token + 可选 POW 挑战
-//	3. POST /backend-api/f/conversation (SSE)         → 边解析边收 file-service://
-//	4. SSE 没直出 file-service 时轮询 GET /backend-api/conversation/{id}
-//	   任何一条 tool 消息出现 file-service / sediment asset_pointer 即算成功,
-//	   够 N 张立即返回;IMG2 已正式上线,不再做"灰度命中判定"。
-//	5. GET /backend-api/files/{fid}/download                   → 签名 URL(file-service)
-//	   GET /backend-api/conversation/{cid}/attachment/{sid}/download → 签名 URL(sediment)
-//	6. GET 签名 URL → 图片字节
+//  0. (可选) GET /                              → 拿 oai-did cookie
+//  1. POST /backend-api/f/conversation/prepare      → conduit_token
+//  2. POST /backend-api/sentinel/chat-requirements → chat_token + 可选 POW 挑战
+//  3. POST /backend-api/f/conversation (SSE)         → 边解析边收 file-service://
+//  4. SSE 没直出 file-service 时轮询 GET /backend-api/conversation/{id}
+//     任何一条 tool 消息出现 file-service / sediment asset_pointer 即算成功,
+//     够 N 张立即返回;IMG2 已正式上线,不再做"灰度命中判定"。
+//  5. GET /backend-api/files/{fid}/download                   → 签名 URL(file-service)
+//     GET /backend-api/conversation/{cid}/attachment/{sid}/download → 签名 URL(sediment)
+//  6. GET 签名 URL → 图片字节
 //
 // 注意:不要调用 /backend-api/conversation/init——这是老客户端路径,在免费账号上会
 // 直接 404 让整条链路失败,上游把 picture_v2 路由完全交给 f/conversation 的 payload。
@@ -305,6 +305,7 @@ type ImageSSEResult struct {
 	SedimentIDs    []string // sediment:// 引用(通常是预览,需要轮询)
 	FinishType     string   // finish_details.type(interrupted/stop/...)
 	ImageGenTaskID string
+	Err            error
 }
 
 var (
@@ -321,6 +322,7 @@ func ParseImageSSE(stream <-chan SSEEvent) ImageSSEResult {
 
 	for ev := range stream {
 		if ev.Err != nil {
+			r.Err = ev.Err
 			return r
 		}
 		data := ev.Data
@@ -373,14 +375,14 @@ func ParseImageSSE(stream <-chan SSEEvent) ImageSSEResult {
 
 // ImageToolMsg 是 conversation.mapping 里一条 IMG2 tool 消息的关键字段。
 type ImageToolMsg struct {
-	MessageID    string
-	CreateTime   float64
-	ModelSlug    string
-	Recipient    string
-	AuthorName   string
+	MessageID     string
+	CreateTime    float64
+	ModelSlug     string
+	Recipient     string
+	AuthorName    string
 	ImageGenTitle string
-	FileIDs      []string // file-service
-	SedimentIDs  []string // sediment
+	FileIDs       []string // file-service
+	SedimentIDs   []string // sediment
 }
 
 // GetConversationMapping 读取会话全量 mapping(轮询用)。

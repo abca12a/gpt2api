@@ -449,6 +449,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		MessageID:     messageID,
 		ChatToken:     cr.Token,
 		ProofToken:    proofToken,
+		SSETimeout:    imageSSEReadTimeout(len(opt.References) > 0),
 		References:    refs,
 	}
 
@@ -481,6 +482,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		zap.String("conv_id", convID),
 		zap.String("finish_type", sseResult.FinishType),
 		zap.String("image_gen_task_id", sseResult.ImageGenTaskID),
+		zap.NamedError("sse_error", sseResult.Err),
 		zap.Int("sse_fids", len(sseResult.FileIDs)),
 		zap.Strings("sse_fids_list", sseResult.FileIDs),
 		zap.Int("sse_sids", len(sseResult.SedimentIDs)),
@@ -612,6 +614,13 @@ func imagePollMaxWait(sseResult chatgpt.ImageSSEResult, fileRefs []string, maxWa
 		return missingTaskPollMaxWait
 	}
 	return maxWait
+}
+
+func imageSSEReadTimeout(hasReferences bool) time.Duration {
+	if hasReferences {
+		return 60 * time.Second
+	}
+	return 30 * time.Second
 }
 
 // classifyUpstream 把上游错误转成内部 error code。

@@ -22,13 +22,13 @@ type ChatMessage struct {
 
 // ConversationOpts 是 StreamConversation 的参数。
 type ConversationOpts struct {
-	Model         string        // 上游模型 slug(如 auto / gpt-4o / o4-mini)
-	Messages      []ChatMessage // OpenAI 风格消息
-	ParentMsgID   string        // 可选,为空自动生成
-	ConvID        string        // 可选,为空则新会话
-	ProofToken    string        // 可选,POW 解出后填入
-	ChatToken     string        // 必传(来自 ChatRequirements)
-	ReadTimeout   time.Duration // SSE 读超时(单次事件间隔),默认 60s
+	Model       string        // 上游模型 slug(如 auto / gpt-4o / o4-mini)
+	Messages    []ChatMessage // OpenAI 风格消息
+	ParentMsgID string        // 可选,为空自动生成
+	ConvID      string        // 可选,为空则新会话
+	ProofToken  string        // 可选,POW 解出后填入
+	ChatToken   string        // 必传(来自 ChatRequirements)
+	ReadTimeout time.Duration // SSE 读超时(单次事件间隔),默认 60s
 }
 
 // conversationPayload 对齐 chatgpt.com 请求体(文本模式)。
@@ -52,11 +52,11 @@ type conversationPayload struct {
 }
 
 type upstreamMsg struct {
-	ID       string            `json:"id"`
-	Author   upstreamAuthor    `json:"author"`
-	Content  upstreamContent   `json:"content"`
-	Metadata map[string]any    `json:"metadata,omitempty"`
-	CreateTime float64 `json:"create_time,omitempty"`
+	ID         string          `json:"id"`
+	Author     upstreamAuthor  `json:"author"`
+	Content    upstreamContent `json:"content"`
+	Metadata   map[string]any  `json:"metadata,omitempty"`
+	CreateTime float64         `json:"create_time,omitempty"`
 }
 
 type upstreamAuthor struct {
@@ -96,9 +96,9 @@ func (c *Client) StreamConversation(ctx context.Context, opt ConversationOpts) (
 	}
 	for _, m := range opt.Messages {
 		payload.Messages = append(payload.Messages, upstreamMsg{
-			ID:      uuid.NewString(),
-			Author:  upstreamAuthor{Role: m.Role},
-			Content: upstreamContent{ContentType: "text", Parts: []string{m.Content}},
+			ID:         uuid.NewString(),
+			Author:     upstreamAuthor{Role: m.Role},
+			Content:    upstreamContent{ContentType: "text", Parts: []string{m.Content}},
 			CreateTime: float64(time.Now().Unix()),
 		})
 	}
@@ -140,17 +140,25 @@ func (c *Client) StreamConversation(ctx context.Context, opt ConversationOpts) (
 
 // parseSSE 读取 SSE 流,把每个 data: 事件推入 channel。
 // chatgpt.com 的事件格式:
-//   event: delta\n
-//   data: {"p":"...","o":"append","v":"..."}\n\n
 //
-//   data: [DONE]\n\n
-func parseSSE(r io.ReadCloser, out chan<- SSEEvent, _ time.Duration) {
+//	event: delta\n
+//	data: {"p":"...","o":"append","v":"..."}\n\n
+//
+//	data: [DONE]\n\n
+func parseSSE(r io.ReadCloser, out chan<- SSEEvent, timeout time.Duration) {
 	defer r.Close()
 	defer close(out)
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
 
 	rd := bufio.NewReaderSize(r, 32*1024)
 	var event string
 	var dataBuf strings.Builder
+	type readResult struct {
+		line string
+		err  error
+	}
 
 	flush := func() {
 		if dataBuf.Len() == 0 {
@@ -164,7 +172,22 @@ func parseSSE(r io.ReadCloser, out chan<- SSEEvent, _ time.Duration) {
 	}
 
 	for {
-		line, err := rd.ReadString('\n')
+		readCh := make(chan readResult, 1)
+		go func() {
+			line, err := rd.ReadString('\n')
+			readCh <- readResult{line: line, err: err}
+		}()
+		timer := time.NewTimer(timeout)
+		var rr readResult
+		select {
+		case rr = <-readCh:
+			timer.Stop()
+		case <-timer.C:
+			out <- SSEEvent{Err: fmt.Errorf("sse read timeout after %s", timeout)}
+			return
+		}
+
+		line, err := rr.line, rr.err
 		if err != nil {
 			if err != io.EOF {
 				out <- SSEEvent{Err: fmt.Errorf("sse read: %w", err)}
