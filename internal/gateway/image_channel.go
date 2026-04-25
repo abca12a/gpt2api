@@ -35,7 +35,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		return false
 	}
 	// 参考图 / 图像编辑场景不走渠道(需要上游 file upload 能力,后续再接入)。
-	if len(req.ReferenceImages) > 0 {
+	if len(req.referenceInputs()) > 0 {
 		return false
 	}
 	routes, err := h.Channels.Resolve(c.Request.Context(), m.Slug, channel.ModalityImage)

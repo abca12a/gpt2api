@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -35,6 +36,50 @@ const maxReferenceImages = 4
 // chatMsg 是 OpenAI chat message 的本地别名,便于 handleChatAsImage 内部表达。
 type chatMsg = chatgpt.ChatMessage
 
+type stringList []string
+
+func (s *stringList) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*s = nil
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(data, &list); err == nil {
+		*s = list
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		if strings.TrimSpace(single) == "" {
+			*s = nil
+			return nil
+		}
+		*s = []string{single}
+		return nil
+	}
+	var obj struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(data, &obj); err == nil && strings.TrimSpace(obj.URL) != "" {
+		*s = []string{obj.URL}
+		return nil
+	}
+	var objs []struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(data, &objs); err == nil {
+		out := make([]string, 0, len(objs))
+		for _, item := range objs {
+			if strings.TrimSpace(item.URL) != "" {
+				out = append(out, item.URL)
+			}
+		}
+		*s = out
+		return nil
+	}
+	return fmt.Errorf("expected string, string array, url object, or url object array")
+}
+
 // ImagesHandler 挂载在 /v1/images/* 下的处理器。
 //
 // 复用 Handler 的依赖(鉴权/模型/计费/限流/usage)加上专属的 image.Runner 和 DAO。
@@ -60,22 +105,28 @@ type ImagesHandler struct {
 //   - data:<mime>;base64,xxxx   dataURL
 //   - 纯 base64 字符串            兼容
 type ImageGenRequest struct {
-	Model             string   `json:"model"`
-	Prompt            string   `json:"prompt"`
-	N                 int      `json:"n"`
-	Size              string   `json:"size"`
-	Quality           string   `json:"quality,omitempty"`
-	Style             string   `json:"style,omitempty"`
-	ResponseFormat    string   `json:"response_format,omitempty"` // url | b64_json(暂仅支持 url)
-	OutputFormat      string   `json:"output_format,omitempty"`
-	OutputCompression *int     `json:"output_compression,omitempty"`
-	Background        string   `json:"background,omitempty"`
-	Moderation        string   `json:"moderation,omitempty"`
-	Resolution        string   `json:"resolution,omitempty"`
-	ImageSize         string   `json:"image_size,omitempty"`
-	Scale             string   `json:"scale,omitempty"`
-	User              string   `json:"user,omitempty"`
-	ReferenceImages   []string `json:"reference_images,omitempty"` // 非标准扩展,见注释
+	Model             string     `json:"model"`
+	Prompt            string     `json:"prompt"`
+	N                 int        `json:"n"`
+	Size              string     `json:"size"`
+	Quality           string     `json:"quality,omitempty"`
+	Style             string     `json:"style,omitempty"`
+	ResponseFormat    string     `json:"response_format,omitempty"` // url | b64_json(暂仅支持 url)
+	OutputFormat      string     `json:"output_format,omitempty"`
+	OutputCompression *int       `json:"output_compression,omitempty"`
+	Background        string     `json:"background,omitempty"`
+	Moderation        string     `json:"moderation,omitempty"`
+	Resolution        string     `json:"resolution,omitempty"`
+	ImageSize         string     `json:"image_size,omitempty"`
+	Scale             string     `json:"scale,omitempty"`
+	User              string     `json:"user,omitempty"`
+	ReferenceImages   stringList `json:"reference_images,omitempty"` // 非标准扩展,见注释
+	Images            stringList `json:"images,omitempty"`
+	Image             stringList `json:"image,omitempty"`
+	ImageURL          stringList `json:"image_url,omitempty"`
+	ImageURLs         stringList `json:"image_urls,omitempty"`
+	InputImage        stringList `json:"input_image,omitempty"`
+	InputImages       stringList `json:"input_images,omitempty"`
 	// Upscale 非标准扩展:控制"本服务对原图做本地高清放大"的目标档位。
 	// 可选值:""(原图直出,默认)/ "2k"(长边 2560) / "4k"(长边 3840)。
 	// 算法:golang.org/x/image/draw.CatmullRom(传统插值,不是 AI 超分)。
@@ -315,7 +366,8 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 
 	// 若本地模型配置了外置渠道(OpenAI DALL·E / Gemini imagen 等),优先走渠道。
 	// 参考图场景(reference_images)仍走原 ChatGPT 账号池 Runner。
-	if h.Channels != nil && explicitUpscale == image.UpscaleNone {
+	referenceInputs := req.referenceInputs()
+	if h.Channels != nil && explicitUpscale == image.UpscaleNone && len(referenceInputs) == 0 {
 		if handled := h.dispatchImageToChannel(c, ak, m, &req, rec, ratio); handled {
 			return
 		}
@@ -370,7 +422,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	}
 
 	// 4.5) 解析 reference_images(图生图 / 图像编辑入口都走到这里)
-	refs, err := decodeReferenceInputs(c.Request.Context(), req.ReferenceImages)
+	refs, err := decodeReferenceInputs(c.Request.Context(), referenceInputs)
 	if err != nil {
 		refund("invalid_request_error")
 		openAIError(c, http.StatusBadRequest, "invalid_reference_image", "参考图解析失败:"+err.Error())
@@ -778,6 +830,29 @@ func normalizeChatImageRequest(prompt string, req *ChatCompletionsRequest) *Imag
 	}
 }
 
+func (r ImageGenRequest) referenceInputs() []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(values stringList) {
+		for _, value := range values {
+			v := strings.TrimSpace(value)
+			if v == "" || seen[v] {
+				continue
+			}
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	add(r.ReferenceImages)
+	add(r.Images)
+	add(r.Image)
+	add(r.ImageURL)
+	add(r.ImageURLs)
+	add(r.InputImage)
+	add(r.InputImages)
+	return out
+}
+
 func requestedUpscaleFromOptions(values ...string) string {
 	for _, value := range values {
 		if scale := image.ValidateUpscale(value); scale != image.UpscaleNone {
@@ -804,6 +879,7 @@ func logImageRequestOptions(msg string, req *ImageGenRequest, explicitUpscale st
 	logger.L().Info(msg,
 		zap.String("model", req.Model),
 		zap.Int("n", req.N),
+		zap.Int("reference_count", len(req.referenceInputs())),
 		zap.String("size", req.Size),
 		zap.String("quality", req.Quality),
 		zap.String("output_format", req.OutputFormat),

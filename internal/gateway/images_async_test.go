@@ -140,6 +140,26 @@ func TestRequestedUpscaleFromAliases(t *testing.T) {
 	}
 }
 
+func TestImageGenRequestReferenceAliases(t *testing.T) {
+	var req ImageGenRequest
+	body := []byte(`{
+		"reference_images": "https://example.test/a.png",
+		"images": ["data:image/png;base64,bbb"],
+		"image_url": {"url":"https://example.test/c.png"},
+		"input_images": [{"url":"https://example.test/d.png"}]
+	}`)
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("unmarshal image request: %v", err)
+	}
+	refs := req.referenceInputs()
+	if len(refs) != 4 {
+		t.Fatalf("referenceInputs len = %d, want 4: %#v", len(refs), refs)
+	}
+	if refs[0] != "https://example.test/a.png" || refs[2] != "https://example.test/c.png" {
+		t.Fatalf("unexpected refs: %#v", refs)
+	}
+}
+
 func TestBuildImageTaskCompatPayloadSuccess(t *testing.T) {
 	created := time.Unix(1777040000, 0)
 	finished := created.Add(time.Minute)
