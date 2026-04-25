@@ -13,8 +13,8 @@
 - `file_ids` 的单图元素可携带 `account_id / conversation_id / file_ref`；图片代理优先使用单图元信息回源，兼容旧任务的任务级账号信息。
 - 本地已合并上游多渠道能力，并保留 OAuth 导入、额度汇总、个人图片代理、nginx/端口等本地定制。
 - `deploy/nginx.conf` 当前由同一个 `gpt2api-nginx` 处理公网入口：`lmage2.dimilinks.com` 进入 gpt2api，`cliproxyapi.845817074.xyz` 进入 CLIProxyAPI。
-- 2026-04-25 用户纠正：`43.165.170.99` 是下游 `new-api` 后端机器，不要再默认当作 `gpt2api` 号池生产机；当前 Codex 工作目录 `/home/ubuntu/gpt2api` 只是本地项目目录，是否为实际线上部署需另行确认。
-- 如需确认 `gpt2api` 线上是否已部署当前提交，先向用户确认实际部署机器、仓库路径和可用 SSH 凭据；不要沿用旧记录中的主机归属。
+- 2026-04-25 用户最终纠正：当前 Codex 所在的 `43.165.170.99:/home/ubuntu/gpt2api` 就是线上 `gpt2api` 部署目录；不要再误判为“无法访问生产机”或“只是本地项目”。下游 `new-api` 与前端链路需单独依据请求日志确认。
+- 如需确认 `gpt2api` 线上部署状态，优先在本机 `/home/ubuntu/gpt2api` 使用 `git status`、`docker compose -f deploy/docker-compose.yml ps/logs`、`/healthz` 验证；只有跨机器排查 `new-api` 时才需要额外 SSH/路径信息。
 
 ## 长期注意事项
 
@@ -44,6 +44,7 @@
 - 2026-04-25 4K 放大补充修复：显式传 `upscale=2k/4k` 时不再走外置图片渠道直返，避免绕过 `/p/img` 本地放大代理；`upscale` 现在会 trim 并忽略大小写，兼容下游传 `4K`。
 - 2026-04-25 部署后排查发现下游 `new-api` 请求入库为 `size=16:9/2:3/...` 且 `upscale` 为空，说明 4K 选择未按 `upscale` 传入；已追加兼容 `resolution / image_size / scale / quality` 中的 `4k/UHD/2160p/2k/1440p` 别名，并记录不含 prompt 的图片参数日志用于核验下游真实传参。
 - 2026-04-25 参考图排查：线上最近只看到下游请求 `POST /v1/images/generations?async=true`，没有 `/v1/images/edits`；gpt2api 原本只在 generations JSON 中认非标准 `reference_images` 字段。已追加兼容 `images / image / image_url / image_urls / input_image / input_images`，支持字符串、字符串数组、`{"url":...}` 和对象数组，并在图片参数日志中记录 `reference_count` 以判断下游是否真的把参考图传到 gpt2api。
+- 2026-04-25 15:27 CST 线上用户测试参考图不生效时，`POST /v1/images/generations?async=true` 的图片参数日志显示 `reference_count=0`，且无参考图上传记录；gpt2api 解析兼容测试通过。当前证据说明该请求没有把参考图带到 gpt2api，问题优先在前端到 `new-api` 或 `new-api`/插件转发字段，而不是 gpt2api Runner 上传阶段。若后续日志 `reference_count>0` 仍不生效，再排查上游上传/账号池执行。
 
 ## 已清理的历史流水
 
