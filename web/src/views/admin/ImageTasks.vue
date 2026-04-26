@@ -178,12 +178,11 @@ onMounted(fetchList)
           {{ previewRow.prompt }}
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:8px">
-          <a
+          <div
             v-for="(url, idx) in previewRow.result_urls_parsed"
             :key="idx"
-            :href="url"
-            target="_blank"
             style="display:block"
+            @click.stop
           >
             <el-image
               :src="url"
@@ -193,7 +192,7 @@ onMounted(fetchList)
               style="width:200px;height:200px;border-radius:4px"
               lazy
             />
-          </a>
+          </div>
         </div>
         <div v-if="previewRow.error" style="margin-top:12px;color:var(--el-color-danger);font-size:12px;word-break:break-all">
           错误:{{ previewRow.error }}
