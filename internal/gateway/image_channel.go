@@ -99,6 +99,13 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 					zap.Error(err))
 				break
 			}
+			if isImageChannelUserRequestError(err) {
+				logger.L().Warn("channel image user request error",
+					zap.Uint64("channel_id", rt.Channel.ID),
+					zap.String("channel_name", rt.Channel.Name),
+					zap.Error(err))
+				break
+			}
 			_ = h.Channels.Svc().MarkHealth(context.Background(), rt.Channel, false, err.Error())
 			logger.L().Warn("channel image fail, try next",
 				zap.Uint64("channel_id", rt.Channel.ID),
@@ -113,7 +120,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 
 	if result == nil {
 		if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil && req != nil {
-			logger.L().Warn("channel image failed with 502, fallback to free account runner",
+			logger.L().Warn("channel image transient failure, fallback to free account runner",
 				zap.String("model", m.Slug),
 				zap.Error(lastErr))
 			refund(imagepkg.ErrUpstream)
@@ -307,6 +314,14 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 						zap.Error(err))
 					break
 				}
+				if isImageChannelUserRequestError(err) {
+					logger.L().Warn("channel async image user request error",
+						zap.Uint64("channel_id", rt.Channel.ID),
+						zap.String("channel_name", rt.Channel.Name),
+						zap.String("task_id", job.TaskID),
+						zap.Error(err))
+					break
+				}
 				_ = h.Channels.Svc().MarkHealth(context.Background(), rt.Channel, false, err.Error())
 				logger.L().Warn("channel async image fail, try next",
 					zap.Uint64("channel_id", rt.Channel.ID),
@@ -322,10 +337,13 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 
 		if result == nil {
 			if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil {
-				logger.L().Warn("channel async image failed with 502, fallback to free account runner",
+				logger.L().Warn("channel async image transient failure, fallback to free account runner",
 					zap.String("task_id", job.TaskID),
 					zap.Error(lastErr))
-				fallback := h.Runner.Run(ctx, imageChannelFreeFallbackRunOptions(job))
+				fallbackOpt := imageChannelFreeFallbackRunOptions(job)
+				fallbackCtx, cancelFallback := context.WithTimeout(context.Background(), asyncImageTaskTimeout(fallbackOpt.MaxAttempts, len(job.References) > 0))
+				fallback := h.Runner.Run(fallbackCtx, fallbackOpt)
+				cancelFallback()
 				rec.AccountID = fallback.AccountID
 				if fallback.Status == imagepkg.StatusSuccess {
 					if job.Cost > 0 && h.Billing != nil {
@@ -450,6 +468,13 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 					zap.Error(err))
 				break
 			}
+			if isImageChannelUserRequestError(err) {
+				logger.L().Warn("channel chat image user request error",
+					zap.Uint64("channel_id", rt.Channel.ID),
+					zap.String("channel_name", rt.Channel.Name),
+					zap.Error(err))
+				break
+			}
 			_ = h.Channels.Svc().MarkHealth(context.Background(), rt.Channel, false, err.Error())
 			logger.L().Warn("channel chat image fail, try next",
 				zap.Uint64("channel_id", rt.Channel.ID),
@@ -464,7 +489,7 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 
 	if result == nil {
 		if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil && req != nil {
-			logger.L().Warn("channel chat image failed with 502, fallback to free account runner",
+			logger.L().Warn("channel chat image transient failure, fallback to free account runner",
 				zap.String("model", m.Slug),
 				zap.Error(lastErr))
 			refund(imagepkg.ErrUpstream)
@@ -605,18 +630,52 @@ func actualCount(r *adapter.ImageResult) int {
 	return n
 }
 
-func shouldFallbackImageChannelToFree(err error) bool {
+func isImageChannelUserRequestError(err error) bool {
 	if err == nil || adapter.IsContentModerationError(err) {
 		return false
 	}
 	var upstream *adapter.UpstreamHTTPError
+	if !errors.As(err, &upstream) {
+		return false
+	}
+	if upstream.Status != http.StatusBadRequest && upstream.Status != http.StatusRequestEntityTooLarge && upstream.Status != http.StatusUnprocessableEntity {
+		return false
+	}
+	code := strings.ToLower(strings.TrimSpace(upstream.Code))
+	errType := strings.ToLower(strings.TrimSpace(upstream.Type))
+	msg := strings.ToLower(strings.TrimSpace(upstream.Message + " " + upstream.Body))
+	return errType == "image_generation_user_error" ||
+		code == "invalid_value" ||
+		code == "invalid_request_error" ||
+		strings.Contains(msg, "invalid size") ||
+		strings.Contains(msg, "minimum pixel budget") ||
+		strings.Contains(msg, "requested resolution") ||
+		strings.Contains(msg, "unsupported size")
+}
+
+func shouldFallbackImageChannelToFree(err error) bool {
+	if err == nil || adapter.IsContentModerationError(err) || isImageChannelUserRequestError(err) {
+		return false
+	}
+	var upstream *adapter.UpstreamHTTPError
 	if errors.As(err, &upstream) {
-		return upstream.Status == http.StatusBadGateway
+		return upstream.Status == http.StatusRequestTimeout || upstream.Status >= http.StatusInternalServerError
 	}
 	msg := strings.ToLower(strings.TrimSpace(err.Error()))
 	return strings.Contains(msg, "upstream 502") ||
+		strings.Contains(msg, "upstream 500") ||
+		strings.Contains(msg, "internal_error") ||
+		strings.Contains(msg, "internal_server_error") ||
 		strings.Contains(msg, "status 502") ||
-		strings.Contains(msg, "bad gateway")
+		strings.Contains(msg, "bad gateway") ||
+		strings.Contains(msg, "stream disconnected before completion") ||
+		strings.Contains(msg, "stream error") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "eof") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "broken pipe")
 }
 
 func applyFreeFallbackPlan(opt *imagepkg.RunOptions, enabled bool) {
@@ -749,6 +808,18 @@ func imageChannelFailureFromErr(err error) imageChannelFailure {
 			Code:       imagepkg.ErrContentModeration,
 			HTTPStatus: http.StatusBadRequest,
 			Message:    localizeImageErr(imagepkg.ErrContentModeration, detail),
+			Detail:     detail,
+		}
+	}
+	if isImageChannelUserRequestError(err) {
+		msg := "图片请求参数不被上游接受"
+		if detail != "" {
+			msg += ":" + detail
+		}
+		return imageChannelFailure{
+			Code:       "invalid_request_error",
+			HTTPStatus: http.StatusBadRequest,
+			Message:    msg,
 			Detail:     detail,
 		}
 	}

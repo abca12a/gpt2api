@@ -10,6 +10,7 @@ import (
 	"time"
 
 	imagepkg "github.com/432539/gpt2api/internal/image"
+	"github.com/432539/gpt2api/internal/upstream/adapter"
 	"github.com/gin-gonic/gin"
 )
 
@@ -427,6 +428,24 @@ func TestImageChannelFailureClassifiesContentModeration(t *testing.T) {
 	}
 	if !strings.Contains(failure.Detail, "content_policy_violation") {
 		t.Fatalf("detail should preserve upstream error, got %q", failure.Detail)
+	}
+}
+
+func TestImageChannelFailureClassifiesUserRequestError(t *testing.T) {
+	failure := imageChannelFailureFromErr(&adapter.UpstreamHTTPError{
+		Status:  http.StatusBadRequest,
+		Code:    "invalid_value",
+		Type:    "image_generation_user_error",
+		Message: "Invalid size '1024x576'. Requested resolution is below the current minimum pixel budget.",
+	})
+	if failure.Code != "invalid_request_error" {
+		t.Fatalf("code = %q, want invalid_request_error", failure.Code)
+	}
+	if failure.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("http status = %d, want 400", failure.HTTPStatus)
+	}
+	if !strings.Contains(failure.Message, "Invalid size") {
+		t.Fatalf("message should preserve upstream detail, got %q", failure.Message)
 	}
 }
 

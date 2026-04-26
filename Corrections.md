@@ -28,6 +28,12 @@
 - 正确做法：公网入口始终是 `https://lmage2.dimilinks.com/v1`；但 gpt2api 内部优先走数据库里的 `codex-cli-proxy-image` 外置 image channel，容器内 base URL 是 `http://cli-proxy-api:8317`，映射必须是 `gpt-image-2 -> gpt-image-2 / modality=image`。
 - 边界：只有没有启用 image route 时才回退内置 ChatGPT Web Runner；一旦命中 route，`502 / stream disconnected / EOF / timeout` 属于渠道链路问题，先查 `cli-proxy-api` 容器、Docker 网络和渠道健康状态。
 
+## 外置图片渠道瞬态兜底
+
+- 2026-04-26 修正：不能只把 HTTP 502 当成外置图片渠道可兜底错误；生产 24 小时失败样本还包含 HTTP 500 `INTERNAL_ERROR`、`context deadline exceeded`、EOF 等同类瞬态断流。
+- 正确做法：外置 Codex/OpenAI image channel 同渠道重试后，如果最后错误是 `502/5xx`、超时、EOF、connection reset/broken pipe 等瞬态错误，应转入内置 ChatGPT Web Runner，并强制 `plan_type=free`；异步兜底必须新建 fallback ctx，不能复用已被外置渠道耗尽的 7 分钟 ctx。
+- 边界：`content_policy_violation / safety system` 仍归为 `content_moderation`，不兜底；`400 invalid_value / image_generation_user_error / minimum pixel budget` 属于用户请求参数错误，返回 `invalid_request_error` 并保留详情，不标记渠道 unhealthy，也不切 Free 账号。
+
 ## new-api 分组依赖
 
 - 2026-04-26 修正：不能只看 token 的 `model_limits=gpt-image-2` 就认为下游已授权成功；用户 `1540/HMJ` 曾因 token `group` 为空落到 `default` 分组，`new-api` 直接报 `No available channel for model gpt-image-2 under group default`。

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -99,6 +100,15 @@ func TestIsRetryableImageChannelError(t *testing.T) {
 func TestShouldFallbackImageChannelToFreeOn502(t *testing.T) {
 	if !shouldFallbackImageChannelToFree(&adapter.UpstreamHTTPError{Status: http.StatusBadGateway, Message: "stream disconnected before completion"}) {
 		t.Fatal("502 should trigger Free fallback")
+	}
+	if !shouldFallbackImageChannelToFree(&adapter.UpstreamHTTPError{Status: http.StatusInternalServerError, Message: "stream error: stream ID 37; INTERNAL_ERROR"}) {
+		t.Fatal("500 stream errors should trigger Free fallback")
+	}
+	if !shouldFallbackImageChannelToFree(context.DeadlineExceeded) {
+		t.Fatal("deadline exceeded should trigger Free fallback")
+	}
+	if !shouldFallbackImageChannelToFree(errors.New("openai: image request: EOF")) {
+		t.Fatal("EOF should trigger Free fallback")
 	}
 	if shouldFallbackImageChannelToFree(&adapter.UpstreamHTTPError{Status: http.StatusBadRequest, Code: "invalid_value", Message: "Invalid size"}) {
 		t.Fatal("400 invalid value should not trigger Free fallback")
