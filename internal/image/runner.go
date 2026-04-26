@@ -66,6 +66,8 @@ type RunOptions struct {
 	PerAttemptTimeout time.Duration    // 单次尝试总超时,默认 6min(覆盖 SSE + PollMaxWait + 缓冲)
 	PollMaxWait       time.Duration    // SSE 没直出时,轮询 conversation 的最长等待,默认 300s
 	References        []ReferenceImage // 图生图/编辑:参考图
+	PreferredPlanType string           // 可选:优先调度指定 plan_type 的账号
+	RequirePlanType   bool             // true 时只调度 PreferredPlanType 账号
 }
 
 // RunResult 是单次生图的输出。
@@ -329,7 +331,13 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	// 1) 调度账号
 	dispatchCtx, cancelDispatch := context.WithTimeout(ctx, opt.DispatchTimeout)
 	defer cancelDispatch()
-	lease, err := r.sched.Dispatch(dispatchCtx, "image")
+	var lease *scheduler.Lease
+	var err error
+	if opt.PreferredPlanType != "" || opt.RequirePlanType {
+		lease, err = r.sched.DispatchWithPlan(dispatchCtx, "image", opt.PreferredPlanType, opt.RequirePlanType)
+	} else {
+		lease, err = r.sched.Dispatch(dispatchCtx, "image")
+	}
 	if err != nil {
 		if errors.Is(err, scheduler.ErrNoAvailable) {
 			return false, ErrNoAccount, err

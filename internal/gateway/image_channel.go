@@ -112,6 +112,15 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	}
 
 	if result == nil {
+		if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil && req != nil {
+			logger.L().Warn("channel image failed with 502, fallback to free account runner",
+				zap.String("model", m.Slug),
+				zap.Error(lastErr))
+			refund(imagepkg.ErrUpstream)
+			req.freeFallback = true
+			req.freeFallbackDetail = lastErr.Error()
+			return false
+		}
 		failure := imageChannelFailureFromErr(lastErr)
 		refund(failure.Code)
 		openAIError(c, failure.HTTPStatus, failure.Code, failure.Message)
@@ -221,36 +230,38 @@ func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 	}
 
 	h.runImageChannelTaskAsync(imageChannelAsyncJob{
-		TaskID:  taskID,
-		UserID:  ak.UserID,
-		KeyID:   ak.ID,
-		ModelID: m.ID,
-		Model:   m,
-		Ratio:   ratio,
-		Routes:  routes,
-		Request: imageAdapterRequest(m, req, refs),
-		Cost:    cost,
-		RefID:   refID,
-		IP:      c.ClientIP(),
-		UA:      c.Request.UserAgent(),
+		TaskID:     taskID,
+		UserID:     ak.UserID,
+		KeyID:      ak.ID,
+		ModelID:    m.ID,
+		Model:      m,
+		Ratio:      ratio,
+		Routes:     routes,
+		Request:    imageAdapterRequest(m, req, refs),
+		References: refs,
+		Cost:       cost,
+		RefID:      refID,
+		IP:         c.ClientIP(),
+		UA:         c.Request.UserAgent(),
 	})
 	writeAsyncImageSubmit(c, taskID)
 	return true, true
 }
 
 type imageChannelAsyncJob struct {
-	TaskID  string
-	UserID  uint64
-	KeyID   uint64
-	ModelID uint64
-	Model   *modelpkg.Model
-	Ratio   float64
-	Routes  []*channel.Route
-	Request *adapter.ImageRequest
-	Cost    int64
-	RefID   string
-	IP      string
-	UA      string
+	TaskID     string
+	UserID     uint64
+	KeyID      uint64
+	ModelID    uint64
+	Model      *modelpkg.Model
+	Ratio      float64
+	Routes     []*channel.Route
+	Request    *adapter.ImageRequest
+	References []imagepkg.ReferenceImage
+	Cost       int64
+	RefID      string
+	IP         string
+	UA         string
 }
 
 func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
@@ -310,6 +321,35 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		}
 
 		if result == nil {
+			if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil {
+				logger.L().Warn("channel async image failed with 502, fallback to free account runner",
+					zap.String("task_id", job.TaskID),
+					zap.Error(lastErr))
+				fallback := h.Runner.Run(ctx, imageChannelFreeFallbackRunOptions(job))
+				rec.AccountID = fallback.AccountID
+				if fallback.Status == imagepkg.StatusSuccess {
+					if job.Cost > 0 && h.Billing != nil {
+						if err := h.Billing.Settle(context.Background(), job.UserID, job.KeyID, job.Cost, job.Cost, job.RefID, "image channel async free fallback settle"); err != nil {
+							logger.L().Error("billing settle async free fallback image", zap.Error(err), zap.String("ref", job.RefID))
+						}
+					}
+					if h.Keys != nil && h.Keys.DAO() != nil {
+						_ = h.Keys.DAO().TouchUsage(context.Background(), job.KeyID, job.IP, job.Cost)
+					}
+					if h.DAO != nil {
+						_ = h.DAO.UpdateCost(context.Background(), job.TaskID, job.Cost)
+					}
+					rec.Status = usage.StatusSuccess
+					rec.CreditCost = job.Cost
+					return
+				}
+				rec.Status = usage.StatusFailed
+				rec.ErrorCode = ifEmpty(fallback.ErrorCode, imagepkg.ErrUpstream)
+				if job.Cost > 0 && h.Billing != nil {
+					_ = h.Billing.Refund(context.Background(), job.UserID, job.KeyID, job.Cost, job.RefID, "image channel async free fallback refund")
+				}
+				return
+			}
 			failure := imageChannelFailureFromErr(lastErr)
 			rec.Status = usage.StatusFailed
 			rec.ErrorCode = failure.Code
@@ -423,6 +463,15 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	}
 
 	if result == nil {
+		if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil && req != nil {
+			logger.L().Warn("channel chat image failed with 502, fallback to free account runner",
+				zap.String("model", m.Slug),
+				zap.Error(lastErr))
+			refund(imagepkg.ErrUpstream)
+			req.freeFallback = true
+			req.freeFallbackDetail = lastErr.Error()
+			return false
+		}
 		failure := imageChannelFailureFromErr(lastErr)
 		refund(failure.Code)
 		openAIError(c, failure.HTTPStatus, failure.Code, failure.Message)
@@ -554,6 +603,62 @@ func actualCount(r *adapter.ImageResult) int {
 		return 1
 	}
 	return n
+}
+
+func shouldFallbackImageChannelToFree(err error) bool {
+	if err == nil || adapter.IsContentModerationError(err) {
+		return false
+	}
+	var upstream *adapter.UpstreamHTTPError
+	if errors.As(err, &upstream) {
+		return upstream.Status == http.StatusBadGateway
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "upstream 502") ||
+		strings.Contains(msg, "status 502") ||
+		strings.Contains(msg, "bad gateway")
+}
+
+func applyFreeFallbackPlan(opt *imagepkg.RunOptions, enabled bool) {
+	if opt == nil || !enabled {
+		return
+	}
+	opt.PreferredPlanType = "free"
+	opt.RequirePlanType = true
+}
+
+func imageChannelFreeFallbackRunOptions(job imageChannelAsyncJob) imagepkg.RunOptions {
+	upstreamModel := ""
+	if job.Model != nil {
+		upstreamModel = job.Model.UpstreamModelSlug
+	}
+	prompt := ""
+	n := 1
+	if job.Request != nil {
+		prompt = job.Request.Prompt
+		n = job.Request.N
+	}
+	maxAttempts := 2
+	if len(job.References) > 0 {
+		maxAttempts = 1
+	}
+	runAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(maxAttempts, len(job.References) > 0)
+	opt := imagepkg.RunOptions{
+		TaskID:            job.TaskID,
+		UserID:            job.UserID,
+		KeyID:             job.KeyID,
+		ModelID:           job.ModelID,
+		UpstreamModel:     upstreamModel,
+		Prompt:            maybeAppendClaritySuffix(prompt),
+		N:                 n,
+		MaxAttempts:       runAttempts,
+		DispatchTimeout:   dispatchTimeout,
+		PerAttemptTimeout: perAttemptTimeout,
+		PollMaxWait:       pollMaxWait,
+		References:        job.References,
+	}
+	applyFreeFallbackPlan(&opt, true)
+	return opt
 }
 
 type imageChannelFailure struct {

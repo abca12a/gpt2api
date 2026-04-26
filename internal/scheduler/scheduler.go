@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -62,6 +63,11 @@ type RuntimeParams struct {
 	WarnedPauseHrs  func() int
 	// QueueWaitSec 拿不到空闲账号时最长排队等待秒数,≤0 表示不排队(老语义)。
 	QueueWaitSec func() int
+}
+
+type dispatchOptions struct {
+	PreferredPlanType string
+	RequirePlanType   bool
 }
 
 // Scheduler 账号调度器。
@@ -148,6 +154,16 @@ func (s *Scheduler) queueWait() time.Duration {
 //     不立即返回失败,而是按指数退避轮询重试,直到拿到锁或超过 queueWait。
 //   - queueWait=0 时退化为老语义(扫一次,失败即返回 ErrNoAvailable)。
 func (s *Scheduler) Dispatch(ctx context.Context, modelType string) (*Lease, error) {
+	return s.dispatch(ctx, modelType, dispatchOptions{})
+}
+
+// DispatchWithPlan 为指定 plan_type 的场景调度账号。
+// require=true 时只接受该 plan；require=false 时优先该 plan，耗尽后再使用其它账号。
+func (s *Scheduler) DispatchWithPlan(ctx context.Context, modelType, planType string, require bool) (*Lease, error) {
+	return s.dispatch(ctx, modelType, dispatchOptions{PreferredPlanType: planType, RequirePlanType: require})
+}
+
+func (s *Scheduler) dispatch(ctx context.Context, modelType string, opt dispatchOptions) (*Lease, error) {
 	deadline := time.Now().Add(s.queueWait())
 
 	const (
@@ -161,7 +177,7 @@ func (s *Scheduler) Dispatch(ctx context.Context, modelType string) (*Lease, err
 
 	for {
 		attempt++
-		lease, err := s.tryDispatchOnce(ctx, modelType)
+		lease, err := s.tryDispatchOnce(ctx, modelType, opt)
 		if err == nil {
 			if attempt > 1 {
 				logger.L().Info("scheduler queued dispatch ok",
@@ -201,7 +217,7 @@ func (s *Scheduler) Dispatch(ctx context.Context, modelType string) (*Lease, err
 
 // tryDispatchOnce 扫一遍 candidate,尝试为其中一个加锁;
 // 全部 candidate 都被锁 / 不满足 min_interval / 日配额时返回 ErrNoAvailable。
-func (s *Scheduler) tryDispatchOnce(ctx context.Context, modelType string) (*Lease, error) {
+func (s *Scheduler) tryDispatchOnce(ctx context.Context, modelType string, opt dispatchOptions) (*Lease, error) {
 	dao := s.accSvc.DAO()
 	candidates, err := dao.ListDispatchable(ctx, dispatchCandidateLimit)
 	if err != nil {
@@ -210,11 +226,15 @@ func (s *Scheduler) tryDispatchOnce(ctx context.Context, modelType string) (*Lea
 	if len(candidates) == 0 {
 		return nil, ErrNoAvailable
 	}
+	candidates = prioritizeDispatchCandidates(candidates, opt.PreferredPlanType)
 
 	now := time.Now()
 	minInterval := time.Duration(s.cfg.MinIntervalSec) * time.Second
 
 	for _, acc := range candidates {
+		if opt.RequirePlanType && !dispatchCandidateMatchesPlan(acc, opt.PreferredPlanType) {
+			continue
+		}
 		if acc.LastUsedAt.Valid && now.Sub(acc.LastUsedAt.Time) < minInterval {
 			continue
 		}
@@ -240,6 +260,36 @@ func (s *Scheduler) tryDispatchOnce(ctx context.Context, modelType string) (*Lea
 			zap.Uint64("account_id", acc.ID), zap.Error(err))
 	}
 	return nil, ErrNoAvailable
+}
+
+func prioritizeDispatchCandidates(candidates []*account.Account, preferredPlanType string) []*account.Account {
+	if strings.TrimSpace(preferredPlanType) == "" || len(candidates) <= 1 {
+		return candidates
+	}
+	preferred := make([]*account.Account, 0, len(candidates))
+	others := make([]*account.Account, 0, len(candidates))
+	for _, acc := range candidates {
+		if dispatchCandidateMatchesPlan(acc, preferredPlanType) {
+			preferred = append(preferred, acc)
+			continue
+		}
+		others = append(others, acc)
+	}
+	out := make([]*account.Account, 0, len(candidates))
+	out = append(out, preferred...)
+	out = append(out, others...)
+	return out
+}
+
+func dispatchCandidateMatchesPlan(acc *account.Account, planType string) bool {
+	planType = strings.ToLower(strings.TrimSpace(planType))
+	if planType == "" {
+		return true
+	}
+	if acc == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(acc.PlanType), planType)
 }
 
 func (s *Scheduler) tryLock(ctx context.Context, acc *account.Account) (*Lease, error) {

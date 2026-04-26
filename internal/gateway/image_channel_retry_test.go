@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/432539/gpt2api/internal/channel"
+	imagepkg "github.com/432539/gpt2api/internal/image"
+	modelpkg "github.com/432539/gpt2api/internal/model"
 	"github.com/432539/gpt2api/internal/upstream/adapter"
 )
 
@@ -91,5 +93,45 @@ func TestIsRetryableImageChannelError(t *testing.T) {
 	}
 	if isRetryableImageChannelError(&adapter.UpstreamHTTPError{Status: http.StatusBadRequest, Code: "invalid_value", Type: "image_generation_user_error", Message: "Invalid size"}) {
 		t.Fatal("400 invalid_value should not be retryable")
+	}
+}
+
+func TestShouldFallbackImageChannelToFreeOn502(t *testing.T) {
+	if !shouldFallbackImageChannelToFree(&adapter.UpstreamHTTPError{Status: http.StatusBadGateway, Message: "stream disconnected before completion"}) {
+		t.Fatal("502 should trigger Free fallback")
+	}
+	if shouldFallbackImageChannelToFree(&adapter.UpstreamHTTPError{Status: http.StatusBadRequest, Code: "invalid_value", Message: "Invalid size"}) {
+		t.Fatal("400 invalid value should not trigger Free fallback")
+	}
+	if shouldFallbackImageChannelToFree(&adapter.UpstreamHTTPError{Status: http.StatusBadRequest, Code: "content_policy_violation", Message: "blocked"}) {
+		t.Fatal("content moderation should not trigger Free fallback")
+	}
+}
+
+func TestImageChannelFreeFallbackRunOptionsRequireFreePlan(t *testing.T) {
+	job := imageChannelAsyncJob{
+		TaskID:  "img_free",
+		UserID:  10,
+		KeyID:   20,
+		ModelID: 30,
+		Model:   &modelpkg.Model{UpstreamModelSlug: "gpt-image-2"},
+		Request: &adapter.ImageRequest{Prompt: "draw", N: 2},
+		References: []imagepkg.ReferenceImage{
+			{Data: []byte("ref"), FileName: "ref.png"},
+		},
+	}
+
+	got := imageChannelFreeFallbackRunOptions(job)
+	if got.PreferredPlanType != "free" || !got.RequirePlanType {
+		t.Fatalf("fallback plan = %q strict=%v, want strict free", got.PreferredPlanType, got.RequirePlanType)
+	}
+	if got.TaskID != job.TaskID || got.UserID != job.UserID || got.KeyID != job.KeyID || got.ModelID != job.ModelID {
+		t.Fatalf("run options lost task identity: %#v", got)
+	}
+	if got.Prompt != "draw" || got.N != 2 || got.UpstreamModel != "gpt-image-2" {
+		t.Fatalf("unexpected request mapping: %#v", got)
+	}
+	if len(got.References) != 1 || string(got.References[0].Data) != "ref" {
+		t.Fatalf("references not preserved: %#v", got.References)
 	}
 }

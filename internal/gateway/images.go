@@ -135,6 +135,9 @@ type ImageGenRequest struct {
 	// LRU 缓存命中毫秒级返回。仅影响 /v1/images/proxy/... 的出口字节,不改原图。
 	Upscale       string `json:"upscale,omitempty"`
 	WaitForResult *bool  `json:"wait_for_result,omitempty"` // false=立即返回 task_id,客户端自行轮询
+
+	freeFallback       bool
+	freeFallbackDetail string
 }
 
 // ImageGenData 单张图响应。
@@ -389,6 +392,10 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		} else if handled := h.dispatchImageToChannel(c, ak, m, channelReq, rec, ratio, refs); handled {
 			return
 		}
+		if channelReq.freeFallback {
+			req.freeFallback = true
+			req.freeFallbackDetail = channelReq.freeFallbackDetail
+		}
 	}
 	req.Upscale = normalizeImageUpscale(req.Size, explicitUpscale)
 
@@ -476,7 +483,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	}
 
 	runAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(maxAttempts, len(refs) > 0)
-	res := h.Runner.Run(runCtx, image.RunOptions{
+	runOptions := image.RunOptions{
 		TaskID:            taskID,
 		UserID:            ak.UserID,
 		KeyID:             ak.ID,
@@ -489,7 +496,9 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		PerAttemptTimeout: perAttemptTimeout,
 		PollMaxWait:       pollMaxWait,
 		References:        refs,
-	})
+	}
+	applyFreeFallbackPlan(&runOptions, req.freeFallback)
+	res := h.Runner.Run(runCtx, runOptions)
 	rec.AccountID = res.AccountID
 
 	if res.Status != image.StatusSuccess {
@@ -670,6 +679,10 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		if handled := h.dispatchChatImageToChannel(c, ak, m, channelReq, rec, ratio, startAt); handled {
 			return
 		}
+		if channelReq.freeFallback {
+			imgReq.freeFallback = true
+			imgReq.freeFallbackDetail = channelReq.freeFallbackDetail
+		}
 	}
 
 	// 预扣
@@ -721,7 +734,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 	defer cancel()
 
 	runAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(2, false)
-	res := h.Runner.Run(runCtx, image.RunOptions{
+	runOptions := image.RunOptions{
 		TaskID:            taskID,
 		UserID:            ak.UserID,
 		KeyID:             ak.ID,
@@ -733,7 +746,9 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		DispatchTimeout:   dispatchTimeout,
 		PerAttemptTimeout: perAttemptTimeout,
 		PollMaxWait:       pollMaxWait,
-	})
+	}
+	applyFreeFallbackPlan(&runOptions, imgReq.freeFallback)
+	res := h.Runner.Run(runCtx, runOptions)
 	rec.AccountID = res.AccountID
 
 	if res.Status != image.StatusSuccess {
@@ -1424,6 +1439,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		}
 	}
 
+	freeFallback := false
 	if h.Channels != nil {
 		editReq := &ImageGenRequest{
 			Model:          model,
@@ -1445,6 +1461,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		if handled := h.dispatchImageToChannel(c, ak, m, channelReq, rec, ratio, refs); handled {
 			return
 		}
+		freeFallback = channelReq.freeFallback
 	}
 
 	cost := billing.ComputeImageCost(m, n, ratio)
@@ -1493,7 +1510,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	defer cancel()
 
 	runAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(1, true)
-	res := h.Runner.Run(runCtx, image.RunOptions{
+	runOptions := image.RunOptions{
 		TaskID:            taskID,
 		UserID:            ak.UserID,
 		KeyID:             ak.ID,
@@ -1506,7 +1523,9 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		PerAttemptTimeout: perAttemptTimeout,
 		PollMaxWait:       pollMaxWait,
 		References:        refs,
-	})
+	}
+	applyFreeFallbackPlan(&runOptions, freeFallback)
+	res := h.Runner.Run(runCtx, runOptions)
 	rec.AccountID = res.AccountID
 
 	if res.Status != image.StatusSuccess {
