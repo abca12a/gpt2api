@@ -490,6 +490,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		zap.String("conv_id", convID),
 		zap.String("finish_type", sseResult.FinishType),
 		zap.String("image_gen_task_id", sseResult.ImageGenTaskID),
+		zap.String("assistant_text", trimDiagnosticText(sseResult.AssistantText, 200)),
 		zap.NamedError("sse_error", sseResult.Err),
 		zap.Int("sse_fids", len(sseResult.FileIDs)),
 		zap.Strings("sse_fids_list", sseResult.FileIDs),
@@ -503,6 +504,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	for _, s := range sseResult.SedimentIDs {
 		fileRefs = append(fileRefs, "sed:"+s)
 	}
+	assistantText := sseResult.AssistantText
 
 	// SSE 已经把期望数量的图带回来了 → 直接下载,跳过 Poll,省时间
 	if len(fileRefs) >= opt.N {
@@ -529,12 +531,18 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 				zap.String("conv_id", convID),
 				zap.Duration("poll_max_wait", pollMaxWait))
 		}
-		status, fids, sids := cli.PollConversationForImages(ctx, convID, pollOpt)
+		pollResult := cli.PollConversationForImagesDetailed(ctx, convID, pollOpt)
+		status, fids, sids := pollResult.Status, pollResult.FileIDs, pollResult.SedimentIDs
+		if pollResult.AssistantText != "" {
+			assistantText = pollResult.AssistantText
+		}
 		logger.L().Info("image runner poll done",
 			zap.String("task_id", opt.TaskID),
 			zap.Uint64("account_id", lease.Account.ID),
 			zap.String("conv_id", convID),
 			zap.String("poll_status", string(status)),
+			zap.String("assistant_text", trimDiagnosticText(pollResult.AssistantText, 200)),
+			zap.String("last_error", pollResult.LastError),
 			zap.Int("poll_fids", len(fids)),
 			zap.Strings("poll_fids_list", fids),
 			zap.Int("poll_sids", len(sids)),
@@ -568,14 +576,14 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 				zap.String("task_id", opt.TaskID),
 				zap.Uint64("account_id", lease.Account.ID),
 				zap.String("conv_id", convID))
-			return false, ErrPollTimeout, errors.New("poll timeout without any image")
+			return false, imageFailureCodeFromAssistant(ErrPollTimeout, assistantText), imageFailureError("poll timeout without any image", assistantText, pollResult.LastError)
 		default:
-			return false, ErrUpstream, errors.New("poll error")
+			return false, imageFailureCodeFromAssistant(ErrUpstream, assistantText), imageFailureError("poll error", assistantText, pollResult.LastError)
 		}
 	}
 
 	if len(fileRefs) == 0 {
-		return false, ErrUpstream, errors.New("no image ref produced")
+		return false, imageFailureCodeFromAssistant(ErrUpstream, assistantText), imageFailureError("no image ref produced", assistantText, "")
 	}
 
 	// 6) 对每个 ref 取签名 URL
@@ -629,6 +637,67 @@ func imageSSEReadTimeout(hasReferences bool) time.Duration {
 		return 60 * time.Second
 	}
 	return 30 * time.Second
+}
+
+func imageFailureCodeFromAssistant(fallback, assistantText string) string {
+	if isImageAssistantContentModeration(assistantText) {
+		return ErrContentModeration
+	}
+	if fallback == "" {
+		return ErrUpstream
+	}
+	return fallback
+}
+
+func imageFailureError(base, assistantText, lastError string) error {
+	parts := []string{strings.TrimSpace(base)}
+	if assistantText = trimDiagnosticText(assistantText, 800); assistantText != "" {
+		parts = append(parts, "assistant: "+assistantText)
+	}
+	if lastError = trimDiagnosticText(lastError, 500); lastError != "" {
+		parts = append(parts, "last_error: "+lastError)
+	}
+	return errors.New(strings.Join(nonEmptyStrings(parts), "; "))
+}
+
+func isImageAssistantContentModeration(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if normalized == "" {
+		return false
+	}
+	compact := strings.ReplaceAll(normalized, "-", "_")
+	compact = strings.ReplaceAll(compact, " ", "_")
+	signals := []string{
+		"content_policy", "safety_policy", "safety_system", "policy_violation",
+		"unsafe_content", "underage", "minor", "sexualized", "exploitative",
+		"child sexual", "child safety", "nudity involving", "i can't help create that image",
+		"i cannot help create that image",
+		"内容安全", "安全策略", "内容审核", "内容违规", "违反内容", "无法生成",
+	}
+	for _, signal := range signals {
+		if strings.Contains(compact, signal) || strings.Contains(normalized, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func trimDiagnosticText(text string, max int) string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if max <= 0 || len(text) <= max {
+		return text
+	}
+	return text[:max]
+}
+
+func nonEmptyStrings(values []string) []string {
+	out := values[:0]
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 // classifyUpstream 把上游错误转成内部 error code。

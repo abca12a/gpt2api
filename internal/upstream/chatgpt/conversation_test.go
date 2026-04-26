@@ -59,3 +59,52 @@ func TestParseImageSSERecordsStreamError(t *testing.T) {
 		t.Fatalf("expected stream error, got %#v", res.Err)
 	}
 }
+
+func TestParseImageSSECapturesAssistantText(t *testing.T) {
+	stream := make(chan SSEEvent, 2)
+	stream <- SSEEvent{Data: []byte(`{"v":{"conversation_id":"conv_1","message":{"author":{"role":"assistant"},"content":{"content_type":"text","parts":["I can't help create that image because it may violate safety policy."]},"metadata":{"finish_details":{"type":"stop"}}}}}`)}
+	stream <- SSEEvent{Data: []byte(`[DONE]`)}
+	close(stream)
+
+	res := ParseImageSSE(stream)
+	if res.ConversationID != "conv_1" || res.FinishType != "stop" {
+		t.Fatalf("unexpected sse metadata: %#v", res)
+	}
+	if !strings.Contains(res.AssistantText, "safety policy") {
+		t.Fatalf("assistant text not captured: %#v", res.AssistantText)
+	}
+}
+
+func TestExtractAssistantTextsFromConversationMapping(t *testing.T) {
+	mapping := map[string]interface{}{
+		"old": map[string]interface{}{
+			"message": map[string]interface{}{
+				"author":      map[string]interface{}{"role": "assistant"},
+				"create_time": float64(1),
+				"content":     map[string]interface{}{"content_type": "text", "parts": []interface{}{"older reason"}},
+			},
+		},
+		"new": map[string]interface{}{
+			"message": map[string]interface{}{
+				"author":      map[string]interface{}{"role": "assistant"},
+				"create_time": float64(2),
+				"content":     map[string]interface{}{"content_type": "text", "parts": []interface{}{"latest refusal reason"}},
+			},
+		},
+		"user": map[string]interface{}{
+			"message": map[string]interface{}{
+				"author":      map[string]interface{}{"role": "user"},
+				"create_time": float64(3),
+				"content":     map[string]interface{}{"content_type": "text", "parts": []interface{}{"original prompt should be ignored"}},
+			},
+		},
+	}
+
+	texts := ExtractAssistantTexts(mapping)
+	if len(texts) != 2 {
+		t.Fatalf("assistant text count = %d, want 2: %#v", len(texts), texts)
+	}
+	if got := LatestAssistantText(mapping); got != "latest refusal reason" {
+		t.Fatalf("LatestAssistantText = %q", got)
+	}
+}

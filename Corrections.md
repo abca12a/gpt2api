@@ -34,6 +34,12 @@
 - 正确做法：外置 Codex/OpenAI image channel 同渠道重试后，如果最后错误是 `502/5xx`、超时、EOF、connection reset/broken pipe 等瞬态错误，应转入内置 ChatGPT Web Runner，并强制 `plan_type=free`；异步兜底必须新建 fallback ctx，不能复用已被外置渠道耗尽的 7 分钟 ctx。
 - 边界：`content_policy_violation / safety system` 仍归为 `content_moderation`，不兜底；`400 invalid_value / image_generation_user_error / minimum pixel budget` 属于用户请求参数错误，返回 `invalid_request_error` 并保留详情，不标记渠道 unhealthy，也不切 Free 账号。
 
+## 图片失败对话诊断
+
+- 2026-04-26 修正：不能只看图片接口结构化错误；ChatGPT Web Runner 兜底时，上游可能在 assistant 文本里解释拒绝原因但不产出图片 tool/file 引用，旧后台只会看到 `poll_error / poll_timeout / upstream_error`。
+- 正确做法：图片 SSE 和 conversation mapping 都要提取最新 assistant 文本，失败时写入 `image_tasks.error` detail；后台必须直接展示并支持复制完整错误。
+- 边界：只有出现安全/政策/未成年/内容审核等明确文本信号时才归为 `content_moderation`；普通 `poll_timeout / poll_error` 仍保留为上游未产出图片引用，不能凭空推断违规。
+
 ## new-api 分组依赖
 
 - 2026-04-26 修正：不能只看 token 的 `model_limits=gpt-image-2` 就认为下游已授权成功；用户 `1540/HMJ` 曾因 token `group` 为空落到 `default` 分组，`new-api` 直接报 `No available channel for model gpt-image-2 under group default`。

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import { http } from '@/api/http'
 import { formatDateTime } from '@/utils/format'
 
@@ -98,6 +99,73 @@ const statusColor: Record<string, 'success' | 'danger' | 'warning' | 'info' | 'p
   dispatched: 'info',
 }
 
+const errorCodeLabel: Record<string, string> = {
+  content_moderation: '内容安全拒绝',
+  invalid_request_error: '参数不被上游接受',
+  upstream_error: '上游未出图',
+  poll_timeout: '轮询超时',
+  download_failed: '下载失败',
+  no_available_account: '无可用账号',
+  rate_limited: '上游限流',
+  interrupted: '部署/重启中断',
+}
+
+const errorTagType: Record<string, 'danger' | 'warning' | 'info'> = {
+  content_moderation: 'danger',
+  invalid_request_error: 'warning',
+  upstream_error: 'warning',
+  poll_timeout: 'warning',
+  interrupted: 'info',
+}
+
+function splitTaskError(error = '') {
+  const trimmed = error.trim()
+  if (!trimmed) return { code: '', detail: '' }
+  const idx = trimmed.indexOf(':')
+  if (idx > 0 && /^[a-zA-Z0-9_-]+$/.test(trimmed.slice(0, idx).trim())) {
+    return { code: trimmed.slice(0, idx).trim(), detail: trimmed.slice(idx + 1).trim() }
+  }
+  if (trimmed.startsWith('upstream ')) return { code: 'upstream_error', detail: trimmed }
+  return { code: trimmed, detail: '' }
+}
+
+function errorReason(row: TaskRow) {
+  const parsed = splitTaskError(row.error)
+  return errorCodeLabel[parsed.code] || parsed.code || '-'
+}
+
+function errorDetail(row: TaskRow) {
+  const parsed = splitTaskError(row.error)
+  return parsed.detail || row.error || ''
+}
+
+function errorType(row: TaskRow) {
+  const parsed = splitTaskError(row.error)
+  return errorTagType[parsed.code] || 'warning'
+}
+
+async function copyError(row: TaskRow) {
+  const text = row.error || ''
+  if (!text) return
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.left = '-9999px'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    ElMessage.success('失败原因已复制')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '复制失败')
+  }
+}
+
 onMounted(fetchList)
 </script>
 
@@ -160,6 +228,16 @@ onMounted(fetchList)
               @click="openPreview(row)"
             >预览({{ row.result_urls_parsed.length }})</el-button>
             <span v-else-if="row.error" style="font-size:11px;color:var(--el-color-danger)" :title="row.error">失败</span>
+            <span v-else style="color:var(--el-text-color-secondary)">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="失败原因" min-width="260" show-overflow-tooltip>
+          <template #default="{ row }">
+            <div v-if="row.error" class="error-reason">
+              <el-tag :type="errorType(row)" size="small">{{ errorReason(row) }}</el-tag>
+              <span class="error-detail">{{ errorDetail(row) || row.error }}</span>
+              <el-button type="primary" link size="small" @click="copyError(row)">复制</el-button>
+            </div>
             <span v-else style="color:var(--el-text-color-secondary)">-</span>
           </template>
         </el-table-column>
@@ -256,6 +334,22 @@ onMounted(fetchList)
   background: transparent;
   cursor: zoom-in;
   overflow: hidden;
+}
+
+.error-reason {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.error-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--el-text-color-regular);
 }
 
 .image-task-thumb {

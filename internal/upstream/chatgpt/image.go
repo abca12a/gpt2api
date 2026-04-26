@@ -305,6 +305,7 @@ type ImageSSEResult struct {
 	SedimentIDs    []string // sediment:// 引用(通常是预览,需要轮询)
 	FinishType     string   // finish_details.type(interrupted/stop/...)
 	ImageGenTaskID string
+	AssistantText  string // 上游未出图时可能返回的 assistant 自然语言拒绝/说明
 	Err            error
 }
 
@@ -357,6 +358,11 @@ func ParseImageSSE(stream <-chan SSEEvent) ImageSSEResult {
 				r.ConversationID = cid
 			}
 			if msg, ok := v["message"].(map[string]interface{}); ok {
+				if role := messageAuthorRole(msg); role == "assistant" {
+					if text := extractMessageText(msg); text != "" {
+						r.AssistantText = text
+					}
+				}
 				if meta, ok := msg["metadata"].(map[string]interface{}); ok {
 					if tid, ok := meta["image_gen_task_id"].(string); ok {
 						r.ImageGenTaskID = tid
@@ -371,6 +377,93 @@ func ParseImageSSE(stream <-chan SSEEvent) ImageSSEResult {
 		}
 	}
 	return r
+}
+
+// AssistantTextMsg 是 conversation.mapping 里一条 assistant 文本消息。
+type AssistantTextMsg struct {
+	MessageID  string
+	CreateTime float64
+	Text       string
+}
+
+// ExtractAssistantTexts 从 conversation.mapping 里提取 assistant 自然语言文本。
+// 主要用于图片任务失败时保留上游“为什么没出图”的对话说明。
+func ExtractAssistantTexts(mapping map[string]interface{}) []AssistantTextMsg {
+	out := make([]AssistantTextMsg, 0, 4)
+	for mid, raw := range mapping {
+		node, _ := raw.(map[string]interface{})
+		if node == nil {
+			continue
+		}
+		msg, _ := node["message"].(map[string]interface{})
+		if msg == nil || messageAuthorRole(msg) != "assistant" {
+			continue
+		}
+		text := extractMessageText(msg)
+		if text == "" {
+			continue
+		}
+		item := AssistantTextMsg{MessageID: mid, Text: text}
+		if v, ok := msg["create_time"].(float64); ok {
+			item.CreateTime = v
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreateTime < out[j].CreateTime })
+	return out
+}
+
+// LatestAssistantText 返回 conversation.mapping 中最新的 assistant 文本。
+func LatestAssistantText(mapping map[string]interface{}) string {
+	texts := ExtractAssistantTexts(mapping)
+	if len(texts) == 0 {
+		return ""
+	}
+	return texts[len(texts)-1].Text
+}
+
+func messageAuthorRole(msg map[string]interface{}) string {
+	author, _ := msg["author"].(map[string]interface{})
+	role, _ := author["role"].(string)
+	return strings.TrimSpace(role)
+}
+
+func extractMessageText(msg map[string]interface{}) string {
+	content, _ := msg["content"].(map[string]interface{})
+	if content == nil {
+		if text, _ := msg["content"].(string); strings.TrimSpace(text) != "" {
+			return normalizeText(text)
+		}
+		return ""
+	}
+	parts, _ := content["parts"].([]interface{})
+	texts := make([]string, 0, len(parts))
+	for _, p := range parts {
+		switch v := p.(type) {
+		case string:
+			texts = appendNonAssetText(texts, v)
+		case map[string]interface{}:
+			if text, _ := v["text"].(string); text != "" {
+				texts = appendNonAssetText(texts, text)
+			}
+			if text, _ := v["content"].(string); text != "" {
+				texts = appendNonAssetText(texts, text)
+			}
+		}
+	}
+	return normalizeText(strings.Join(texts, "\n"))
+}
+
+func appendNonAssetText(texts []string, text string) []string {
+	text = strings.TrimSpace(text)
+	if text == "" || strings.Contains(text, "file-service://") || strings.Contains(text, "sediment://") {
+		return texts
+	}
+	return append(texts, text)
+}
+
+func normalizeText(text string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
 }
 
 // ImageToolMsg 是 conversation.mapping 里一条 IMG2 tool 消息的关键字段。
@@ -515,11 +608,27 @@ const (
 	PollStatusError   PollStatus = "error"   // 上游错误(429 熔断 / ctx 取消)
 )
 
+// PollImageResult 是图片轮询的完整诊断结果。
+type PollImageResult struct {
+	Status        PollStatus
+	FileIDs       []string
+	SedimentIDs   []string
+	AssistantText string
+	LastError     string
+}
+
 // PollConversationForImages 轮询会话直到图片可用。
 //
 // 返回 (status, file_ids, sediment_ids)。status=success 时 file_ids/sediment_ids 至少一个非空。
 // file-service 优先(优先级更高),sediment 作为补充一并带出,调用方自行决定用几张。
 func (c *Client) PollConversationForImages(ctx context.Context, convID string, opt PollOpts) (PollStatus, []string, []string) {
+	result := c.PollConversationForImagesDetailed(ctx, convID, opt)
+	return result.Status, result.FileIDs, result.SedimentIDs
+}
+
+// PollConversationForImagesDetailed 与 PollConversationForImages 行为一致,
+// 但会保留最近的 assistant 文本和最后一个轮询错误,便于任务失败诊断。
+func (c *Client) PollConversationForImagesDetailed(ctx context.Context, convID string, opt PollOpts) PollImageResult {
 	if opt.ExpectedN <= 0 {
 		opt.ExpectedN = 1
 	}
@@ -540,21 +649,24 @@ func (c *Client) PollConversationForImages(ctx context.Context, convID string, o
 		seenFile       = map[string]struct{}{}
 		seenSed        = map[string]struct{}{}
 		consecutive429 int
+		assistantText  string
+		lastError      string
 	)
 
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			return PollStatusError, nil, nil
+			return PollImageResult{Status: PollStatusError, AssistantText: assistantText, LastError: ctx.Err().Error()}
 		default:
 		}
 
 		mapping, err := c.getMappingRaw(ctx, convID)
 		if err != nil {
+			lastError = err.Error()
 			if ue, ok := err.(*UpstreamError); ok && ue.Status == 429 {
 				consecutive429++
 				if consecutive429 >= 3 {
-					return PollStatusError, nil, nil
+					return PollImageResult{Status: PollStatusError, AssistantText: assistantText, LastError: lastError}
 				}
 				sleep(ctx, 10*time.Second)
 				continue
@@ -563,6 +675,9 @@ func (c *Client) PollConversationForImages(ctx context.Context, convID string, o
 			continue
 		}
 		consecutive429 = 0
+		if text := LatestAssistantText(mapping); text != "" {
+			assistantText = text
+		}
 
 		msgs := ExtractImageToolMsgs(mapping)
 		// baseline diff:只看本回合新增 tool 消息
@@ -596,7 +711,7 @@ func (c *Client) PollConversationForImages(ctx context.Context, convID string, o
 
 		// 够 N 张立即短路返回(file-service 优先占配额,sediment 补位)
 		if len(allFile)+len(allSed) >= opt.ExpectedN {
-			return PollStatusSuccess, allFile, allSed
+			return PollImageResult{Status: PollStatusSuccess, FileIDs: allFile, SedimentIDs: allSed, AssistantText: assistantText, LastError: lastError}
 		}
 
 		sleep(ctx, opt.Interval)
@@ -604,9 +719,9 @@ func (c *Client) PollConversationForImages(ctx context.Context, convID string, o
 
 	// 超时兜底:只要拿到过至少 1 张,就算成功(速度优先,不等齐 N)
 	if len(allFile)+len(allSed) > 0 {
-		return PollStatusSuccess, allFile, allSed
+		return PollImageResult{Status: PollStatusSuccess, FileIDs: allFile, SedimentIDs: allSed, AssistantText: assistantText, LastError: lastError}
 	}
-	return PollStatusTimeout, nil, nil
+	return PollImageResult{Status: PollStatusTimeout, AssistantText: assistantText, LastError: lastError}
 }
 
 // getMappingRaw 拉 conversation 并返回 mapping。

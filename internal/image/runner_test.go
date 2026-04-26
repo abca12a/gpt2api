@@ -3,6 +3,7 @@ package image
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,5 +68,23 @@ func TestRunParallelRetriesSubImageOnPollTimeout(t *testing.T) {
 	}
 	if result.Status != StatusSuccess || len(result.FileIDs) != 1 {
 		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestImageFailureCodeFromAssistantDetectsModerationText(t *testing.T) {
+	got := imageFailureCodeFromAssistant(ErrUpstream, "I can't help create that image because it may violate our safety policy.")
+	if got != ErrContentModeration {
+		t.Fatalf("code = %q, want %q", got, ErrContentModeration)
+	}
+}
+
+func TestImageFailureErrorPreservesAssistantAndLastError(t *testing.T) {
+	err := imageFailureError("poll error", "I cannot generate that image.", "conversation get failed")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "poll error") || !strings.Contains(msg, "assistant: I cannot generate") || !strings.Contains(msg, "last_error: conversation get failed") {
+		t.Fatalf("unexpected diagnostic error: %q", msg)
 	}
 }
