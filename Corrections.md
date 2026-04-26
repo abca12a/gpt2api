@@ -63,3 +63,9 @@
 - 2026-04-26 修正：不能因为当前 Codex 所在环境没有本地 new-api 目录，就说“本机没有下游 new-api 服务/源码”；下游后端源码与运行服务在 `212.50.232.214:/root/new-api`，SSH 使用 `root@212.50.232.214 -p 22222`。
 - 正确做法：排查下游后端是否认可任务失败原因时，直接登录 `212.50.232.214` 查 `/root/new-api`、`new-api-postgres-local.tasks.fail_reason` 和 `service/task_polling.go` / `relay/channel/task/sora/adaptor.go`。
 - 边界：`43.161.219.135` 是前端服务器，当前本机还没有 root SSH 权限；只能先通过公网 HTTP 静态包或 `212.50.232.214` 上的前端源码/构建目录交叉判断，不能假装已登录 43。
+
+## 下游用量日志零费用误判
+
+- 2026-04-26 修正：不能看到 `new-api` 用量日志 `quota=0/use_time=0/操作 textGenerate` 就判断图片任务正常；这只是异步提交记录。
+- 正确做法：排查图片不出图时必须查 `new-api.tasks.status/fail_reason`、日志 `type=5` 错误记录，以及 gpt2api `image_tasks.error`；如果 `quota=0` 的失败没有退款日志，仍需要有错误日志向用户说明原因。
+- 边界：用户侧是否看到原因取决于下游后台/前端是否展示 `LogTypeError` 或任务失败原因；不要只看消费日志里的提交行。
