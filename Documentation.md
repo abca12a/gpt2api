@@ -26,7 +26,7 @@
 - 如需确认 `gpt2api` 线上部署状态，优先在本机 `/home/ubuntu/gpt2api` 使用 `git status`、`docker compose -f deploy/docker-compose.yml ps/logs`、`/healthz` 验证；只有跨机器排查 `new-api` 时才需要额外 SSH/路径信息。
 - 2026-04-25 22:03 CST 环境拓扑更新：当前 Codex 所在环境是号池服务器；`212.50.232.214` 是后端项目 `new-api` 服务器；`43.161.219.135` 是前端服务器。
 - `212.50.232.214` 已授权本机公钥给 `root`，授权位置为远端 `/root/.ssh/authorized_keys:5`，且远端 `sshd` 配置已校验正常；首选 SSH：`ssh -p 22222 -i /home/ubuntu/.ssh/cliproxyapi_212_50_232_214_ed25519 root@212.50.232.214`；若私钥已在 SSH agent 中可用 `ssh -p 22222 root@212.50.232.214`；备用端口 `22` 也监听，但优先使用 `22222`。登录仅允许密钥，密码登录关闭；授权公钥指纹 `SHA256:TyH28jHuPGunWPVweApDlva5rA2xepwHCyg3eNXnnog`，首次连接校验主机 ED25519 指纹 `SHA256:0nL2dQNO9AcxSFdArlpUUHPzP3JZGlbr/TPEiNbI2Js`。
-- `43.161.219.135` 当前已知为前端服务器：HTTP `http://43.161.219.135` 可访问并由 `nginx/1.24.0 (Ubuntu)` 响应，SSH `22` 端口可达但本机尚未获得该服务器有效登录凭据；HTTPS `443` 当时未开放或被过滤。
+- `43.161.219.135` 当前已知为前端服务器：HTTP `http://43.161.219.135` 可访问并由 `nginx/1.24.0 (Ubuntu)` 响应；2026-04-27 已确认本机公钥加入远端 `/home/ubuntu/.ssh/authorized_keys`，可从号池服务器使用 `ssh -i /home/ubuntu/.ssh/cliproxyapi_212_50_232_214_ed25519 -p 22 ubuntu@43.161.219.135` 登录，远端用户为 `ubuntu`，登录后主机名为 `VM-0-13-ubuntu`；HTTPS `443` 此前未开放或被过滤，未重新复核。
 
 ## 长期注意事项
 
