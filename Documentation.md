@@ -156,3 +156,4 @@ ubuntu@VM-0-11-ubuntu:~$
 - 同日已修复并发布 `/console/logs`：使用日志列表新增“状态说明”列，图片失败日志会直接显示“图像生成失败”和后端错误原因；异步提交日志显示“图像生成已提交”，提示最终结果以后续状态为准。
 - 相关前端提交：`new-api-web` 的 `f1c6797 fix(logs): surface async image failure reasons`；发布 chunk 已包含 `状态说明 / 图像生成失败 / 最终结果以后续状态为准`。
 - 边界：43 前端只展示后端 `new-api` 已返回的日志；若用户仍看不到失败原因，先确认是否登录同一用户、时间范围是否包含失败时间、日志类型是否筛掉了“错误”。
+- 2026-04-27 复核下游 `new-api` 文档 `docs/gpt-image-2-async-api-development.md`：API Key 客户端/业务后端提交图片任务走下游 `POST /v1/images/generations?async=true`；登录态前端提交走下游同源 `POST /pg/images/generations?async=true`；两者轮询都走下游 `GET /v1/tasks/{task_id}`。浏览器不要直接请求号池 `https://lmage2.dimilinks.com/v1` 或 CLIProxyAPI；`/v1/tasks/batch` 当前不建议用于 `gpt-image-2`，因为号池未提供批量任务查询接口。
