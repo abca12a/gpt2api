@@ -22,11 +22,69 @@
 - 2026-04-26 已按 han 要求增加图片渠道瞬态错误 Free 兜底：外置 Codex/OpenAI 兼容 image channel 在重试后仍返回 `502/5xx`、`stream disconnected before completion`、超时、EOF、connection reset 等瞬态错误时，会转入内置 ChatGPT Web Runner，并强制调度 `plan_type=free` 账号；异步兜底会使用新的 fallback 超时上下文，避免复用已经被外置渠道耗尽的 7 分钟 ctx。内容安全、`400 invalid_value`、最小像素预算等用户请求错误不兜底，也不标记渠道 unhealthy，避免绕过安全策略或掩盖真实参数问题。
 - 2026-04-26 已上线 new-api 顾客身份透传：仅当号池 API Key ID 命中 `security.trusted_downstream_api_key_ids`（当前生产为 `2`）时，`image_tasks` 会写入 `downstream_user_id / downstream_username / downstream_user_email / downstream_user_label`；优先读取 `X-NewAPI-User-ID/Username/User-Email`，请求 `user` 字段只作为同一可信 key 的兜底。管理员“生成记录”已显示“顾客 / 号池用户”，关键词可搜顾客 ID、用户名、邮箱和 label。历史回填按 new-api `tasks.private_data.upstream_task_id == image_tasks.task_id` 精确匹配，2026-04-26 导出 1396 条、命中并补写 870 条，不猜测无法匹配的数据。
 - 2026-04-26 管理员“生成记录”的结果弹窗已取消图片外层跳转链路：不再使用 `el-image` 的内置预览和 `target=_blank` 外链，缩略图改为普通 `img` + 受控大图弹窗，避免 base64/data URL 在点击缩略图、大图或空白区域时误跳 `about:blank#blocked`。
-- 2026-04-25 用户最终纠正：当前 Codex 所在的 `43.165.170.99:/home/ubuntu/gpt2api` 就是线上 `gpt2api` 部署目录；不要再误判为“无法访问生产机”或“只是本地项目”。下游 `new-api` 与前端链路需单独依据请求日志确认。
-- 如需确认 `gpt2api` 线上部署状态，优先在本机 `/home/ubuntu/gpt2api` 使用 `git status`、`docker compose -f deploy/docker-compose.yml ps/logs`、`/healthz` 验证；只有跨机器排查 `new-api` 时才需要额外 SSH/路径信息。
-- 2026-04-25 22:03 CST 环境拓扑更新：当前 Codex 所在环境是号池服务器；`212.50.232.214` 是后端项目 `new-api` 服务器；`43.161.219.135` 是前端服务器。
-- `212.50.232.214` 已授权本机公钥给 `root`，授权位置为远端 `/root/.ssh/authorized_keys:5`，且远端 `sshd` 配置已校验正常；首选 SSH：`ssh -p 22222 -i /home/ubuntu/.ssh/cliproxyapi_212_50_232_214_ed25519 root@212.50.232.214`；若私钥已在 SSH agent 中可用 `ssh -p 22222 root@212.50.232.214`；备用端口 `22` 也监听，但优先使用 `22222`。登录仅允许密钥，密码登录关闭；授权公钥指纹 `SHA256:TyH28jHuPGunWPVweApDlva5rA2xepwHCyg3eNXnnog`，首次连接校验主机 ED25519 指纹 `SHA256:0nL2dQNO9AcxSFdArlpUUHPzP3JZGlbr/TPEiNbI2Js`。
-- `43.161.219.135` 当前已知为前端服务器：HTTP `http://43.161.219.135` 可访问并由 `nginx/1.24.0 (Ubuntu)` 响应；2026-04-27 已确认本机公钥加入远端 `/home/ubuntu/.ssh/authorized_keys`，可从号池服务器使用 `ssh -i /home/ubuntu/.ssh/cliproxyapi_212_50_232_214_ed25519 -p 22 ubuntu@43.161.219.135` 登录，远端用户为 `ubuntu`，登录后主机名为 `VM-0-13-ubuntu`；HTTPS `443` 此前未开放或被过滤，未重新复核。
+- 当前 Codex 的项目身份是“号池”，部署目录是本机 `43.165.170.99:/home/ubuntu/gpt2api`；不要再把本仓库当临时本地副本，也不要把 `212.50.232.214` 当号池。
+- 跨机器连接信息以“项目连接信息”章节为准；历史私钥路径、授权行号、一次性端口验证和“前端无法登录”等旧流水不再作为稳定事实。
+
+## 项目连接信息
+
+> 2026-04-27 由 han 重新确认。这里只记录稳定身份、IP、用户、项目目录和用途；具体 SSH 端口、私钥路径、agent 状态以当前 SSH 配置或当次验证为准，避免沿用旧混乱记忆。
+
+### 号池（当前 Codex / gpt2api）
+
+```text
+号池
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMnghMp2z/tJs5u8TAGwWTFjyJDz11fhaE3aV4bZHjeM codex@212.50.232.214-2026-04-23
+43.165.170.99
+ubuntu
+
+项目目录
+ubuntu@VM-0-7-ubuntu:~/gpt2api$
+```
+
+- 职责：当前仓库、线上 `gpt2api`、账号池服务所在机器；排查号池优先在本机 `/home/ubuntu/gpt2api` 操作。
+
+### 下游后端（new-api）
+
+```text
+下游后端
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFLhOyQ5fpwI+zLDQI6niEFy8W4yqWykpXe3onPC6T8b new-api-build@beaming-cluster-1
+212.50.232.214
+root
+
+项目目录
+root@beaming-cluster-1.localdomain:/root/new-api$
+```
+
+- 职责：下游 `new-api` 后端源码与运行服务；排查下游任务、日志、渠道和后端转发时进入 `/root/new-api`。
+- 构建边界：下游后端中的老前端构建需要去构建机完成，不在后端机器直接构建。
+
+### 下游前端（new-api-web）
+
+```text
+下游前端
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKXjFn5F87+s5pVyzDlqYWEac6rmddvheGYbAwAVB912 new-api-web preview deploy
+43.161.219.135
+ubuntu
+
+项目目录
+ubuntu@VM-0-13-ubuntu:~/new-api-web$
+```
+
+- 职责：下游前端源码与发布；历史确认静态发布目录为 `/home/ubuntu/preview.dimilinks.com`。
+- 构建边界：下游前端的画布部分构建需要去构建机完成，不在前端机器直接构建。
+
+### 构建机
+
+```text
+构建机
+43.152.240.30
+ubuntu
+
+终端
+ubuntu@VM-0-11-ubuntu:~$
+```
+
+- 职责：下游后端中的老前端构建、下游前端的画布部分构建。
 
 ## 长期注意事项
 
