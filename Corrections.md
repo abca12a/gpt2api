@@ -21,3 +21,21 @@
 
 - 2026-04-25 修正：部署到 `gpt2api/server` Alpine 镜像前，不能用默认 CGO 动态链接二进制覆盖 `deploy/bin/gpt2api`；容器会报 `/app/gpt2api: cannot execute: required file not found`。
 - 正确做法：使用 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o deploy/bin/gpt2api ./cmd/server` 生成静态二进制，再 `docker compose -f deploy/docker-compose.yml up -d --build server`。
+
+## gpt-image-2 生产依赖
+
+- 2026-04-26 修正：不能再把当前 `gpt-image-2` 生产路径简单说成“只走 `gpt2api -> chatgpt.com` Web Runner”，也不能因为公网不让下游直连 `cliproxyapi` 就忽略本机 `cli-proxy-api` 依赖。
+- 正确做法：公网入口始终是 `https://lmage2.dimilinks.com/v1`；但 gpt2api 内部优先走数据库里的 `codex-cli-proxy-image` 外置 image channel，容器内 base URL 是 `http://cli-proxy-api:8317`，映射必须是 `gpt-image-2 -> gpt-image-2 / modality=image`。
+- 边界：只有没有启用 image route 时才回退内置 ChatGPT Web Runner；一旦命中 route，`502 / stream disconnected / EOF / timeout` 属于渠道链路问题，先查 `cli-proxy-api` 容器、Docker 网络和渠道健康状态。
+
+## new-api 分组依赖
+
+- 2026-04-26 修正：不能只看 token 的 `model_limits=gpt-image-2` 就认为下游已授权成功；用户 `1540/HMJ` 曾因 token `group` 为空落到 `default` 分组，`new-api` 直接报 `No available channel for model gpt-image-2 under group default`。
+- 正确做法：排查下游 503 时先确认 `new-api` token 的 `group` 能命中 `gpt-image-2` 渠道；如果错误里出现 `under group default`，请求通常还没进入 gpt2api。
+- 边界：gpt2api 侧日志、`image_tasks` 和渠道错误只能解释已经进入 gpt2api 的请求；没进 gpt2api 的分组错误要在 `new-api` 数据库或后台修。
+
+## Codex 1K 尺寸预算
+
+- 2026-04-26 修正：不能再把非正方形 `1k` 比例图按长边 1024 直接映射，例如 `16:9 -> 1024x576`；Codex 上游会报低于最小像素预算。
+- 正确做法：非正方形 1K 要保证约 100 万像素且长边不低于 1536，当前映射示例为 `16:9 -> 1536x864`、`9:16 -> 864x1536`、`2:3 -> 1024x1536`、`21:9 -> 1568x672`。
+- 边界：正方形 `1:1/auto + 1k` 仍是 `1024x1024`；2K/4K 继续按 16 对齐和 4K 像素预算映射。

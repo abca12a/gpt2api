@@ -35,6 +35,9 @@ crypto:
 
 security:
   bcrypt_cost: 10
+  # 允许这些 API Key ID 通过 X-NewAPI-* 头写入下游顾客信息。
+  # 生产中只填写 new-api 后端专用 Key，避免浏览器直连请求伪造顾客身份。
+  trusted_downstream_api_key_ids: []
   cors_origins:
     - "http://localhost:5173"
     - "http://localhost:5174"

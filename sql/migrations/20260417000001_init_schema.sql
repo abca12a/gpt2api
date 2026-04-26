@@ -268,6 +268,10 @@ CREATE TABLE IF NOT EXISTS `image_tasks` (
     `key_id`          BIGINT UNSIGNED NOT NULL DEFAULT 0,
     `model_id`        BIGINT UNSIGNED NOT NULL,
     `account_id`      BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    `downstream_user_id`    VARCHAR(64)  NOT NULL DEFAULT '',
+    `downstream_username`   VARCHAR(128) NOT NULL DEFAULT '',
+    `downstream_user_email` VARCHAR(128) NOT NULL DEFAULT '',
+    `downstream_user_label` VARCHAR(255) NOT NULL DEFAULT '',
     `prompt`          TEXT            NOT NULL,
     `n`               INT             NOT NULL DEFAULT 1,
     `size`            VARCHAR(32)     NOT NULL DEFAULT '1024x1024',
@@ -284,6 +288,7 @@ CREATE TABLE IF NOT EXISTS `image_tasks` (
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_task_id` (`task_id`),
     KEY `idx_user_time` (`user_id`, `created_at`),
+    KEY `idx_downstream_user` (`downstream_user_id`),
     KEY `idx_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='异步生图任务';
 

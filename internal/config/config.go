@@ -63,8 +63,9 @@ type CryptoConfig struct {
 }
 
 type SecurityConfig struct {
-	BcryptCost  int      `mapstructure:"bcrypt_cost"`
-	CORSOrigins []string `mapstructure:"cors_origins"`
+	BcryptCost                 int      `mapstructure:"bcrypt_cost"`
+	CORSOrigins                []string `mapstructure:"cors_origins"`
+	TrustedDownstreamAPIKeyIDs []uint64 `mapstructure:"trusted_downstream_api_key_ids"`
 }
 
 type SchedulerConfig struct {

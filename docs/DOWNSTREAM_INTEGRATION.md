@@ -1,6 +1,6 @@
 # 下游 new-api / 前端对接开发文档
 
-> 更新时间：2026-04-25（Asia/Shanghai）
+> 更新时间：2026-04-26（Asia/Shanghai）
 > 适用范围：下游自有后端 `new-api` + 下游前端，对接当前 `gpt2api` 图片生成能力。
 
 ## 1. 当前结论
@@ -9,22 +9,27 @@
 - **推荐 Base URL**：`https://lmage2.dimilinks.com/v1`。
 - **认证方式**：`Authorization: Bearer <gpt2api API Key>`；该 Key 只能放在 `new-api` 后端，不能下发到浏览器。
 - **当前主要能力**：图片生成；文字 `/v1/chat/completions` 后端保留，但前端入口关闭，不建议新接入时依赖文字能力。
-- **当前账号池**：生产库快照为 400 个活跃账号，`account_type=codex`、`plan_type=free`；其中 125 个 `healthy`、275 个 `warned`。
-- **当前模型**：`gpt-image-2` 启用，模型配置为 `upstream_model_slug=gpt-5-3`；实际图片链路遇到免费账号 persona 时会自动把上游模型降为 `auto`，由 chatgpt.com 自己选择可用图片模型。
-- **当前外置渠道**：`upstream_channels=0`、`channel_model_mappings=0`，所以纯文生图当前也会回落到内置 ChatGPT 账号池，而不是外部 OpenAI/Gemini 渠道。
+- **当前账号池**：生产库快照为 409 个活跃账号：`codex/free` 114 个 `healthy`、286 个 `warned`，以及 `codex/plus` 9 个 `healthy`。
+- **当前模型**：`gpt-image-2` 启用；模型配置仍保留内置 Web Runner 的 `upstream_model_slug=gpt-5-3`，但生产优先通过外置 Codex image channel 路由到上游 `gpt-image-2`。
+- **当前关键依赖**：生产库必须存在并启用 `codex-cli-proxy-image` 渠道，`base_url=http://cli-proxy-api:8317`，映射 `local_model=gpt-image-2 / upstream_model=gpt-image-2 / modality=image`；`gpt2api-server` 与 `cli-proxy-api` 必须同在 Docker 网络 `deploy_default`，容器内 DNS `cli-proxy-api` 必须可解析。
+- **当前下游依赖**：`new-api` 的 token 不只要 `model_limits=gpt-image-2`，还要落到能使用该模型的分组（当前为 `gpt-image-2`），否则会在 `new-api` 侧报 `No available channel for model gpt-image-2 under group default`，请求不会进入 gpt2api。
 
-一句话回答：**是，当前线上账号池是 codex/free 账号；但业务不是走 OpenAI 官方 Codex API，也不是 `cliproxyapi` 那条 CLIProxyAPI 域名，而是 `gpt2api -> chatgpt.com` Web 后端反代路线。**
+一句话回答：**公网调用只走 `https://lmage2.dimilinks.com/v1`；但 gpt2api 内部的 `gpt-image-2` 生产路径依赖本机 `cli-proxy-api:8317` Codex 图片渠道，不是让下游直接调用 `cliproxyapi.845817074.xyz`。**
 
 ## 2. 系统边界
 
 ```mermaid
 flowchart LR
   FE["下游前端"] --> NA["下游后端 new-api"]
-  NA -->|OpenAI 兼容请求 + gpt2api API Key| G["gpt2api /v1"]
-  G -->|账号调度 / 计费 / 任务落库| S["ChatGPT 账号池 codex/free"]
-  S -->|f/conversation + picture_v2| C["chatgpt.com Web Backend"]
+  NA -->|"OpenAI 兼容请求 + gpt2api API Key"| G["gpt2api /v1"]
+  G -->|"模型/Key/计费/任务落库"| DB["gpt2api MySQL"]
+  G -->|"image channel: codex-cli-proxy-image"| CP["cli-proxy-api:8317"]
+  CP -->|"chatgpt.com/backend-api/codex/responses + image_generation"| CG["ChatGPT Codex 图片链路"]
+  G -."仅无启用 image route 时回退".-> S["ChatGPT Web 账号池 Runner"]
+  S -."f/conversation + picture_v2".-> C["chatgpt.com Web Backend"]
+  CG --> G
   C --> G
-  G -->|/p/img 签名图片代理| NA
+  G -->|"图片 URL 或 /p/img 签名代理"| NA
   NA --> FE
 ```
 
@@ -32,15 +37,17 @@ flowchart LR
 
 - 校验 `Authorization: Bearer` API Key、IP 白名单、模型白名单。
 - 用户积分预扣、成功结算、失败退款。
-- 调度 ChatGPT 账号池，一号一任务加锁，失败时跨账号重试。
-- 调用 chatgpt.com 的 `f/conversation` 图片链路：`ChatRequirements -> PrepareFConversation -> StreamFConversation -> PollConversationForImages -> ImageDownloadURL`。
-- 生成并保存 `image_tasks`，返回 `task_id` 和图片代理 URL。
+- 优先按 `upstream_channels` + `channel_model_mappings` 把 `gpt-image-2` 路由到外置 Codex image channel，并记录渠道健康状态。
+- 在没有启用 image route 时，才回退调度 ChatGPT 账号池：一号一任务加锁，失败时跨账号重试。
+- 内置 Web Runner 调用 chatgpt.com 的 `f/conversation` 图片链路；Codex image channel 调用本机 `cli-proxy-api:8317`。
+- 生成并保存 `image_tasks`，返回 `task_id`、稳定错误码、上游错误详情和图片 URL。
 - 通过 `/p/img/:task_id/:idx?exp=...&sig=...` 代理下载图片，避免下游直接暴露或依赖上游短期直链。
 
 ### 2.2 哪些事情由 new-api 负责
 
 - 持有并保护 `gpt2api` API Key，不允许浏览器直接拿到。
-- 把下游前端请求转换成 `gpt2api` 支持的 OpenAI 兼容请求。
+- 把下游前端请求转换成 `gpt2api` 支持的 OpenAI 兼容请求，并完整转发 `size / resolution / image_urls` 等图片字段。
+- 确保用户 token 落在支持 `gpt-image-2` 的分组；不要只设置 `model_limits` 却让请求落到 `default` 分组。
 - 记录下游自己的业务任务 ID 与 `gpt2api.task_id` 的映射。
 - 轮询 `gpt2api` 任务状态，并把状态归一化给前端。
 - 将 `gpt2api` 返回的相对图片地址补成绝对 URL，或者原样透传并让前端按 `gpt2api` origin 补全。
@@ -126,7 +133,7 @@ Content-Type: application/json
 - `prompt` 必填。
 - `model` 为空时 gpt2api 默认使用 `gpt-image-2`。
 - `n` 默认 `1`，最大按 `4` 处理；`n > 1` 时 gpt2api 会并发启动多个单图任务，可能来自不同 ChatGPT 账号和 conversation。
-- `size` 默认 `1024x1024`；`2048` 级和 `3840` 级尺寸会触发阿里云 2K/4K 代理超分逻辑。
+- 推荐传 `size=比例` + `resolution=1k/2k/4k`；命中 Codex image channel 时会映射为原生像素，例如 `16:9+1k -> 1536x864`、`16:9+2k -> 2048x1152`、`16:9+4k -> 3840x2160`。
 - `response_format=b64_json` 当前不要依赖；当前稳定返回是 `url`。
 - 同步请求可能阻塞较久，Nginx 当前读写超时是 600 秒；下游如不想占连接，建议用异步模式。
 
@@ -280,7 +287,8 @@ JSON 路径支持非标准扩展字段：
 - 同一次请求最多 4 张参考图。
 - 单张参考图最大 20MB。
 - 参考图可以是 HTTPS URL、data URL 或纯 base64。
-- 带参考图时 gpt2api 当前会减少跨账号重试，避免重复上传导致上游上下文不一致。
+- 参考图字段会先被 gpt2api 解码成 data URL；命中 Codex image channel 时转发到 `/v1/images/edits` 语义，未命中 route 时才走内置 Web Runner 上传链路。
+- 如果 gpt2api 图片参数日志里 `reference_count=0`，说明参考图没有从前端或 `new-api` 传到 gpt2api，先查下游转发。
 
 ### 3.7 OpenAI 风格图片编辑
 
@@ -295,10 +303,10 @@ Content-Type: multipart/form-data
 - `prompt`：必填。
 - `n`：默认 `1`，最大 `4`。
 - `size`：默认 `1024x1024`。
-- `upscale`：可选，`2k` 或 `4k`。
+- `resolution` / `image_size` / `scale` / `upscale`：可选，推荐 `resolution=1k/2k/4k`。
 - `image` / `image[]` / `images` / `images[]`：至少一张图片文件。
 
-内部实际仍走 ChatGPT 账号池的参考图上传 + 图片生成链路。
+内部优先走同一个 Codex image channel；只有没有启用 image route 时才回退 ChatGPT 账号池的参考图上传 + 图片生成链路。
 
 ## 4. 图片 URL 处理
 
@@ -324,11 +332,31 @@ const absoluteUrl = new URL(item.url, GPT2API_ORIGIN).toString()
 - 不要丢掉 `exp` 和 `sig`。
 - 签名 URL 默认有效期约 24 小时。
 - gpt2api 进程重启后，旧签名 URL 会失效；如果前端历史图裂了，应让后端重新查询任务拿新 URL，而不是复用旧 URL。
-- `/p/img` 第一次访问会回源到 chatgpt.com 换取短期下载链接；开启 2K/4K 时还会调用阿里云生成式图像超分并把结果缓存在本进程。
+- `/p/img` 只适用于任务返回本站签名代理 URL 的场景；Codex image channel 也可能直接返回 `https://...` 或 `data:image/...`。只有内置 Web Runner 的 `/p/img` 回源链路才会下载 chatgpt.com 文件，显式本地超分开启时才会调用阿里云。
 
-## 5. new-api 推荐实现
+## 5. 关键依赖清单
 
-### 5.1 提交任务
+线上排查时优先确认这些依赖，避免把问题误判到前端或账号池：
+
+- `gpt2api` 公网入口：下游只调用 `https://lmage2.dimilinks.com/v1`，不要把请求发到 `cliproxyapi.845817074.xyz`。
+- Docker 服务：`gpt2api-server/mysql/redis/nginx` 正常，且 `cli-proxy-api` 容器运行中。
+- Docker 网络：`gpt2api-server` 内能解析并访问 `http://cli-proxy-api:8317/health`；若不通，先把 `cli-proxy-api` 接回 `deploy_default` 网络。
+- 数据库渠道：`upstream_channels` 里 `codex-cli-proxy-image` 必须 `enabled=1 / status=healthy`；`channel_model_mappings` 必须有 `gpt-image-2 -> gpt-image-2 / modality=image / enabled=1`。
+- 下游分组：`new-api` token 的 `group` 要能命中 `gpt-image-2` 渠道；`group=default` 报错通常还没到 gpt2api。
+- 参考图转发：gpt2api 日志 `reference_count=0` 时，优先查前端上传和 `new-api` 字段转发；`reference_count>0` 后再查上游生成效果。
+
+常用核验命令：
+
+```bash
+docker compose -f deploy/docker-compose.yml ps
+docker ps --format 'table {{.Names}}	{{.Status}}	{{.Ports}}'
+docker exec gpt2api-server sh -c 'getent hosts cli-proxy-api && wget -qO- --timeout=3 http://cli-proxy-api:8317/health'
+docker exec gpt2api-mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SELECT id,name,type,base_url,enabled,status,fail_count,last_test_error FROM upstream_channels WHERE deleted_at IS NULL; SELECT channel_id,local_model,upstream_model,modality,enabled FROM channel_model_mappings;"'
+```
+
+## 6. new-api 推荐实现
+
+### 6.1 提交任务
 
 ```ts
 async function submitImageTask(input: {
@@ -336,7 +364,8 @@ async function submitImageTask(input: {
   model?: string
   n?: number
   size?: string
-  reference_images?: string[]
+  resolution?: '1k' | '2k' | '4k'
+  image_urls?: string[]
 }) {
   const res = await fetch('https://lmage2.dimilinks.com/v1/images/generations?async=true', {
     method: 'POST',
@@ -348,8 +377,9 @@ async function submitImageTask(input: {
       model: input.model || 'gpt-image-2',
       prompt: input.prompt,
       n: input.n || 1,
-      size: input.size || '1024x1024',
-      reference_images: input.reference_images,
+      size: input.size || '16:9',
+      resolution: input.resolution || '2k',
+      image_urls: input.image_urls,
     }),
   })
 
@@ -359,7 +389,7 @@ async function submitImageTask(input: {
 }
 ```
 
-### 5.2 轮询任务
+### 6.2 轮询任务
 
 ```ts
 async function getImageTask(taskId: string) {
@@ -381,7 +411,7 @@ async function getImageTask(taskId: string) {
 }
 ```
 
-### 5.3 轮询策略
+### 6.3 轮询策略
 
 - 首次提交后 1 秒开始轮询。
 - 常规间隔 2 到 5 秒。
@@ -389,7 +419,7 @@ async function getImageTask(taskId: string) {
 - 图生图 / 编辑建议最多等 15 分钟。
 - 如果 `status=failed`，停止轮询，记录 `error.code` 和 `error.message`。
 
-## 6. 前端对齐点
+## 7. 前端对齐点
 
 - 前端任务状态以 `new-api` 返回为准，不直接理解 gpt2api 内部状态。
 - 只要 `status` 是 `queued` 或 `in_progress`，就保持 loading，不要当失败。
@@ -398,7 +428,7 @@ async function getImageTask(taskId: string) {
 - 如果后端没有补绝对 URL，前端必须用 `https://lmage2.dimilinks.com` 补齐 `/p/img/...`。
 - 不要把 `file_id` 当成可下载 URL；它只是排查和对账字段。
 
-## 7. 常见错误码
+## 8. 常见错误码
 
 HTTP 错误响应默认仍保留 OpenAI 兼容结构：`error.code` 是 gpt2api 的稳定字符串错误码，`error.type` 已按 APIMart 常见类型归类（如 `authentication_error`、`payment_required`、`rate_limit_error`、`server_error`、`service_unavailable`）。若请求开启 `compat=apimart` 等兼容模式，HTTP 错误里的 `error.code` 会改为 HTTP 状态码数字，便于复用 APIMart 客户端分支。
 
@@ -419,46 +449,48 @@ Codex/OpenAI 兼容图片渠道如果明确返回 `content_policy_violation`、`
 | 502 / failed | `download_failed` | 图片下载签名或回源失败 | 重新查任务或重试 |
 | 502 / failed | `upstream_error` | chatgpt.com 上游异常 | 记录 trace，稍后重试 |
 
-## 8. 排查清单
+## 9. 排查清单
 
-### 8.1 new-api 后端先查
+### 9.1 new-api 后端先查
 
 - 请求是否打到 `https://lmage2.dimilinks.com/v1`，不是 `https://cliproxyapi.845817074.xyz`。
 - 是否带了 `Authorization: Bearer <gpt2api API Key>`。
+- token 是否落在 `gpt-image-2` 分组；如果报 `under group default`，先修 `new-api` 分组而不是查 gpt2api。
+- 是否完整转发 `size / resolution / image_urls`；参考图问题先对照 gpt2api 日志里的 `reference_count`。
 - 异步提交是否按 HTTP `200` + `task_id` 处理，而不是强依赖 HTTP `202`。
 - 是否轮询 `/v1/tasks/{task_id}`，而不是只等提交接口最终出图。
 - 是否把 `/p/img/...` 补成绝对 URL，并保留 `exp` / `sig`。
 
-### 8.2 下游前端先查
+### 9.2 下游前端先查
 
 - loading 状态是否覆盖 `queued` 和 `in_progress`。
 - 图片 src 是否是完整 URL，或者能正确基于 gpt2api origin 补全。
 - 是否误把 `file_id` 当图片 URL。
 - 是否因为浏览器访问的是 new-api 域名，导致相对 `/p/img` 被请求到 new-api 而不是 gpt2api。
 
-### 8.3 gpt2api 运维侧先查
+### 9.3 gpt2api 运维侧先查
 
 ```bash
 docker compose -f deploy/docker-compose.yml ps
 curl -fsS http://127.0.0.1:8080/healthz
+docker exec gpt2api-server sh -c 'getent hosts cli-proxy-api && wget -qO- --timeout=3 http://cli-proxy-api:8317/health'
 docker logs --tail=200 gpt2api-server
 ```
 
 重点日志关键词：
 
-- `image runner SSE parsed`
-- `image runner poll done`
-- `image runner parallel retry with another account`
-- `poll_timeout`
-- `turnstile required`
-- `no_available_account`
+- `image generation options` / `reference_count`
+- `channel async image fail` / `channel image fail, try next`
+- `stream disconnected before completion` / `upstream 502`
+- `image runner SSE parsed` / `image runner poll done`
+- `poll_timeout` / `turnstile required` / `no_available_account`
 
-## 9. 不要混淆的两条域名
+## 10. 不要混淆的两条域名
 
 - `https://lmage2.dimilinks.com`：当前 `gpt2api`，给下游 `new-api` 接图片 API。
 - `https://cliproxyapi.845817074.xyz`：CLIProxyAPI，不是这次图片 API 的 gpt2api 入口。
 
-## 10. 双方验收标准
+## 11. 双方验收标准
 
 后端验收：
 

@@ -24,11 +24,14 @@ func NewDAO(db *sqlx.DB) *DAO { return &DAO{db: db} }
 func (d *DAO) Create(ctx context.Context, t *Task) error {
 	res, err := d.db.ExecContext(ctx, `
 INSERT INTO image_tasks
-  (task_id, user_id, key_id, model_id, account_id, prompt, n, size, upscale, status,
+  (task_id, user_id, key_id, model_id, account_id,
+   downstream_user_id, downstream_username, downstream_user_email, downstream_user_label,
+   prompt, n, size, upscale, status,
    conversation_id, file_ids, result_urls, error, estimated_credit, credit_cost,
    created_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, NOW())`,
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, NOW())`,
 		t.TaskID, t.UserID, t.KeyID, t.ModelID, t.AccountID,
+		t.DownstreamUserID, t.DownstreamUsername, t.DownstreamUserEmail, t.DownstreamUserLabel,
 		t.Prompt, t.N, t.Size, ValidateUpscale(t.Upscale),
 		nullEmpty(t.Status, StatusQueued),
 		t.ConversationID, nullJSON(t.FileIDs), nullJSON(t.ResultURLs),
@@ -118,7 +121,9 @@ UPDATE image_tasks
 func (d *DAO) Get(ctx context.Context, taskID string) (*Task, error) {
 	var t Task
 	err := d.db.GetContext(ctx, &t, `
-SELECT id, task_id, user_id, key_id, model_id, account_id, prompt, n, size, upscale, status,
+SELECT id, task_id, user_id, key_id, model_id, account_id,
+       downstream_user_id, downstream_username, downstream_user_email, downstream_user_label,
+       prompt, n, size, upscale, status,
        conversation_id, file_ids, result_urls, error, estimated_credit, credit_cost,
        created_at, started_at, finished_at
   FROM image_tasks
@@ -139,7 +144,9 @@ func (d *DAO) ListByUser(ctx context.Context, userID uint64, limit, offset int) 
 	}
 	var out []Task
 	err := d.db.SelectContext(ctx, &out, `
-SELECT id, task_id, user_id, key_id, model_id, account_id, prompt, n, size, upscale, status,
+SELECT id, task_id, user_id, key_id, model_id, account_id,
+       downstream_user_id, downstream_username, downstream_user_email, downstream_user_label,
+       prompt, n, size, upscale, status,
        conversation_id, file_ids, result_urls, error, estimated_credit, credit_cost,
        created_at, started_at, finished_at
   FROM image_tasks
@@ -167,21 +174,7 @@ func (d *DAO) ListAdmin(ctx context.Context, f AdminTaskFilter, limit, offset in
 	if limit <= 0 {
 		limit = 20
 	}
-	where := "1=1"
-	args := []interface{}{}
-	if f.UserID > 0 {
-		where += " AND t.user_id = ?"
-		args = append(args, f.UserID)
-	}
-	if f.Status != "" {
-		where += " AND t.status = ?"
-		args = append(args, f.Status)
-	}
-	if f.Keyword != "" {
-		like := "%" + f.Keyword + "%"
-		where += " AND (t.prompt LIKE ? OR u.email LIKE ?)"
-		args = append(args, like, like)
-	}
+	where, args := buildAdminTaskWhere(f)
 
 	var total int64
 	countSQL := `SELECT COUNT(*) FROM image_tasks t LEFT JOIN users u ON u.id=t.user_id WHERE ` + where
@@ -191,6 +184,7 @@ func (d *DAO) ListAdmin(ctx context.Context, f AdminTaskFilter, limit, offset in
 
 	listSQL := `
 SELECT t.id, t.task_id, t.user_id, t.key_id, t.model_id, t.account_id,
+       t.downstream_user_id, t.downstream_username, t.downstream_user_email, t.downstream_user_label,
        t.prompt, t.n, t.size, t.upscale, t.status,
        t.conversation_id, t.file_ids, t.result_urls, t.error,
        t.estimated_credit, t.credit_cost,
@@ -205,6 +199,25 @@ SELECT t.id, t.task_id, t.user_id, t.key_id, t.model_id, t.account_id,
 	var out []AdminTaskRow
 	err := d.db.SelectContext(ctx, &out, listSQL, args...)
 	return out, total, err
+}
+
+func buildAdminTaskWhere(f AdminTaskFilter) (string, []interface{}) {
+	where := "1=1"
+	args := []interface{}{}
+	if f.UserID > 0 {
+		where += " AND t.user_id = ?"
+		args = append(args, f.UserID)
+	}
+	if f.Status != "" {
+		where += " AND t.status = ?"
+		args = append(args, f.Status)
+	}
+	if f.Keyword != "" {
+		like := "%" + f.Keyword + "%"
+		where += ` AND (t.prompt LIKE ? OR u.email LIKE ? OR t.downstream_user_id LIKE ? OR t.downstream_username LIKE ? OR t.downstream_user_email LIKE ? OR t.downstream_user_label LIKE ?)`
+		args = append(args, like, like, like, like, like, like)
+	}
+	return where, args
 }
 
 // DecodeFileIDs 把 JSON 列解出字符串数组。

@@ -26,9 +26,12 @@ import (
 //
 // 返回:
 //   - handled=true:已完成响应(成功或失败),调用方直接返回;
-//   - handled=false:没有渠道映射或全部候选失败且需要回退到内置 ChatGPT 账号池。
+//   - handled=false:没有可用渠道映射,调用方可以回退到内置 ChatGPT 账号池。
 //
-// 仅覆盖纯 prompt 文生图场景;reference_images 分支继续走原 Runner(ChatGPT 账号池)。
+// 当前覆盖文生图、JSON 参考图、multipart edits 以及 chat->image 的外置
+// image channel 路径。只有没有启用的 image 路由时才回退到内置 ChatGPT
+// 账号池；一旦匹配到启用路由，调用失败会按渠道错误处理并记录健康状态，
+// 不会再静默切回内置 Runner。
 func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	ak *apikey.APIKey, m *modelpkg.Model, req *ImageGenRequest,
 	rec *usage.Log, ratio float64, refs []imagepkg.ReferenceImage,
@@ -206,6 +209,7 @@ func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 		Status:          imagepkg.StatusDispatched,
 		EstimatedCredit: cost,
 	}
+	downstreamUserInfoForTask(c, ak, req.User).applyToTask(task)
 	if err := h.DAO.Create(c.Request.Context(), task); err != nil {
 		rec.Status = usage.StatusFailed
 		rec.ErrorCode = "billing_error"

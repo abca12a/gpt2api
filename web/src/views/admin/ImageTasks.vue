@@ -8,6 +8,10 @@ interface TaskRow {
   task_id: string
   user_id: number
   user_email: string
+  downstream_user_id: string
+  downstream_username: string
+  downstream_user_email: string
+  downstream_user_label: string
   prompt: string
   n: number
   size: string
@@ -84,11 +88,11 @@ onMounted(fetchList)
     <div class="card-block">
       <h2 class="page-title" style="margin:0">生成记录</h2>
       <div style="color:var(--el-text-color-secondary);font-size:13px;margin:4px 0 14px">
-        全站图片生成任务历史,含用户、提示词、生成结果与耗时。
+        全站图片生成任务历史,含后端顾客、号池用户、提示词、生成结果与耗时。
       </div>
 
       <el-form inline class="flex-wrap-gap" @submit.prevent="onSearch">
-        <el-input v-model="filter.keyword" placeholder="提示词 / 邮箱" clearable style="width:260px" />
+        <el-input v-model="filter.keyword" placeholder="提示词 / 顾客 / 邮箱" clearable style="width:280px" />
         <el-select v-model="filter.status" placeholder="状态" clearable style="width:130px">
           <el-option label="成功" value="success" />
           <el-option label="失败" value="failed" />
@@ -101,10 +105,17 @@ onMounted(fetchList)
 
       <el-table v-loading="loading" :data="rows" stripe style="margin-top:12px" size="small">
         <el-table-column prop="id" label="ID" width="72" />
-        <el-table-column label="用户" min-width="170">
+        <el-table-column label="顾客 / 号池用户" min-width="220">
           <template #default="{ row }">
-            <div>{{ row.user_email || '-' }}</div>
-            <div style="font-size:11px;color:var(--el-text-color-secondary)">uid {{ row.user_id }}</div>
+            <div v-if="row.downstream_user_label || row.downstream_username || row.downstream_user_email || row.downstream_user_id">
+              <div>{{ row.downstream_user_label || row.downstream_username || row.downstream_user_email || '-' }}</div>
+              <div style="font-size:11px;color:var(--el-text-color-secondary)">
+                new-api uid {{ row.downstream_user_id || '-' }}
+              </div>
+            </div>
+            <div style="font-size:11px;color:var(--el-text-color-secondary);margin-top:2px">
+              号池 {{ row.user_email || '-' }} · uid {{ row.user_id }}
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="提示词" min-width="240" show-overflow-tooltip>

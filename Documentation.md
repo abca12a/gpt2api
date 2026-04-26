@@ -17,6 +17,8 @@
 - 本地已合并上游多渠道能力，并保留 OAuth 导入、额度汇总、个人图片代理、nginx/端口等本地定制。
 - `deploy/nginx.conf` 当前由同一个 `gpt2api-nginx` 处理公网入口：`lmage2.dimilinks.com` 进入 gpt2api，`cliproxyapi.845817074.xyz` 进入 CLIProxyAPI。
 - 2026-04-25 已新增 `docs/DOWNSTREAM_INTEGRATION.md`，作为下游 `new-api` 后端和前端对接文档；当时确认对外是 `gpt2api -> chatgpt.com` Web 反代路线，不是 OpenAI 官方 API，也不是 `cliproxyapi` 路线。2026-04-25 21:24 CST 起，纯文生图的 `gpt-image-2` 已额外接入本机 CLIProxyAPI Codex 图片渠道作为外置 image channel；2026-04-25 21:42 CST 起，JSON 参考图与 multipart `/v1/images/edits` 也已接入同一 Codex image channel，只有外置渠道不可用时才回退原 ChatGPT Web Runner。
+- 2026-04-26 复核关键依赖：当前生产 `gpt-image-2` 优先依赖 `codex-cli-proxy-image` 外置 image channel，数据库配置为 `upstream_channels.name=codex-cli-proxy-image / base_url=http://cli-proxy-api:8317 / enabled=1 / status=healthy`，映射为 `local_model=gpt-image-2 -> upstream_model=gpt-image-2 / modality=image`；`gpt2api-server` 与 `cli-proxy-api` 必须同在 Docker 网络 `deploy_default`，容器内 `cli-proxy-api` DNS 和 `/health` 必须可用。下游公网仍只打 `lmage2.dimilinks.com`，不要直接打 `cliproxyapi` 公网域名。
+- 2026-04-26 已上线 new-api 顾客身份透传：仅当号池 API Key ID 命中 `security.trusted_downstream_api_key_ids`（当前生产为 `2`）时，`image_tasks` 会写入 `downstream_user_id / downstream_username / downstream_user_email / downstream_user_label`；优先读取 `X-NewAPI-User-ID/Username/User-Email`，请求 `user` 字段只作为同一可信 key 的兜底。管理员“生成记录”已显示“顾客 / 号池用户”，关键词可搜顾客 ID、用户名、邮箱和 label。历史回填按 new-api `tasks.private_data.upstream_task_id == image_tasks.task_id` 精确匹配，2026-04-26 导出 1396 条、命中并补写 870 条，不猜测无法匹配的数据。
 - 2026-04-25 用户最终纠正：当前 Codex 所在的 `43.165.170.99:/home/ubuntu/gpt2api` 就是线上 `gpt2api` 部署目录；不要再误判为“无法访问生产机”或“只是本地项目”。下游 `new-api` 与前端链路需单独依据请求日志确认。
 - 如需确认 `gpt2api` 线上部署状态，优先在本机 `/home/ubuntu/gpt2api` 使用 `git status`、`docker compose -f deploy/docker-compose.yml ps/logs`、`/healthz` 验证；只有跨机器排查 `new-api` 时才需要额外 SSH/路径信息。
 - 2026-04-25 22:03 CST 环境拓扑更新：当前 Codex 所在环境是号池服务器；`212.50.232.214` 是后端项目 `new-api` 服务器；`43.161.219.135` 是前端服务器。
@@ -33,6 +35,9 @@
 - 修改 `deploy/nginx.conf` 后，如容器内仍读取旧配置，优先重建 `gpt2api-nginx`，不要只依赖 `nginx -s reload`。
 - CLIProxyAPI 管理界面当前经公网域名可访问，安全性依赖强管理密钥；若要改回仅本机可用，需要重新加 Nginx 层拦截。
 - 排查下游 `Failed to update video task / parseTaskResult` 时，先区分三类现象：上游提交 HTTP 状态必须是 `200`、下游返回客户端 `202` 是正常异步响应、任务失败原因若是 `no_available_account / poll_timeout / interrupted` 则根因在号池任务执行或部署中断，不是前端问题。
+- 排查 `gpt-image-2` 不可用时先分层：`new-api` 报 `under group default` 先修 token/group；gpt2api 日志有 `channel async image fail`、`upstream 502` 或 `stream disconnected before completion` 先查 `cli-proxy-api` 容器、Docker 网络和 `upstream_channels/channel_model_mappings`；只有无启用 image route 或内置 Runner 日志出现时，才优先查 ChatGPT 账号池。
+- 排查参考图不生效时先看 gpt2api 图片参数日志的 `reference_count`：`0` 表示前端或 `new-api` 没把参考图字段传到 gpt2api，`>0` 后再查上游上传/生成效果。
+- 不要再把 `16:9+1k` 记录为 `1024x576`；当前 Codex/native 映射会为非正方形 1K 提高像素预算，例如 `16:9+1k -> 1536x864`、`9:16+1k -> 864x1536`、`2:3+1k -> 1024x1536`。
 - 2026-04-25 针对 `img_0af0fe5de388490597197ee8` 的 `poll_timeout` 已完成热修复部署；部署后本机 smoke 任务 `img_3fa25b0cbe914af58b11c27d` 约 26 秒成功返回 1 张图。
 - 2026-04-25 13:12-13:15 CST 生产号池监控检查：`gpt2api-server/mysql/redis/nginx` 均 healthy，`account.refresh_enabled=true`、`account.quota_probe_enabled=true`，刷新/探测无待办欠账；账号池 200 个活跃账号，检查末快照约 185 healthy / 15 warned，0 dead/suspicious/throttled，图片剩余额度合计约 3837。
 - 同次检查发现两个需后续关注点：所有账号 `image_quota_total=-1`，导致 `/api/admin/accounts/quota-summary` 的 `total_capacity` 原始汇总会显示负数；代理池为空且 200 个账号均未绑定代理，出图日志仍有 `turnstile required` 与 `poll_timeout`，会把相关账号临时降为 warned 并冷却 24 小时。

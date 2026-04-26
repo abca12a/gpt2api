@@ -91,26 +91,30 @@ func isTaskErrorCode(value string) bool {
 
 // Task 对应 image_tasks 表。
 type Task struct {
-	ID              uint64     `db:"id"               json:"id"`
-	TaskID          string     `db:"task_id"          json:"task_id"`
-	UserID          uint64     `db:"user_id"          json:"user_id"`
-	KeyID           uint64     `db:"key_id"           json:"key_id"`
-	ModelID         uint64     `db:"model_id"         json:"model_id"`
-	AccountID       uint64     `db:"account_id"       json:"account_id"`
-	Prompt          string     `db:"prompt"           json:"prompt"`
-	N               int        `db:"n"                json:"n"`
-	Size            string     `db:"size"             json:"size"`
-	Upscale         string     `db:"upscale"          json:"upscale"`
-	Status          string     `db:"status"           json:"status"`
-	ConversationID  string     `db:"conversation_id"  json:"conversation_id"`
-	FileIDs         []byte     `db:"file_ids"         json:"-"`
-	ResultURLs      []byte     `db:"result_urls"      json:"-"`
-	Error           string     `db:"error"            json:"error"`
-	EstimatedCredit int64      `db:"estimated_credit" json:"estimated_credit"`
-	CreditCost      int64      `db:"credit_cost"      json:"credit_cost"`
-	CreatedAt       time.Time  `db:"created_at"       json:"created_at"`
-	StartedAt       *time.Time `db:"started_at"       json:"started_at"`
-	FinishedAt      *time.Time `db:"finished_at"      json:"finished_at"`
+	ID                  uint64     `db:"id"               json:"id"`
+	TaskID              string     `db:"task_id"          json:"task_id"`
+	UserID              uint64     `db:"user_id"          json:"user_id"`
+	KeyID               uint64     `db:"key_id"           json:"key_id"`
+	ModelID             uint64     `db:"model_id"         json:"model_id"`
+	AccountID           uint64     `db:"account_id"       json:"account_id"`
+	DownstreamUserID    string     `db:"downstream_user_id"    json:"downstream_user_id"`
+	DownstreamUsername  string     `db:"downstream_username"   json:"downstream_username"`
+	DownstreamUserEmail string     `db:"downstream_user_email" json:"downstream_user_email"`
+	DownstreamUserLabel string     `db:"downstream_user_label" json:"downstream_user_label"`
+	Prompt              string     `db:"prompt"           json:"prompt"`
+	N                   int        `db:"n"                json:"n"`
+	Size                string     `db:"size"             json:"size"`
+	Upscale             string     `db:"upscale"          json:"upscale"`
+	Status              string     `db:"status"           json:"status"`
+	ConversationID      string     `db:"conversation_id"  json:"conversation_id"`
+	FileIDs             []byte     `db:"file_ids"         json:"-"`
+	ResultURLs          []byte     `db:"result_urls"      json:"-"`
+	Error               string     `db:"error"            json:"error"`
+	EstimatedCredit     int64      `db:"estimated_credit" json:"estimated_credit"`
+	CreditCost          int64      `db:"credit_cost"      json:"credit_cost"`
+	CreatedAt           time.Time  `db:"created_at"       json:"created_at"`
+	StartedAt           *time.Time `db:"started_at"       json:"started_at"`
+	FinishedAt          *time.Time `db:"finished_at"      json:"finished_at"`
 }
 
 // Result 是 Runner 返回给网关/客户端的生图结果。

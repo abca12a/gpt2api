@@ -1,10 +1,12 @@
 # gpt2api 图片 API 手册
 
-更新时间：2026-04-25（Asia/Shanghai）  
+更新时间：2026-04-26（Asia/Shanghai）
 适用范围：`gpt2api` 对外图片接口、下游 `new-api` 后端、AI 创作前端。  
 当前重点模型：`gpt-image-2`。
 
 > 这份文档描述的是“我们自己的对外协议”。底层可能走 Codex 图片渠道、ChatGPT 号池 Runner 或其它外置 image channel；调用方不需要感知底层链路。
+
+> 当前生产 `gpt-image-2` 优先依赖本机 `codex-cli-proxy-image` 外置 image channel：`gpt2api-server -> http://cli-proxy-api:8317 -> chatgpt.com/backend-api/codex/responses`。下游公网仍只调用 `https://lmage2.dimilinks.com/v1`，不要直接调用 `cliproxyapi.845817074.xyz`。
 
 ## 1. 接入总览
 
@@ -43,6 +45,24 @@ GET  /v1/tasks/{task_id}
 - 图片生成耗时通常几十秒到数分钟，同步请求容易被下游网关或浏览器超时影响。
 - `/v1/tasks/{task_id}` 是新的兼容任务查询结构，适合前端统一轮询。
 - 前端只需要处理 `queued`、`in_progress`、`succeeded`、`failed` 四类状态。
+
+### 1.4 线上关键依赖
+
+排查生产问题时先确认以下依赖，避免重复误判：
+
+- `gpt2api` 服务：`gpt2api-server/mysql/redis/nginx` 正常，`/healthz` 返回 ok。
+- Codex 图片渠道：`cli-proxy-api` 容器运行中，且与 `gpt2api-server` 同在 `deploy_default` 网络。
+- 容器内解析：`gpt2api-server` 内 `cli-proxy-api` 能解析到容器 IP，并且 `http://cli-proxy-api:8317/health` 返回 ok。
+- 数据库路由：`upstream_channels` 存在 `codex-cli-proxy-image`，`base_url=http://cli-proxy-api:8317`，`enabled=1`；`channel_model_mappings` 存在 `gpt-image-2 -> gpt-image-2 / modality=image / enabled=1`。
+- 下游分组：`new-api` token 需要落在支持 `gpt-image-2` 的分组；如果错误是 `No available channel for model gpt-image-2 under group default`，说明请求通常还没进入 gpt2api。
+
+快速核验：
+
+```bash
+docker compose -f deploy/docker-compose.yml ps
+curl -fsS http://127.0.0.1:8080/healthz
+docker exec gpt2api-server sh -c 'getent hosts cli-proxy-api && wget -qO- --timeout=3 http://cli-proxy-api:8317/health'
+```
 
 ## 2. 路由列表
 
@@ -420,23 +440,23 @@ curl https://lmage2.dimilinks.com/v1/tasks/img_xxx \
 
 ### 8.3 当前尺寸映射表
 
-当 `size` 是比例且命中 Codex/native 图片渠道时，会映射成具体像素。宽高按 16 像素对齐；4K 档控制在约 `3840x2160` 像素预算内，所以正方形 4K 是 `2880x2880`，不是 `3840x3840`。
+当 `size` 是比例且命中 Codex/native 图片渠道时，会映射成具体像素。宽高按 16 像素对齐；4K 档控制在约 `3840x2160` 像素预算内，所以正方形 4K 是 `2880x2880`，不是 `3840x3840`。1K 非正方形会主动提高到至少约 100 万像素且长边不低于 1536，避免 Codex 上游报 `below the current minimum pixel budget`，所以 `16:9+1k` 是 `1536x864`，不是 `1024x576`。
 
 | `size` | 1K | 2K | 4K |
 |---|---:|---:|---:|
 | `auto` / `1:1` | `1024x1024` | `2048x2048` | `2880x2880` |
-| `3:2` | `1008x672` | `2016x1344` | `3504x2336` |
-| `2:3` | `672x1008` | `1344x2016` | `2336x3504` |
-| `4:3` | `1024x768` | `2048x1536` | `3264x2448` |
-| `3:4` | `768x1024` | `1536x2048` | `2448x3264` |
-| `5:4` | `960x768` | `2000x1600` | `3200x2560` |
-| `4:5` | `768x960` | `1600x2000` | `2560x3200` |
-| `16:9` | `1024x576` | `2048x1152` | `3840x2160` |
-| `9:16` | `576x1024` | `1152x2048` | `2160x3840` |
-| `2:1` | `1024x512` | `2048x1024` | `3840x1920` |
-| `1:2` | `512x1024` | `1024x2048` | `1920x3840` |
-| `21:9` | `1008x432` | `2016x864` | `3696x1584` |
-| `9:21` | `432x1008` | `864x2016` | `1584x3696` |
+| `3:2` | `1536x1024` | `2016x1344` | `3504x2336` |
+| `2:3` | `1024x1536` | `1344x2016` | `2336x3504` |
+| `4:3` | `1536x1152` | `2048x1536` | `3264x2448` |
+| `3:4` | `1152x1536` | `1536x2048` | `2448x3264` |
+| `5:4` | `1600x1280` | `2000x1600` | `3200x2560` |
+| `4:5` | `1280x1600` | `1600x2000` | `2560x3200` |
+| `16:9` | `1536x864` | `2048x1152` | `3840x2160` |
+| `9:16` | `864x1536` | `1152x2048` | `2160x3840` |
+| `2:1` | `1536x768` | `2048x1024` | `3840x1920` |
+| `1:2` | `768x1536` | `1024x2048` | `1920x3840` |
+| `21:9` | `1568x672` | `2016x864` | `3808x1632` |
+| `9:21` | `672x1568` | `864x2016` | `1632x3808` |
 
 ### 8.4 前端尺寸控件建议
 
@@ -552,12 +572,13 @@ curl "https://lmage2.dimilinks.com/v1/images/generations?async=true&compat=apima
 | HTTP | code | 含义 | 前端建议 |
 |---:|---|---|---|
 | 400 | `invalid_request_error` / `invalid_reference_image` | 参数错误、prompt 空、参考图异常 | 提示用户修改参数 |
+| 400 / failed | `content_moderation` | 上游内容安全策略拒绝 | 提示用户调整 prompt / 参考图，不按系统故障重试 |
 | 401 | `missing_api_key` / `invalid_api_key` | API Key 缺失或错误 | 检查后端配置 |
 | 403 | `model_not_allowed` | Key 无模型权限 | 检查模型白名单 |
 | 402 | `insufficient_balance` | 余额不足 | 提示充值或联系管理员 |
 | 404 | `not_found` | 任务不存在或不属于当前用户 | 停止轮询 |
 | 429 | `rate_limit_rpm` | RPM 限流 | 降低并发，稍后重试 |
-| 502/503 | `upstream_error` / `service_unavailable` | 上游或账号池不可用 | 可重试或切换提示 |
+| 502/503 | `upstream_error` / `service_unavailable` | 上游、Codex image channel 或账号池不可用；异步任务会把上游详情拼到 `error.message` | 记录 `error.message`，先查 `cli-proxy-api` 和渠道状态，再决定重试 |
 | 500 | `internal_error` / `billing_error` | 服务内部异常 | 上报日志 |
 
 ### 11.2 APIMart 兼容错误
@@ -648,10 +669,12 @@ function normalizeImageUrl(url: string) {
 - 不要把浏览器 `blob:` URL 直接传给 gpt2api；要先上传到后端或转成 data URL。
 - 不要默认 `n>1`；当前 Codex/native 渠道按 `n=1` 设计最稳。
 - 不要把 `/v1/images/tasks/{id}` 和 `/v1/tasks/{id}` 的响应结构混在一起。
+- 不要把 `model_limits=gpt-image-2` 当成完整授权；`new-api` token 分组也必须能命中 `gpt-image-2` 渠道。
+- 不要把 `reference_count=0` 的问题归因到上游生成效果；这通常说明参考图没有转发到 gpt2api。
 
 ## 13. 已验证能力快照
 
-截至 2026-04-25，当前链路已验证：
+截至 2026-04-26，当前链路已验证：
 
 - 文生图：`gpt-image-2` 可提交、轮询、取图。
 - JSON 图生图：`image_urls` / `reference_images` 等字段可携带参考图。
@@ -659,6 +682,7 @@ function normalizeImageUrl(url: string) {
 - 尺寸：`auto`、`1:1`、`3:2`、`2:3`、`4:3`、`3:4`、`5:4`、`4:5`、`16:9`、`9:16`、`2:1`、`1:2`、`21:9`、`9:21` 均完成过提交、轮询、取图验证。
 - 内容：中文场景、英文场景、产品图、文字海报、人像、建筑等类型均完成过测试。
 - 2K/4K：Codex/native 图片渠道已验证文生图和参考图链路能返回 2K/4K 档结果。
+- 1K 非正方形：`16:9+1k` 已验证映射为 `1536x864` 并成功返回，避免旧的 `1024x576` 最小像素预算错误。
 
 仍需前端按产品策略处理：
 

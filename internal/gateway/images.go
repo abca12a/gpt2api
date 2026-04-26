@@ -419,6 +419,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 
 	// 5) 落任务
 	taskID := image.GenerateTaskID()
+	downstreamUser := downstreamUserInfoForTask(c, ak, req.User)
 	task := &image.Task{
 		TaskID:          taskID,
 		UserID:          ak.UserID,
@@ -431,6 +432,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		Status:          image.StatusDispatched,
 		EstimatedCredit: cost,
 	}
+	downstreamUser.applyToTask(task)
 	if h.DAO != nil {
 		if err := h.DAO.Create(c.Request.Context(), task); err != nil {
 			refund("billing_error")
@@ -699,7 +701,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 
 	taskID := image.GenerateTaskID()
 	if h.DAO != nil {
-		_ = h.DAO.Create(c.Request.Context(), &image.Task{
+		task := &image.Task{
 			TaskID:          taskID,
 			UserID:          ak.UserID,
 			KeyID:           ak.ID,
@@ -710,7 +712,9 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 			Upscale:         imgReq.Upscale,
 			Status:          image.StatusDispatched,
 			EstimatedCredit: cost,
-		})
+		}
+		downstreamUserInfoForTask(c, ak, imgReq.User).applyToTask(task)
+		_ = h.DAO.Create(c.Request.Context(), task)
 	}
 
 	runCtx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
@@ -1469,7 +1473,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 
 	taskID := image.GenerateTaskID()
 	if h.DAO != nil {
-		_ = h.DAO.Create(c.Request.Context(), &image.Task{
+		task := &image.Task{
 			TaskID:          taskID,
 			UserID:          ak.UserID,
 			KeyID:           ak.ID,
@@ -1480,7 +1484,9 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 			Upscale:         upscale,
 			Status:          image.StatusDispatched,
 			EstimatedCredit: cost,
-		})
+		}
+		downstreamUserInfoForTask(c, ak, c.Request.FormValue("user")).applyToTask(task)
+		_ = h.DAO.Create(c.Request.Context(), task)
 	}
 
 	runCtx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Minute)
