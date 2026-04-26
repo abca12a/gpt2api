@@ -67,9 +67,27 @@ function onReset() {
 // 弹窗预览图片
 const previewDlg = ref(false)
 const previewRow = ref<TaskRow | null>(null)
+const largePreviewDlg = ref(false)
+const largePreviewUrl = ref('')
+const largePreviewIndex = ref(0)
 function openPreview(row: TaskRow) {
   previewRow.value = row
   previewDlg.value = true
+}
+function openLargePreview(row: TaskRow | null, idx: number) {
+  const url = row?.result_urls_parsed?.[idx]
+  if (!row || !url) return
+  previewRow.value = row
+  largePreviewIndex.value = idx
+  largePreviewUrl.value = url
+  largePreviewDlg.value = true
+}
+function switchLargePreview(offset: number) {
+  const urls = previewRow.value?.result_urls_parsed || []
+  if (!urls.length) return
+  const next = (largePreviewIndex.value + offset + urls.length) % urls.length
+  largePreviewIndex.value = next
+  largePreviewUrl.value = urls[next] || ''
 }
 
 const statusColor: Record<string, 'success' | 'danger' | 'warning' | 'info' | 'primary'> = {
@@ -178,26 +196,90 @@ onMounted(fetchList)
           {{ previewRow.prompt }}
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:8px">
-          <div
+          <button
             v-for="(url, idx) in previewRow.result_urls_parsed"
             :key="idx"
-            style="display:block"
-            @click.stop
+            type="button"
+            class="image-task-thumb-button"
+            @click.stop.prevent="openLargePreview(previewRow, idx)"
           >
-            <el-image
+            <img
               :src="url"
-              :preview-src-list="previewRow.result_urls_parsed"
-              :initial-index="idx"
-              fit="cover"
-              style="width:200px;height:200px;border-radius:4px"
-              lazy
+              alt="生成结果缩略图"
+              class="image-task-thumb"
+              loading="lazy"
+              @dragstart.prevent
             />
-          </div>
+          </button>
         </div>
         <div v-if="previewRow.error" style="margin-top:12px;color:var(--el-color-danger);font-size:12px;word-break:break-all">
           错误:{{ previewRow.error }}
         </div>
       </div>
     </el-dialog>
+
+    <el-dialog
+      v-model="largePreviewDlg"
+      title="查看生成结果"
+      width="min(92vw, 1100px)"
+      append-to-body
+      :close-on-click-modal="false"
+    >
+      <div class="image-task-large-preview" @click.stop.prevent>
+        <img
+          v-if="largePreviewUrl"
+          :src="largePreviewUrl"
+          alt="生成结果大图"
+          class="image-task-large-img"
+          @click.stop.prevent
+          @dragstart.prevent
+        />
+      </div>
+      <template v-if="(previewRow?.result_urls_parsed?.length || 0) > 1" #footer>
+        <el-button @click="switchLargePreview(-1)">上一张</el-button>
+        <span style="margin:0 12px;color:var(--el-text-color-secondary)">
+          {{ largePreviewIndex + 1 }} / {{ previewRow?.result_urls_parsed?.length || 0 }}
+        </span>
+        <el-button @click="switchLargePreview(1)">下一张</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.image-task-thumb-button {
+  width: 200px;
+  height: 200px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: zoom-in;
+  overflow: hidden;
+}
+
+.image-task-thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.image-task-large-preview {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 320px;
+  max-height: 72vh;
+  overflow: auto;
+}
+
+.image-task-large-img {
+  display: block;
+  max-width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+  user-select: none;
+}
+</style>
