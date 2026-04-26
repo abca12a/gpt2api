@@ -57,3 +57,9 @@
 - 错误理解：只移除缩略图外层 `<a target="_blank">` 就能阻止跳转。
 - 事实：`el-image` 的内置预览仍可能围绕 base64/data URL 触发浏览器导航/阻拦，表现为 `about:blank#blocked`。
 - 纠正：后台生成记录不要用 `el-image` 内置预览承载结果图；改用普通 `img` 和受控 `el-dialog` 大图弹窗，点击事件必须 `stop/prevent`，且不暴露任何可导航链接。
+
+## 下游机器拓扑
+
+- 2026-04-26 修正：不能因为当前 Codex 所在环境没有本地 new-api 目录，就说“本机没有下游 new-api 服务/源码”；下游后端源码与运行服务在 `212.50.232.214:/root/new-api`，SSH 使用 `root@212.50.232.214 -p 22222`。
+- 正确做法：排查下游后端是否认可任务失败原因时，直接登录 `212.50.232.214` 查 `/root/new-api`、`new-api-postgres-local.tasks.fail_reason` 和 `service/task_polling.go` / `relay/channel/task/sora/adaptor.go`。
+- 边界：`43.161.219.135` 是前端服务器，当前本机还没有 root SSH 权限；只能先通过公网 HTTP 静态包或 `212.50.232.214` 上的前端源码/构建目录交叉判断，不能假装已登录 43。
