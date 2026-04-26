@@ -415,6 +415,43 @@ func TestBuildImageTaskCompatPayloadFailurePreservesDiagnosticDetail(t *testing.
 	}
 }
 
+func TestBuildImageTaskPayloadFailureIncludesUserVisibleMessage(t *testing.T) {
+	task := &imagepkg.Task{
+		TaskID: "img_failed",
+		Status: imagepkg.StatusFailed,
+		Error: imagepkg.FormatTaskError(
+			imagepkg.ErrContentModeration,
+			`poll error; assistant: I cannot help create that image; last_error: upstream returned error`,
+		),
+		CreatedAt: time.Unix(1777040000, 0),
+	}
+
+	body, err := json.Marshal(buildImageTaskPayload(task))
+	if err != nil {
+		t.Fatalf("marshal task payload: %v", err)
+	}
+
+	var got struct {
+		Status       string `json:"status"`
+		Error        string `json:"error"`
+		ErrorCode    string `json:"error_code"`
+		ErrorMessage string `json:"error_message"`
+		ErrorDetail  string `json:"error_detail"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal task payload: %v", err)
+	}
+	if got.Status != imagepkg.StatusFailed || got.ErrorCode != imagepkg.ErrContentModeration {
+		t.Fatalf("unexpected failure payload: %#v", got)
+	}
+	if !strings.Contains(got.ErrorMessage, "上游说明:I cannot help create that image") {
+		t.Fatalf("error_message should expose assistant reason, got %q", got.ErrorMessage)
+	}
+	if !strings.Contains(got.Error, "assistant:") || !strings.Contains(got.ErrorDetail, "last_error:") {
+		t.Fatalf("raw diagnostics should be preserved: %#v", got)
+	}
+}
+
 func TestImageChannelFailureClassifiesContentModeration(t *testing.T) {
 	failure := imageChannelFailureFromErr(errors.New(`upstream 400: {"error":{"code":"content_policy_violation","message":"blocked by policy"}}`))
 	if failure.Code != imagepkg.ErrContentModeration {
