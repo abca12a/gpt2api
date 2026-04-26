@@ -1140,14 +1140,7 @@ func buildImageTaskPayload(t *image.Task) gin.H {
 		"credit_cost":     t.CreditCost,
 		"data":            imageTaskData(t),
 	}
-	if t.Status == image.StatusFailed {
-		code, detail, message := imageTaskErrorMessage(t.Error)
-		out["error_code"] = code
-		out["error_message"] = message
-		if detail != "" {
-			out["error_detail"] = detail
-		}
-	}
+	attachImageTaskErrorFields(out, t.Error, t.Status == image.StatusFailed)
 	return out
 }
 
@@ -1174,7 +1167,7 @@ func buildImageTaskCompatPayload(t *image.Task) gin.H {
 	}
 
 	if t.Status == image.StatusFailed {
-		code, detail, message := imageTaskErrorMessage(t.Error)
+		code, detail, message := image.TaskErrorFields(t.Error)
 		errorBody := gin.H{
 			"code":    code,
 			"message": message,
@@ -1183,15 +1176,26 @@ func buildImageTaskCompatPayload(t *image.Task) gin.H {
 			errorBody["detail"] = detail
 		}
 		out["error"] = errorBody
+		attachImageTaskErrorFields(out, t.Error, true)
 	}
 	return out
 }
 
-func imageTaskErrorMessage(stored string) (code, detail, message string) {
-	code, detail = image.SplitTaskError(stored)
-	code = ifEmpty(code, "task_failed")
-	message = localizeImageErr(code, detail)
-	return code, detail, message
+func attachImageTaskErrorFields(out gin.H, stored string, include bool) {
+	if !include {
+		return
+	}
+	code, detail, message := image.TaskErrorFields(stored)
+	out["error_code"] = code
+	out["error_message"] = message
+	out["error_msg"] = message
+	out["message"] = message
+	out["failure_reason"] = message
+	out["failed_reason"] = message
+	out["fail_reason"] = message
+	if detail != "" {
+		out["error_detail"] = detail
+	}
 }
 
 func imageTaskData(t *image.Task) []ImageGenData {
@@ -1267,57 +1271,7 @@ func isFalsey(v string) bool {
 // localizeImageErr 把 runner 返回的英文错误码 + 原始 err.Error() 压成一段中文提示,
 // 方便前端 / SDK 用户直接看懂。原始英文 message 作为后缀保留以便排障。
 func localizeImageErr(code, raw string) string {
-	raw = strings.Join(strings.Fields(strings.TrimSpace(raw)), " ")
-	var zh string
-	switch code {
-	case image.ErrNoAccount:
-		zh = "账号池暂无可用账号,请稍后重试"
-	case image.ErrRateLimited:
-		zh = "上游风控,请稍后再试"
-	case image.ErrUnknown, "":
-		zh = "图片生成失败"
-	case image.ErrInterrupted:
-		zh = "任务被服务重启中断,请重新提交"
-	case image.ErrContentModeration:
-		zh = "上游内容安全策略拒绝了本次生图,请调整 prompt 或参考图后重试"
-	case image.ErrPollTimeout:
-		zh = "图片生成超时,上游长时间没有返回图片"
-	case image.ErrUpstream:
-		zh = "上游返回错误"
-	default:
-		zh = "图片生成失败(" + code + ")"
-	}
-	if raw != "" && raw != code {
-		if assistant := diagnosticField(raw, "assistant"); assistant != "" {
-			return zh + ":上游说明:" + assistant
-		}
-		return zh + ":" + raw
-	}
-	return zh
-}
-
-func diagnosticField(raw, field string) string {
-	raw = strings.TrimSpace(raw)
-	field = strings.ToLower(strings.TrimSpace(field))
-	if raw == "" || field == "" {
-		return ""
-	}
-	lower := strings.ToLower(raw)
-	marker := field + ":"
-	idx := strings.Index(lower, marker)
-	if idx < 0 {
-		return ""
-	}
-	start := idx + len(marker)
-	text := raw[start:]
-	lowerText := lower[start:]
-	end := len(text)
-	for _, next := range []string{"; assistant:", "; last_error:"} {
-		if nextIdx := strings.Index(lowerText, next); nextIdx >= 0 && nextIdx < end {
-			end = nextIdx
-		}
-	}
-	return strings.TrimSpace(text[:end])
+	return image.LocalizeTaskError(code, raw)
 }
 
 func nullableUnix(t *time.Time) int64 {

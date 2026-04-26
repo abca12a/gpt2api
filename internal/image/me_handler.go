@@ -33,6 +33,9 @@ type taskView struct {
 	Status         string     `json:"status"`
 	ConversationID string     `json:"conversation_id,omitempty"`
 	Error          string     `json:"error,omitempty"`
+	ErrorCode      string     `json:"error_code,omitempty"`
+	ErrorMessage   string     `json:"error_message,omitempty"`
+	ErrorDetail    string     `json:"error_detail,omitempty"`
 	CreditCost     int64      `json:"credit_cost"`
 	IsPreview      bool       `json:"is_preview,omitempty"`
 	ImageURLs      []string   `json:"image_urls"`
@@ -55,7 +58,7 @@ func toView(t *Task) taskView {
 	for i, id := range fids {
 		fids[i] = PublicFileID(id)
 	}
-	return taskView{
+	view := taskView{
 		ID: t.ID, TaskID: t.TaskID, UserID: t.UserID, ModelID: t.ModelID,
 		AccountID: t.AccountID, Prompt: t.Prompt, N: t.N, Size: t.Size,
 		Upscale: t.Upscale,
@@ -63,6 +66,10 @@ func toView(t *Task) taskView {
 		CreditCost: t.CreditCost, IsPreview: isPreview, ImageURLs: imageURLs, FileIDs: fids,
 		CreatedAt: t.CreatedAt, StartedAt: t.StartedAt, FinishedAt: t.FinishedAt,
 	}
+	if t.Status == StatusFailed || t.Error != "" {
+		view.ErrorCode, view.ErrorDetail, view.ErrorMessage = TaskErrorFields(t.Error)
+	}
+	return view
 }
 
 // GET /api/me/images/tasks

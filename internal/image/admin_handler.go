@@ -50,13 +50,20 @@ func (h *AdminHandler) List(c *gin.Context) {
 	type rowOut struct {
 		AdminTaskRow
 		ResultURLsParsed []string `json:"result_urls_parsed"`
+		ErrorCode        string   `json:"error_code,omitempty"`
+		ErrorMessage     string   `json:"error_message,omitempty"`
+		ErrorDetail      string   `json:"error_detail,omitempty"`
 	}
 	out := make([]rowOut, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, rowOut{
+		row := rowOut{
 			AdminTaskRow:     r,
 			ResultURLsParsed: BuildTaskImageURLs(&r.Task, ImageProxyTTL),
-		})
+		}
+		if r.Status == StatusFailed || r.Error != "" {
+			row.ErrorCode, row.ErrorDetail, row.ErrorMessage = TaskErrorFields(r.Error)
+		}
+		out = append(out, row)
 	}
 
 	resp.OK(c, gin.H{

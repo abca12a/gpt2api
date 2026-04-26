@@ -76,6 +76,72 @@ func SplitTaskError(value string) (code, detail string) {
 	return value, ""
 }
 
+// TaskErrorFields 把落库错误转换为对用户/下游都友好的稳定字段。
+func TaskErrorFields(stored string) (code, detail, message string) {
+	code, detail = SplitTaskError(stored)
+	if code == "" {
+		code = "task_failed"
+	}
+	message = LocalizeTaskError(code, detail)
+	return code, detail, message
+}
+
+// LocalizeTaskError 把错误码和上游详情压成用户可直接理解的中文文案。
+func LocalizeTaskError(code, raw string) string {
+	raw = strings.Join(strings.Fields(strings.TrimSpace(raw)), " ")
+	var zh string
+	switch code {
+	case ErrNoAccount:
+		zh = "账号池暂无可用账号,请稍后重试"
+	case ErrRateLimited:
+		zh = "上游风控,请稍后再试"
+	case ErrUnknown, "":
+		zh = "图片生成失败"
+	case ErrInterrupted:
+		zh = "任务被服务重启中断,请重新提交"
+	case ErrContentModeration:
+		zh = "上游内容安全策略拒绝了本次生图,请调整 prompt 或参考图后重试"
+	case ErrPollTimeout:
+		zh = "图片生成超时,上游长时间没有返回图片"
+	case ErrUpstream:
+		zh = "上游返回错误"
+	default:
+		zh = "图片生成失败(" + code + ")"
+	}
+	if raw != "" && raw != code {
+		if assistant := DiagnosticField(raw, "assistant"); assistant != "" {
+			return zh + ":上游说明:" + assistant
+		}
+		return zh + ":" + raw
+	}
+	return zh
+}
+
+// DiagnosticField 从 `base; assistant: ...; last_error: ...` 这类诊断文本中取指定字段。
+func DiagnosticField(raw, field string) string {
+	raw = strings.TrimSpace(raw)
+	field = strings.ToLower(strings.TrimSpace(field))
+	if raw == "" || field == "" {
+		return ""
+	}
+	lower := strings.ToLower(raw)
+	marker := field + ":"
+	idx := strings.Index(lower, marker)
+	if idx < 0 {
+		return ""
+	}
+	start := idx + len(marker)
+	text := raw[start:]
+	lowerText := lower[start:]
+	end := len(text)
+	for _, next := range []string{"; assistant:", "; last_error:"} {
+		if nextIdx := strings.Index(lowerText, next); nextIdx >= 0 && nextIdx < end {
+			end = nextIdx
+		}
+	}
+	return strings.TrimSpace(text[:end])
+}
+
 func isTaskErrorCode(value string) bool {
 	if value == "" || len(value) > 80 || strings.ContainsAny(value, " \t\n\r") {
 		return false

@@ -399,9 +399,17 @@ func TestBuildImageTaskCompatPayloadFailurePreservesDiagnosticDetail(t *testing.
 	}
 
 	var got struct {
-		Error struct {
+		ErrorCode     string `json:"error_code"`
+		ErrorMessage  string `json:"error_message"`
+		ErrorMsg      string `json:"error_msg"`
+		Message       string `json:"message"`
+		FailureReason string `json:"failure_reason"`
+		FailedReason  string `json:"failed_reason"`
+		FailReason    string `json:"fail_reason"`
+		Error         struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
+			Detail  string `json:"detail"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &got); err != nil {
@@ -412,6 +420,9 @@ func TestBuildImageTaskCompatPayloadFailurePreservesDiagnosticDetail(t *testing.
 	}
 	if !strings.Contains(got.Error.Message, "stream disconnected before completion") {
 		t.Fatalf("message should preserve upstream detail, got %q", got.Error.Message)
+	}
+	if got.ErrorCode != imagepkg.ErrUpstream || got.ErrorMessage != got.Error.Message || got.ErrorMsg != got.Error.Message || got.Message != got.Error.Message || got.FailureReason != got.Error.Message || got.FailedReason != got.Error.Message || got.FailReason != got.Error.Message {
+		t.Fatalf("top-level aliases should mirror error object for downstream compatibility: %#v", got)
 	}
 }
 

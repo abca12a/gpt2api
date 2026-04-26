@@ -20,6 +20,9 @@ interface TaskRow {
   status: string
   result_urls_parsed: string[]
   error: string
+  error_code?: string
+  error_message?: string
+  error_detail?: string
   credit_cost: number
   estimated_credit: number
   created_at: string
@@ -129,23 +132,33 @@ function splitTaskError(error = '') {
   return { code: trimmed, detail: '' }
 }
 
+function taskErrorCode(row: TaskRow) {
+  return row.error_code || splitTaskError(row.error).code
+}
+
 function errorReason(row: TaskRow) {
-  const parsed = splitTaskError(row.error)
-  return errorCodeLabel[parsed.code] || parsed.code || '-'
+  const code = taskErrorCode(row)
+  return errorCodeLabel[code] || code || '-'
 }
 
 function errorDetail(row: TaskRow) {
   const parsed = splitTaskError(row.error)
-  return parsed.detail || row.error || ''
+  return row.error_message || row.error_detail || parsed.detail || row.error || ''
 }
 
 function errorType(row: TaskRow) {
-  const parsed = splitTaskError(row.error)
-  return errorTagType[parsed.code] || 'warning'
+  const code = taskErrorCode(row)
+  return errorTagType[code] || 'warning'
+}
+
+function errorCopyText(row: TaskRow) {
+  return [row.error_message, row.error_detail || row.error]
+    .filter((v, idx, arr) => v && arr.indexOf(v) === idx)
+    .join('\n')
 }
 
 async function copyError(row: TaskRow) {
-  const text = row.error || ''
+  const text = errorCopyText(row)
   if (!text) return
   try {
     if (navigator.clipboard?.writeText) {
@@ -227,15 +240,15 @@ onMounted(fetchList)
               type="primary" link size="small"
               @click="openPreview(row)"
             >预览({{ row.result_urls_parsed.length }})</el-button>
-            <span v-else-if="row.error" style="font-size:11px;color:var(--el-color-danger)" :title="row.error">失败</span>
+            <span v-else-if="row.error || row.error_message" style="font-size:11px;color:var(--el-color-danger)" :title="errorDetail(row)">失败</span>
             <span v-else style="color:var(--el-text-color-secondary)">-</span>
           </template>
         </el-table-column>
         <el-table-column label="失败原因" min-width="260" show-overflow-tooltip>
           <template #default="{ row }">
-            <div v-if="row.error" class="error-reason">
+            <div v-if="row.error || row.error_message" class="error-reason">
               <el-tag :type="errorType(row)" size="small">{{ errorReason(row) }}</el-tag>
-              <span class="error-detail">{{ errorDetail(row) || row.error }}</span>
+              <span class="error-detail" :title="row.error_detail || row.error">{{ errorDetail(row) }}</span>
               <el-button type="primary" link size="small" @click="copyError(row)">复制</el-button>
             </div>
             <span v-else style="color:var(--el-text-color-secondary)">-</span>

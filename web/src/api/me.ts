@@ -136,6 +136,9 @@ export interface ImageTask {
   status: 'queued' | 'dispatched' | 'running' | 'success' | 'failed' | string
   conversation_id?: string
   error?: string
+  error_code?: string
+  error_message?: string
+  error_detail?: string
   credit_cost: number
   is_preview?: boolean
   image_urls: string[]

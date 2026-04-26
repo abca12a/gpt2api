@@ -365,7 +365,7 @@ onMounted(async () => {
                     <span class="mute">{{ formatDateTime(t.created_at) }}</span>
                     <span class="credit">{{ formatCredit(t.credit_cost) }} 积分</span>
                   </div>
-                  <div v-if="t.error" class="err">{{ t.error }}</div>
+                  <div v-if="t.error_message || t.error" class="err" :title="t.error_detail || t.error">{{ t.error_message || t.error }}</div>
                 </div>
               </el-card>
             </div>

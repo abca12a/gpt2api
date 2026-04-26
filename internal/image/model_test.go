@@ -40,3 +40,17 @@ func TestFormatTaskErrorDefaultsEmptyCode(t *testing.T) {
 		t.Fatalf("empty code should default to unknown, got %q", got)
 	}
 }
+
+func TestTaskErrorFieldsUsesAssistantDiagnosticForMessage(t *testing.T) {
+	stored := FormatTaskError(ErrContentModeration, `poll error; assistant: I cannot help create that image; last_error: upstream returned error`)
+	code, detail, message := TaskErrorFields(stored)
+	if code != ErrContentModeration {
+		t.Fatalf("code = %q, want %q", code, ErrContentModeration)
+	}
+	if !strings.Contains(detail, "last_error:") {
+		t.Fatalf("detail should preserve raw diagnostics, got %q", detail)
+	}
+	if !strings.Contains(message, "上游说明:I cannot help create that image") {
+		t.Fatalf("message should expose assistant diagnostic, got %q", message)
+	}
+}
