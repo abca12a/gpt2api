@@ -47,17 +47,17 @@ type UploadedFile struct {
 	FileName    string `json:"file_name"`
 	FileSize    int    `json:"file_size"`
 	MimeType    string `json:"mime_type"`
-	UseCase     string `json:"use_case"`          // 图片: multimodal, 文件: my_files
-	Width       int    `json:"width,omitempty"`   // 仅图片
-	Height      int    `json:"height,omitempty"`  // 仅图片
-	DownloadURL string `json:"download_url"`      // POST /uploaded 返回,通常不直接用
+	UseCase     string `json:"use_case"`         // 图片: multimodal, 文件: my_files
+	Width       int    `json:"width,omitempty"`  // 仅图片
+	Height      int    `json:"height,omitempty"` // 仅图片
+	DownloadURL string `json:"download_url"`     // POST /uploaded 返回,通常不直接用
 }
 
 // UploadFile 执行完整三步上传。调用方传入原始字节 + 建议的文件名即可。
 // 识别到 image/* 时会尝试 Decode 拿到宽高(Decode 失败不致命,按 0 处理)。
 //
 // 实践经验:步骤 1、3 走 chatgpt.com(uTLS / 代理 / auth 头),步骤 2 走 Azure,
-// 用同一条 http.Client 但是请求头手动裁剪;Azure 的 SAS URL 本身带鉴权。
+// 使用独立标准 HTTP/TLS client;Azure 的 SAS URL 本身带鉴权,不需要 Oai/Auth 头。
 func (c *Client) UploadFile(ctx context.Context, data []byte, fileName string) (*UploadedFile, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty file data")
@@ -135,56 +135,161 @@ func (c *Client) UploadFile(ctx context.Context, data []byte, fileName string) (
 	}
 
 	// ---- Step 2: PUT upload_url (Azure Blob) ----
-	req2, err := http.NewRequestWithContext(ctx, http.MethodPut, step1Resp.UploadURL, bytes.NewReader(data))
-	if err != nil {
+	if err := c.uploadFileBytes(ctx, step1Resp.UploadURL, mime, data); err != nil {
 		return nil, err
 	}
-	req2.Header.Set("Content-Type", mime)
-	req2.Header.Set("x-ms-blob-type", "BlockBlob")
-	req2.Header.Set("x-ms-version", "2020-04-08")
-	req2.Header.Set("Origin", c.opts.BaseURL)
-	req2.Header.Set("User-Agent", c.opts.UserAgent)
-	req2.Header.Set("Accept", "application/json, text/plain, */*")
-	req2.Header.Set("Accept-Language", "en-US,en;q=0.8")
-	req2.Header.Set("Referer", c.opts.BaseURL+"/")
-	res2, err := c.hc.Do(req2)
-	if err != nil {
-		return nil, fmt.Errorf("upload PUT: %w", err)
-	}
-	defer res2.Body.Close()
-	if res2.StatusCode >= 400 {
-		buf2, _ := io.ReadAll(res2.Body)
-		return nil, &UpstreamError{Status: res2.StatusCode, Message: "upload PUT failed", Body: string(buf2)}
-	}
-	_, _ = io.Copy(io.Discard, res2.Body)
 
-	// ---- Step 3: POST /backend-api/files/{file_id}/uploaded ----
-	req3, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.opts.BaseURL+"/backend-api/files/"+step1Resp.FileID+"/uploaded",
-		strings.NewReader("{}"))
+	downloadURL, err := c.registerUploadedFile(ctx, step1Resp.FileID)
 	if err != nil {
 		return nil, err
 	}
-	c.commonHeaders(req3)
-	req3.Header.Set("Content-Type", "application/json")
-	req3.Header.Set("Accept", "application/json")
-	res3, err := c.hc.Do(req3)
-	if err != nil {
-		return nil, fmt.Errorf("register uploaded: %w", err)
-	}
-	defer res3.Body.Close()
-	buf3, _ := io.ReadAll(res3.Body)
-	if res3.StatusCode >= 400 {
-		return nil, &UpstreamError{Status: res3.StatusCode, Message: "register uploaded failed", Body: string(buf3)}
-	}
-	var step3Resp struct {
-		Status      string `json:"status"`
-		DownloadURL string `json:"download_url"`
-	}
-	_ = json.Unmarshal(buf3, &step3Resp)
-	out.DownloadURL = step3Resp.DownloadURL
+	out.DownloadURL = downloadURL
 
 	return out, nil
+}
+
+func (c *Client) registerUploadedFile(ctx context.Context, fileID string) (string, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			c.opts.BaseURL+"/backend-api/files/"+fileID+"/uploaded",
+			strings.NewReader("{}"))
+		if err != nil {
+			return "", err
+		}
+		c.commonHeaders(req)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		res, err := c.hc.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("register uploaded: %w", err)
+			if attempt < maxAttempts && isRetryableUploadError(ctx, err) {
+				if err := sleepWithContext(ctx, uploadRetryDelay(attempt)); err != nil {
+					return "", lastErr
+				}
+				continue
+			}
+			return "", lastErr
+		}
+		buf, _ := io.ReadAll(res.Body)
+		_ = res.Body.Close()
+		if res.StatusCode >= 400 {
+			lastErr = &UpstreamError{Status: res.StatusCode, Message: "register uploaded failed", Body: string(buf)}
+			if attempt < maxAttempts && isRetryableUploadStatus(res.StatusCode) {
+				if err := sleepWithContext(ctx, uploadRetryDelay(attempt)); err != nil {
+					return "", lastErr
+				}
+				continue
+			}
+			return "", lastErr
+		}
+		var step3Resp struct {
+			Status      string `json:"status"`
+			DownloadURL string `json:"download_url"`
+		}
+		_ = json.Unmarshal(buf, &step3Resp)
+		return step3Resp.DownloadURL, nil
+	}
+	return "", lastErr
+}
+
+func (c *Client) uploadFileBytes(ctx context.Context, uploadURL, mime string, data []byte) error {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", mime)
+		req.Header.Set("x-ms-blob-type", "BlockBlob")
+		req.Header.Set("x-ms-version", "2020-04-08")
+		req.Header.Set("Origin", c.opts.BaseURL)
+		req.Header.Set("User-Agent", c.opts.UserAgent)
+		req.Header.Set("Accept", "application/json, text/plain, */*")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.8")
+		req.Header.Set("Referer", c.opts.BaseURL+"/")
+
+		res, err := c.uploadHTTPClient().Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("upload PUT: %w", err)
+			if attempt < maxAttempts && isRetryableUploadError(ctx, err) {
+				if err := sleepWithContext(ctx, uploadRetryDelay(attempt)); err != nil {
+					return lastErr
+				}
+				continue
+			}
+			return lastErr
+		}
+
+		if res.StatusCode >= 400 {
+			buf, _ := io.ReadAll(res.Body)
+			_ = res.Body.Close()
+			lastErr = &UpstreamError{Status: res.StatusCode, Message: "upload PUT failed", Body: string(buf)}
+			if attempt < maxAttempts && isRetryableUploadStatus(res.StatusCode) {
+				if err := sleepWithContext(ctx, uploadRetryDelay(attempt)); err != nil {
+					return lastErr
+				}
+				continue
+			}
+			return lastErr
+		}
+		_, _ = io.Copy(io.Discard, res.Body)
+		_ = res.Body.Close()
+		return nil
+	}
+	return lastErr
+}
+
+func (c *Client) uploadHTTPClient() *http.Client {
+	if c != nil && c.uploadHC != nil {
+		return c.uploadHC
+	}
+	return c.hc
+}
+
+func isRetryableUploadStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+}
+
+func isRetryableUploadError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "eof") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "tls handshake") ||
+		strings.Contains(msg, "unexpected end")
+}
+
+func uploadRetryDelay(attempt int) time.Duration {
+	if attempt <= 0 {
+		return 0
+	}
+	return time.Duration(attempt) * 500 * time.Millisecond
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // Attachment 是 messages[*].metadata.attachments[*] 的序列化对象。

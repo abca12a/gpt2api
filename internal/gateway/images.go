@@ -456,11 +456,8 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	runCtx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
 	defer cancel()
 
-	// 带参考图时,多轮重试没什么意义(反而会重复上传参考图),只留 1 次尝试。
+	// 参考图上传链路容易遇到 Azure SAS 端点瞬态 EOF/超时,保留 2 次尝试兜底。
 	maxAttempts := 2
-	if len(refs) > 0 {
-		maxAttempts = 1
-	}
 	if !waitForResult {
 		writeUsageOnReturn = false
 		h.runImageTaskAsync(imageAsyncJob{
@@ -1573,7 +1570,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	runCtx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Minute)
 	defer cancel()
 
-	runAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(1, true)
+	runAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(2, true)
 	runOptions := image.RunOptions{
 		TaskID:            taskID,
 		UserID:            ak.UserID,
@@ -1582,7 +1579,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		UpstreamModel:     m.UpstreamModelSlug,
 		Prompt:            maybeAppendClaritySuffix(prompt),
 		N:                 n,
-		MaxAttempts:       runAttempts, // 带参考图时只跑一次,避免重复上传
+		MaxAttempts:       runAttempts,
 		DispatchTimeout:   dispatchTimeout,
 		PerAttemptTimeout: perAttemptTimeout,
 		PollMaxWait:       pollMaxWait,

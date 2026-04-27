@@ -422,7 +422,8 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 					r.sched.MarkRateLimited(context.Background(), lease.Account.ID)
 					return false, ErrRateLimited, err
 				}
-				return false, ErrUpstream, fmt.Errorf("upload reference %d: %w", idx, err)
+				uploadErr := fmt.Errorf("upload reference %d: %w", idx, err)
+				return false, classifyReferenceUploadError(uploadErr), uploadErr
 			}
 			refs = append(refs, up)
 		}
@@ -757,6 +758,37 @@ func (r *Runner) classifyUpstream(err error) string {
 		strings.Contains(msg, "connection reset") ||
 		strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "broken pipe") {
+		return ErrNetworkTransient
+	}
+	return ErrUpstream
+}
+
+func classifyReferenceUploadError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ue *chatgpt.UpstreamError
+	if errors.As(err, &ue) {
+		if ue.IsRateLimited() {
+			return ErrRateLimited
+		}
+		if ue.IsUnauthorized() {
+			return ErrAuthRequired
+		}
+		if ue.Status == 408 || ue.Status >= 500 {
+			return ErrNetworkTransient
+		}
+		return ErrUpstream
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "eof") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "tls handshake") ||
+		strings.Contains(msg, "unexpected end") {
 		return ErrNetworkTransient
 	}
 	return ErrUpstream

@@ -731,9 +731,6 @@ func imageChannelFreeFallbackRunOptions(job imageChannelAsyncJob) imagepkg.RunOp
 		n = job.Request.N
 	}
 	maxAttempts := 2
-	if len(job.References) > 0 {
-		maxAttempts = 1
-	}
 	runAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(maxAttempts, len(job.References) > 0)
 	opt := imagepkg.RunOptions{
 		TaskID:            job.TaskID,

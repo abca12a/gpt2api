@@ -115,3 +115,17 @@ func TestImageFailureErrorPreservesAssistantAndLastError(t *testing.T) {
 		t.Fatalf("unexpected diagnostic error: %q", msg)
 	}
 }
+
+func TestReferenceUploadEOFIsNetworkTransient(t *testing.T) {
+	err := errors.New(`upload reference 1: upload PUT: Put "https://sdmntprwestus3.oaiusercontent.com/raw": utls handshake sdmntprwestus3.oaiusercontent.com: EOF`)
+	if got := classifyReferenceUploadError(err); got != ErrNetworkTransient {
+		t.Fatalf("classifyReferenceUploadError = %q, want %q", got, ErrNetworkTransient)
+	}
+}
+
+func TestReferenceUploadBadRequestStaysUpstream(t *testing.T) {
+	err := &chatgpt.UpstreamError{Status: 400, Message: "upload PUT failed", Body: "invalid image"}
+	if got := classifyReferenceUploadError(err); got != ErrUpstream {
+		t.Fatalf("classifyReferenceUploadError = %q, want %q", got, ErrUpstream)
+	}
+}

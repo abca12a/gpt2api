@@ -129,6 +129,28 @@ func TestAsyncImageTaskTimeoutUsesTunedNoReferenceWindow(t *testing.T) {
 	}
 }
 
+func TestAsyncImageRunTuningKeepsReferenceRetryBudget(t *testing.T) {
+	attempts, perAttempt, pollMaxWait, dispatchTimeout := asyncImageRunTuning(2, true)
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if perAttempt != 6*time.Minute {
+		t.Fatalf("perAttempt = %s, want 6m", perAttempt)
+	}
+	if pollMaxWait != 300*time.Second {
+		t.Fatalf("pollMaxWait = %s, want 300s", pollMaxWait)
+	}
+	if dispatchTimeout != 30*time.Second {
+		t.Fatalf("dispatchTimeout = %s, want 30s", dispatchTimeout)
+	}
+}
+
+func TestAsyncImageTaskTimeoutAllowsTwoReferenceAttempts(t *testing.T) {
+	if got := asyncImageTaskTimeout(2, true); got != 12*time.Minute+30*time.Second {
+		t.Fatalf("asyncImageTaskTimeout = %s, want 12m30s", got)
+	}
+}
+
 func TestNormalizeChatImageRequestPreservesImageParameters(t *testing.T) {
 	compression := 50
 	req := &ChatCompletionsRequest{

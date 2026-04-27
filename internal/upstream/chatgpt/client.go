@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -56,8 +57,9 @@ type Options struct {
 
 // Client 一个账号/代理/device 一次请求的上游客户端。可多次复用(建议 1 次请求 1 个)。
 type Client struct {
-	opts Options
-	hc   *http.Client
+	opts     Options
+	hc       *http.Client
+	uploadHC *http.Client
 }
 
 // New 构造客户端。
@@ -101,10 +103,42 @@ func New(opt Options) (*Client, error) {
 		Timeout:   opt.Timeout, // SSE 场景会关闭该 timeout(见 StreamConversation)
 		Jar:       jar,
 	}
+	uploadHC, err := newUploadHTTPClient(opt.ProxyURL, opt.Timeout)
+	if err != nil {
+		return nil, fmt.Errorf("init upload transport: %w", err)
+	}
 	if opt.Cookies != "" {
 		_ = loadCookies(jar, opt.BaseURL, opt.Cookies)
 	}
-	return &Client{opts: opt, hc: hc}, nil
+	return &Client{opts: opt, hc: hc, uploadHC: uploadHC}, nil
+}
+
+func newUploadHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
+	tr := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		MaxIdleConns:          16,
+		MaxIdleConnsPerHost:   4,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+	if strings.TrimSpace(proxyURL) != "" {
+		u, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid proxy url: %w", err)
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https":
+			tr.Proxy = http.ProxyURL(u)
+		case "socks5", "socks5h":
+			return nil, fmt.Errorf("socks5 proxy is not supported by upload transport yet")
+		default:
+			return nil, fmt.Errorf("unsupported proxy scheme %q", u.Scheme)
+		}
+	}
+	return &http.Client{Transport: tr, Timeout: timeout}, nil
 }
 
 // loadCookies 把 JSON cookies 加载到 jar。
