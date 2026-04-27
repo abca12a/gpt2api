@@ -64,9 +64,16 @@
 - 2026-04-26 修正：不能因为当前 Codex 所在环境没有本地 new-api 目录，就说“本机没有下游 new-api 服务/源码”；下游后端源码与运行服务在 `212.50.232.214:/root/new-api`，用户为 `root`。
 - 2026-04-27 修正：han 给出已记录的机器 IP 并问“能不能访问/进去”时，应先查 `AGENTS.md` 的“项目连接信息”，优先理解为 SSH 登录与项目目录可达性，不要先只做 ping/curl 网页可达性判断。
 - 2026-04-27 修正：不能把“不带配置的默认 `ssh root@212.50.232.214` 没有匹配 key”说成“默认 root 无可用公钥”这种会误导的结论；它只表示默认 SSH 身份没命中，应该继续查 SSH 配置、agent 或指定正确身份。
-- 正确做法：排查下游后端是否认可任务失败原因时，直接登录 `212.50.232.214` 查 `/root/new-api`、`new-api-postgres-local.tasks.fail_reason` 和 `service/task_polling.go` / `relay/channel/task/sora/adaptor.go`。
-- 正确做法：排查下游前端时进入 `43.161.219.135:/home/ubuntu/new-api-web`，用户为 `ubuntu`；不要再沿用“前端还不能登录/只能从后端交叉判断”的旧结论。
+- 2026-04-27 再修正：当前 Codex 环境中不要先试无 `IdentityFile` 的默认 SSH；已验证 `~/.ssh/cliproxyapi_212_50_232_214_ed25519` 同时可进入下游后端与下游前端。
+- 正确做法：排查下游后端时直接执行 `ssh -i ~/.ssh/cliproxyapi_212_50_232_214_ed25519 root@212.50.232.214 'cd /root/new-api && ...'`，重点查 `/root/new-api`、`new-api-postgres-local.tasks.fail_reason` 和 `service/task_polling.go` / `relay/channel/task/sora/adaptor.go`。
+- 正确做法：排查下游前端时直接执行 `ssh -i ~/.ssh/cliproxyapi_212_50_232_214_ed25519 ubuntu@43.161.219.135 'cd /home/ubuntu/new-api-web && ...'`；不要再沿用“前端还不能登录/只能从后端交叉判断”的旧结论。
 - 构建边界：下游后端中的老前端构建、下游前端的画布部分构建都需要去构建机 `43.152.240.30`，用户为 `ubuntu`。
+
+## 号池数据库访问
+
+- 2026-04-27 修正：不能把 `deploy/docker-compose.yml` 里的默认示例口令当成当前线上 MySQL 口令；线上 `.env` 可能已覆盖，直接用 `mysql -ugpt2api -pgpt2api` 会误报认证失败并浪费排查时间。
+- 正确做法：查当前号池数据库时，从运行中容器读取真实连接信息；优先在 `gpt2api-mysql` 容器内执行 `mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" -e 'SQL'`，或从 `gpt2api-server` 环境变量 `GPT2API_MYSQL_DSN` 取应用侧 DSN。
+- 边界：对外回复不要暴露真实数据库口令或 DSN；只说明“已从容器环境读取”。
 
 ## 下游用量日志零费用误判
 
