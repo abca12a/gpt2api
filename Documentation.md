@@ -13,6 +13,7 @@
 - 图片任务调度默认扫描最多 500 个候选账号，避免账号池规模较大时只看前 30 个候选导致误报 `no_available_account`；`poll_timeout` 属于可换号重试错误，异步任务总超时会随重试次数延长并封顶 15 分钟。
 - 无参考图的异步生图已改为更快换号：默认最多 4 次尝试、单次 2 分钟、轮询 90 秒；某账号 `poll_timeout` 后会临时降级暂停调度，避免坏账号连续拖慢任务。
 - 图片任务对前端展示时优先返回本站 `/p/img/<task_id>/<idx>` 签名代理 URL，不直接暴露上游临时 `result_urls`；缺少 `file_ids` 的极老任务才兜底旧直链。
+- 2026-04-27 排查下游 AI 创作任务 `task_gOIdvPLUbrHpy8EdzNcmPzDo4T0WrL1J`：号池任务 `img_871fdec3952f4aa88fb3988a` 实际成功，但外置 `codex-cli-proxy-image` 参考图请求先卡到 7 分钟超时，随后才回落内置 ChatGPT Web Runner，导致总耗时约 8 分钟。为避免同类卡顿，异步图片外置渠道现在无参考图最多等待 90 秒、有参考图最多等待 2 分钟，超时后尽快走内置 Runner 兜底；下游前端轮询窗口需覆盖到 15 分钟。
 - 2026-04-27 修复下游图生图保存回归：对外 `ImageGenerations / ImageTask / ImageTaskCompat / ImageEdits / chat->image` 返回的本站 `/p/img` 代理图，现在会按当前请求 `Host/X-Forwarded-Proto` 输出绝对 URL（生产为 `https://lmage2.dimilinks.com/p/img/...`）。原因是下游前端/保存器曾把相对 `/p/img` 补成 `https://dimilinks.com/p/img/...`，下载到 HTML 后触发“图片未能保存到本机”或上游 `unsupported MIME type text/html`；`internal/image` 包内部仍保留相对 path，只有网关对外响应层补 origin。
 - 2026-04-27 管理员后台“生成记录”列表已改为轻量加载：列表不再查询/返回 `image_tasks.result_urls` 大字段（生产表约 1877 行但该列累计约 2.5GB，单页曾需秒级加载），只返回任务元数据、结果数量和失败摘要；点击“查看结果 / 查看失败”时再调用 `GET /api/admin/image-tasks/:id/images` 懒加载图片 URL 或失败详情。后续不要把 base64/data URL 重新放回列表接口。
 - `file_ids` 的单图元素可携带 `account_id / conversation_id / file_ref`；图片代理优先使用单图元信息回源，兼容旧任务的任务级账号信息。

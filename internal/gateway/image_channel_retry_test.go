@@ -145,3 +145,12 @@ func TestImageChannelFreeFallbackRunOptionsRequireFreePlan(t *testing.T) {
 		t.Fatalf("references not preserved: %#v", got.References)
 	}
 }
+
+func TestImageChannelAsyncTimeoutCapsExternalChannelBeforeFallback(t *testing.T) {
+	if got := imageChannelAsyncTimeout(false); got != 90*time.Second {
+		t.Fatalf("no-reference async timeout = %s, want 90s", got)
+	}
+	if got := imageChannelAsyncTimeout(true); got != 2*time.Minute {
+		t.Fatalf("reference async timeout = %s, want 2m", got)
+	}
+}

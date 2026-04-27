@@ -296,7 +296,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		if h.DAO != nil {
 			_ = h.DAO.MarkRunning(context.Background(), job.TaskID, 0)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), imageChannelAsyncTimeout(len(job.References) > 0))
 		defer cancel()
 
 		var lastErr error
@@ -718,6 +718,13 @@ func imageChannelFreeFallbackRunOptions(job imageChannelAsyncJob) imagepkg.RunOp
 	}
 	applyFreeFallbackPlan(&opt, true)
 	return opt
+}
+
+func imageChannelAsyncTimeout(hasReferences bool) time.Duration {
+	if hasReferences {
+		return 2 * time.Minute
+	}
+	return 90 * time.Second
 }
 
 type imageChannelFailure struct {
