@@ -78,6 +78,8 @@
 - 2026-04-26 23:45 CST 起，考虑到下游后端可能不只读取 `error.message`，图片异步失败响应增加冗余兼容字段：`GET /v1/tasks/:id` 失败时除 `error{code,message,detail}` 外，还会在顶层返回 `error_code`、`error_message`、`error_msg`、`message`、`error_detail`、`failure_reason`、`failed_reason`、`fail_reason`；`/api/me/images/tasks` 与 `/api/admin/image-tasks` 也返回同一套 `error_code/error_message/error_detail`，前端个人图片历史和后台生成记录优先展示 `error_message`，复制时同时带上原始诊断。
 - 2026-04-25 参考图排查：线上最近只看到下游请求 `POST /v1/images/generations?async=true`，没有 `/v1/images/edits`；gpt2api 原本只在 generations JSON 中认非标准 `reference_images` 字段。已追加兼容 `images / image / image_url / image_urls / input_image / input_images`，支持字符串、字符串数组、`{"url":...}` 和对象数组，并在图片参数日志中记录 `reference_count` 以判断下游是否真的把参考图传到 gpt2api。
 - 2026-04-25 15:27 CST 线上用户测试参考图不生效时，`POST /v1/images/generations?async=true` 的图片参数日志显示 `reference_count=0`，且无参考图上传记录；gpt2api 解析兼容测试通过。当前证据说明该请求没有把参考图带到 gpt2api，问题优先在前端到 `new-api` 或 `new-api`/插件转发字段，而不是 gpt2api Runner 上传阶段。若后续日志 `reference_count>0` 仍不生效，再排查上游上传/账号池执行。
+- 2026-04-27 15:40-15:55 CST 排查号池出图耗时：账号池容量不是瓶颈，409 个未删账号中约 330 个满足调度条件，代理探测正常，Redis 账号锁基本为空，成功任务 `created_at -> started_at` 等待时间 p95 为 0 秒。近 24 小时成功任务平均约 124 秒、p50 约 106 秒、p90 约 204 秒、p95 约 246 秒；近 1 小时直连外置通道成功平均约 90 秒。主要波动来自外置 `codex-cli-proxy-image` 在 15:47-15:52 间连续 `context deadline exceeded`，任务会先等外置无参考图 90 秒/有参考图 2 分钟，再回落内置账号池，因此即使账号池有空闲也会被额外加 90-120 秒。该通道当时一度 `fail_count=3/unhealthy`，随后 15:52:49 又成功并恢复 healthy；后续若再次出现成批慢单，优先看通道连续超时和是否需要临时禁用/增加熔断跳过，而不是先补账号。
+- 同次排查确认：`/p/img/<task>` 首次代理取图/超分会额外消耗数秒到二十余秒（样本约 3-26 秒），这不计入 `image_tasks.finished_at`，但会影响下游“看到图/保存图”的体感总耗时。区分问题时应把“任务生成耗时”和“代理下载/超分/保存耗时”分开看。
 
 ## 已清理的历史流水
 
