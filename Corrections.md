@@ -1,82 +1,47 @@
 # Corrections
 
-## 出图快速换号
+## 使用边界
 
-- 2026-04-25 修正：不能因为 SSE 已结束且缺少 `image_gen_task_id`、缺少图片引用就立即判定失败；生产任务 `img_5cf852f2b9724e1daeb9dabd` 因此 22 秒内三次换号后失败。
-- 正确做法：这种情况只能说明上游可能未真正受理生图任务，应先做短 Poll（当前 20 秒）给 conversation mapping 一个补出 tool/image 消息的机会；短 Poll 仍无图时再暂停该账号并换号。
-- 边界：已有 `image_gen_task_id` 或已有任意 file/sediment 引用时，继续使用常规 Poll 窗口，不走短 Poll。
-## SSE 读取超时
+- 本文件只记录纠正过的理解、踩坑记录和“不要再犯”的判断；当前实现状态看 `Documentation.md`，机器拓扑看 `AGENTS.md`。
+- 不把一次性任务 ID、临时排查命令、即时统计数写成长期事实；需要回溯时查 Git、线上日志或数据库。
 
-- 2026-04-25 修正：不能只给 `ImageConvOpts.SSETimeout` 赋值就认为图片 SSE 有读超时；此前 `parseSSE` 忽略 timeout 参数，连接静默时任务仍可能长期停留 `running`。
-- 正确做法：`parseSSE` 必须按单次事件读取设置 timeout，超时发出 `sse read timeout` 错误并关闭事件流，让 Runner 进入换号或失败流程。
-- 边界：这个 timeout 是“事件间隔静默超时”，不是整次图片任务总耗时；总耗时仍由 `PerAttemptTimeout / PollMaxWait / MaxAttempts` 控制。
+## 图片任务执行
 
-## 参考图参数错误残留任务
+- 出图快速换号：不能因为 SSE 已结束且缺少 `image_gen_task_id`、缺少图片引用就立即判定失败；正确做法是先短 Poll conversation mapping，仍无图再暂停账号并换号。
+- SSE 读取超时：不能只给 `ImageConvOpts.SSETimeout` 赋值就认为生效；`parseSSE` 必须按事件读取设置 timeout，静默超时后关闭事件流并进入换号或失败流程。
+- 参考图参数错误：`/v1/images/generations` 不能在 JSON 参考图解析前创建 `image_tasks`；解析失败要退款并直接 400，不留下无人执行的任务。
+- 多图结果：不能认为上游返回多少张就落库多少张；最终结果必须按请求 `n` 截断，且 `N>1` 可能来自多个账号和 conversation。
 
-- 2026-04-25 修正：`/v1/images/generations` 不能在 JSON 参考图解析前创建 `image_tasks`；5 张唯一参考图会返回 400，但旧代码已先落 `dispatched`，导致无人执行的残留任务。
-- 正确做法：鉴权、模型、限流、计费预扣后，先 `decodeReferenceInputs`，只有解析成功才创建任务；解析失败要退款并直接 400，不写任务表。
-- 边界：`referenceInputs()` 会去重，测试“超过 4 张”时必须使用 5 个不同输入，5 个完全相同的 data URL 会被折叠成 1 张。
+## gpt-image-2 渠道
 
-## Alpine 容器二进制
+- 生产依赖：不能把当前 `gpt-image-2` 简化为只走 `gpt2api -> chatgpt.com` Web Runner；公网入口是 `https://lmage2.dimilinks.com/v1`，内部优先依赖 `codex-cli-proxy-image -> http://cli-proxy-api:8317`。
+- 瞬态兜底：不能只把 HTTP 502 当作可兜底错误；`5xx`、timeout、EOF、connection reset、broken pipe 等都应按瞬态处理，同渠道重试后再回落内置 Web Runner。
+- 兜底边界：内容安全、`400 invalid_value`、`image_generation_user_error`、最小像素预算等不是渠道瞬态错误，不能通过换渠道或切 Free 账号绕过。
+- Free 账号：不能把本仓库 `oai_accounts.plan_type=free` 自动接入 Codex image channel；Free 只适合内置 Web Runner 图片链路，Codex auth 轮换后必须检查 plan 后缀。
 
-- 2026-04-25 修正：部署到 `gpt2api/server` Alpine 镜像前，不能用默认 CGO 动态链接二进制覆盖 `deploy/bin/gpt2api`；容器会报 `/app/gpt2api: cannot execute: required file not found`。
-- 正确做法：使用 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o deploy/bin/gpt2api ./cmd/server` 生成静态二进制，再 `docker compose -f deploy/docker-compose.yml up -d --build server`。
+## 图片参数与尺寸
 
-## gpt-image-2 生产依赖
+- Codex 1K：不能再把非正方形 `1k` 比例图按长边 1024 映射，例如 `16:9 -> 1024x576`；非正方形 1K 要保证约 100 万像素且长边不低于 1536。
+- 4K 预期：ChatGPT Web `picture_v2` 链路没有稳定可控的原生 2K/4K 字段；原生大图主要依赖 Codex image channel，Web Runner 只能作为默认档位/兜底。
+- 参考图字段：线上 generations JSON 可能不走 `/v1/images/edits`，不能只认 `reference_images`；应兼容 `images / image / image_url / image_urls / input_image / input_images` 并看 `reference_count`。
+- 参考图上传：Azure SAS PUT 的 EOF、timeout、5xx、408、429 属于网络瞬态，不是图片参数错误；内置 Runner 要短重试，外置容器内部失败只能通过等待窗口和 fallback 降低影响。
 
-- 2026-04-26 修正：不能再把当前 `gpt-image-2` 生产路径简单说成“只走 `gpt2api -> chatgpt.com` Web Runner”，也不能因为公网不让下游直连 `cliproxyapi` 就忽略本机 `cli-proxy-api` 依赖。
-- 正确做法：公网入口始终是 `https://lmage2.dimilinks.com/v1`；但 gpt2api 内部优先走数据库里的 `codex-cli-proxy-image` 外置 image channel，容器内 base URL 是 `http://cli-proxy-api:8317`，映射必须是 `gpt-image-2 -> gpt-image-2 / modality=image`。
-- 边界：只有没有启用 image route 时才回退内置 ChatGPT Web Runner；一旦命中 route，`502 / stream disconnected / EOF / timeout` 属于渠道链路问题，先查 `cli-proxy-api` 容器、Docker 网络和渠道健康状态。
+## 失败归因与展示
 
-## 外置图片渠道瞬态兜底
+- 图片失败诊断：不能只看结构化错误；ChatGPT Web Runner 可能在 assistant 文本里解释拒绝原因但不产出图片引用，必须提取 SSE 和 conversation mapping 的最新 assistant 文本。
+- 内容安全归因：只有出现安全、政策、未成年、内容审核等明确文本或上游信号时才归为 `content_moderation`；普通 `poll_timeout / poll_error / no image ref produced` 不能凭空推断违规。
+- 管理员生成记录：不能只移除缩略图外层 `<a target="_blank">` 就认为不会跳转；`el-image` 内置预览仍可能触发 `about:blank#blocked`，应使用普通 `img` 和受控弹窗。
+- 后台性能：不要把 `image_tasks.result_urls` 大字段重新放回生成记录列表；列表只放元数据和摘要，图片/失败详情懒加载。
 
-- 2026-04-26 修正：不能只把 HTTP 502 当成外置图片渠道可兜底错误；生产 24 小时失败样本还包含 HTTP 500 `INTERNAL_ERROR`、`context deadline exceeded`、EOF 等同类瞬态断流。
-- 正确做法：外置 Codex/OpenAI image channel 同渠道重试后，如果最后错误是 `502/5xx`、超时、EOF、connection reset/broken pipe 等瞬态错误，应转入内置 ChatGPT Web Runner，并强制 `plan_type=free`；异步兜底必须新建 fallback ctx，不能复用已被外置渠道耗尽的 7 分钟 ctx。
-- 边界：`content_policy_violation / safety system` 仍归为 `content_moderation`，不兜底；`400 invalid_value / image_generation_user_error / minimum pixel budget` 属于用户请求参数错误，返回 `invalid_request_error` 并保留详情，不标记渠道 unhealthy，也不切 Free 账号。
+## 下游 new-api
 
-## 图片失败对话诊断
+- 分组依赖：不能只看 token 的 `model_limits=gpt-image-2` 就认为授权成功；如果 token `group` 落到 `default`，`new-api` 会在请求进入 gpt2api 前报无可用渠道。
+- 用量日志：不能看到 `quota=0 / use_time=0 / 操作 textGenerate` 就判断图片任务成功；这只是异步提交记录，最终要看 `tasks.status/fail_reason`、错误日志和号池 `image_tasks.error`。
+- 前端提交：浏览器登录态前端应走下游同源 `/pg/images/generations?async=true`；API Key/业务后端走下游 `/v1/images/generations?async=true`；不要让浏览器直连号池或 CLIProxyAPI。
 
-- 2026-04-26 修正：不能只看图片接口结构化错误；ChatGPT Web Runner 兜底时，上游可能在 assistant 文本里解释拒绝原因但不产出图片 tool/file 引用，旧后台只会看到 `poll_error / poll_timeout / upstream_error`。
-- 正确做法：图片 SSE 和 conversation mapping 都要提取最新 assistant 文本，失败时写入 `image_tasks.error` detail；后台必须直接展示并支持复制完整错误。
-- 边界：只有出现安全/政策/未成年/内容审核等明确文本信号时才归为 `content_moderation`；普通 `poll_timeout / poll_error` 仍保留为上游未产出图片引用，不能凭空推断违规。
+## 环境与运维
 
-## new-api 分组依赖
-
-- 2026-04-26 修正：不能只看 token 的 `model_limits=gpt-image-2` 就认为下游已授权成功；用户 `1540/HMJ` 曾因 token `group` 为空落到 `default` 分组，`new-api` 直接报 `No available channel for model gpt-image-2 under group default`。
-- 正确做法：排查下游 503 时先确认 `new-api` token 的 `group` 能命中 `gpt-image-2` 渠道；如果错误里出现 `under group default`，请求通常还没进入 gpt2api。
-- 边界：gpt2api 侧日志、`image_tasks` 和渠道错误只能解释已经进入 gpt2api 的请求；没进 gpt2api 的分组错误要在 `new-api` 数据库或后台修。
-
-## Codex 1K 尺寸预算
-
-- 2026-04-26 修正：不能再把非正方形 `1k` 比例图按长边 1024 直接映射，例如 `16:9 -> 1024x576`；Codex 上游会报低于最小像素预算。
-- 正确做法：非正方形 1K 要保证约 100 万像素且长边不低于 1536，当前映射示例为 `16:9 -> 1536x864`、`9:16 -> 864x1536`、`2:3 -> 1024x1536`、`21:9 -> 1568x672`。
-- 边界：正方形 `1:1/auto + 1k` 仍是 `1024x1024`；2K/4K 继续按 16 对齐和 4K 像素预算映射。
-
-## 2026-04-26 管理员生成记录图片跳转
-
-- 错误理解：只移除缩略图外层 `<a target="_blank">` 就能阻止跳转。
-- 事实：`el-image` 的内置预览仍可能围绕 base64/data URL 触发浏览器导航/阻拦，表现为 `about:blank#blocked`。
-- 纠正：后台生成记录不要用 `el-image` 内置预览承载结果图；改用普通 `img` 和受控 `el-dialog` 大图弹窗，点击事件必须 `stop/prevent`，且不暴露任何可导航链接。
-
-## 下游机器拓扑
-
-- 2026-04-27 修正：当前 Codex 是“号池”，所在机器与项目目录是 `43.165.170.99:/home/ubuntu/gpt2api`；`212.50.232.214` 是下游后端 `new-api`，不是号池。
-- 2026-04-26 修正：不能因为当前 Codex 所在环境没有本地 new-api 目录，就说“本机没有下游 new-api 服务/源码”；下游后端源码与运行服务在 `212.50.232.214:/root/new-api`，用户为 `root`。
-- 2026-04-27 修正：han 给出已记录的机器 IP 并问“能不能访问/进去”时，应先查 `AGENTS.md` 的“项目连接信息”，优先理解为 SSH 登录与项目目录可达性，不要先只做 ping/curl 网页可达性判断。
-- 2026-04-27 修正：不能把“不带配置的默认 `ssh root@212.50.232.214` 没有匹配 key”说成“默认 root 无可用公钥”这种会误导的结论；它只表示默认 SSH 身份没命中，应该继续查 SSH 配置、agent 或指定正确身份。
-- 2026-04-27 再修正：当前 Codex 环境中不要先试无 `IdentityFile` 的默认 SSH；已验证 `~/.ssh/cliproxyapi_212_50_232_214_ed25519` 同时可进入下游后端与下游前端。
-- 正确做法：排查下游后端时直接执行 `ssh -i ~/.ssh/cliproxyapi_212_50_232_214_ed25519 root@212.50.232.214 'cd /root/new-api && ...'`，重点查 `/root/new-api`、`new-api-postgres-local.tasks.fail_reason` 和 `service/task_polling.go` / `relay/channel/task/sora/adaptor.go`。
-- 正确做法：排查下游前端时直接执行 `ssh -i ~/.ssh/cliproxyapi_212_50_232_214_ed25519 ubuntu@43.161.219.135 'cd /home/ubuntu/new-api-web && ...'`；不要再沿用“前端还不能登录/只能从后端交叉判断”的旧结论。
-- 构建边界：下游后端中的老前端构建、下游前端的画布部分构建都需要去构建机 `43.152.240.30`，用户为 `ubuntu`。
-
-## 号池数据库访问
-
-- 2026-04-27 修正：不能把 `deploy/docker-compose.yml` 里的默认示例口令当成当前线上 MySQL 口令；线上 `.env` 可能已覆盖，直接用 `mysql -ugpt2api -pgpt2api` 会误报认证失败并浪费排查时间。
-- 正确做法：查当前号池数据库时，从运行中容器读取真实连接信息；优先在 `gpt2api-mysql` 容器内执行 `mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" -e 'SQL'`，或从 `gpt2api-server` 环境变量 `GPT2API_MYSQL_DSN` 取应用侧 DSN。
-- 边界：对外回复不要暴露真实数据库口令或 DSN；只说明“已从容器环境读取”。
-
-## 下游用量日志零费用误判
-
-- 2026-04-26 修正：不能看到 `new-api` 用量日志 `quota=0/use_time=0/操作 textGenerate` 就判断图片任务正常；这只是异步提交记录。
-- 正确做法：排查图片不出图时必须查 `new-api.tasks.status/fail_reason`、日志 `type=5` 错误记录，以及 gpt2api `image_tasks.error`；如果 `quota=0` 的失败没有退款日志，仍需要有错误日志向用户说明原因。
-- 边界：用户侧是否看到原因取决于下游后台/前端是否展示 `LogTypeError` 或任务失败原因；不要只看消费日志里的提交行。
+- Alpine 二进制：部署到 `gpt2api/server` Alpine 镜像前，不能用默认 CGO 动态链接二进制覆盖 `deploy/bin/gpt2api`；应使用 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o deploy/bin/gpt2api ./cmd/server`。
+- 机器拓扑：当前 Codex 是号池，不是下游后端；涉及 IP、用户、项目目录、构建机职责时先看 `AGENTS.md`，不要沿用旧对话里的过期结论。
+- SSH 判断：han 给出已记录 IP 并问能否访问/进去时，优先理解为 SSH 登录和项目目录可达性，不要只做 ping/curl；默认 SSH 身份失败不等于远端无可用公钥。
+- 号池数据库：不能把 `deploy/docker-compose.yml` 示例口令当线上 MySQL 口令；查库优先从运行中容器环境读取真实连接信息，对外回复不暴露真实口令或 DSN。
