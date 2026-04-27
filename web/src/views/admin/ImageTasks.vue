@@ -19,6 +19,8 @@ interface TaskRow {
   upscale: string
   status: string
   result_urls_parsed: string[]
+  result_count: number
+  has_result: boolean
   error: string
   error_code?: string
   error_message?: string
@@ -28,6 +30,7 @@ interface TaskRow {
   created_at: string
   started_at?: string | null
   finished_at?: string | null
+  detail_loaded?: boolean
 }
 
 const loading = ref(false)
@@ -74,9 +77,28 @@ const previewRow = ref<TaskRow | null>(null)
 const largePreviewDlg = ref(false)
 const largePreviewUrl = ref('')
 const largePreviewIndex = ref(0)
-function openPreview(row: TaskRow) {
+const previewLoading = ref(false)
+async function ensureTaskDetails(row: TaskRow) {
+  if (row.detail_loaded) return
+  previewLoading.value = true
+  try {
+    const data = await http.get<any, any>(`/api/admin/image-tasks/${encodeURIComponent(row.task_id)}/images`)
+    row.result_urls_parsed = data.result_urls_parsed || []
+    row.result_count = data.result_count ?? row.result_urls_parsed.length
+    row.has_result = row.result_urls_parsed.length > 0 || row.has_result || row.status === 'success'
+    row.error = data.error ?? row.error
+    row.error_code = data.error_code ?? row.error_code
+    row.error_message = data.error_message ?? row.error_message
+    row.error_detail = data.error_detail ?? row.error_detail
+    row.detail_loaded = true
+  } finally {
+    previewLoading.value = false
+  }
+}
+async function openPreview(row: TaskRow) {
   previewRow.value = row
   previewDlg.value = true
+  await ensureTaskDetails(row)
 }
 function openLargePreview(row: TaskRow | null, idx: number) {
   const url = row?.result_urls_parsed?.[idx]
@@ -138,12 +160,12 @@ function taskErrorCode(row: TaskRow) {
 
 function errorReason(row: TaskRow) {
   const code = taskErrorCode(row)
-  return errorCodeLabel[code] || code || '-'
+  return errorCodeLabel[code] || code || (row.status === 'failed' ? '失败详情' : '-')
 }
 
 function errorDetail(row: TaskRow) {
   const parsed = splitTaskError(row.error)
-  return row.error_message || row.error_detail || parsed.detail || row.error || ''
+  return row.error_message || row.error_detail || parsed.detail || row.error || (row.status === 'failed' ? '点击查看加载失败详情' : '')
 }
 
 function errorType(row: TaskRow) {
@@ -155,6 +177,19 @@ function errorCopyText(row: TaskRow) {
   return [row.error_message, row.error_detail || row.error]
     .filter((v, idx, arr) => v && arr.indexOf(v) === idx)
     .join('\n')
+}
+
+function resultCount(row: TaskRow) {
+  return row.result_count || row.result_urls_parsed?.length || (row.status === 'success' ? row.n : 0)
+}
+
+function resultActionText(row: TaskRow) {
+  if (row.status === 'failed' || row.error || row.error_message) return '查看失败'
+  const count = resultCount(row)
+  if (row.status === 'success' || row.has_result || count > 0) return `查看结果${count ? `(${count})` : ''}`
+  if (row.status === 'running') return '查看进度'
+  if (row.status === 'queued' || row.status === 'dispatched') return '查看状态'
+  return '查看详情'
 }
 
 async function copyError(row: TaskRow) {
@@ -235,20 +270,18 @@ onMounted(fetchList)
         </el-table-column>
         <el-table-column label="结果" width="80">
           <template #default="{ row }">
-            <el-button
-              v-if="row.result_urls_parsed?.length"
-              type="primary" link size="small"
-              @click="openPreview(row)"
-            >预览({{ row.result_urls_parsed.length }})</el-button>
-            <span v-else-if="row.error || row.error_message" style="font-size:11px;color:var(--el-color-danger)" :title="errorDetail(row)">失败</span>
-            <span v-else style="color:var(--el-text-color-secondary)">-</span>
+            <el-button type="primary" link size="small" @click="openPreview(row)">
+              {{ resultActionText(row) }}
+            </el-button>
           </template>
         </el-table-column>
         <el-table-column label="失败原因" min-width="260" show-overflow-tooltip>
           <template #default="{ row }">
-            <div v-if="row.error || row.error_message" class="error-reason">
+            <div v-if="row.error || row.error_message || row.status === 'failed'" class="error-reason">
               <el-tag :type="errorType(row)" size="small">{{ errorReason(row) }}</el-tag>
-              <span class="error-detail" :title="row.error_detail || row.error">{{ errorDetail(row) }}</span>
+              <button type="button" class="error-detail-btn" :title="row.error_detail || row.error" @click="openPreview(row)">
+                {{ errorDetail(row) }}
+              </button>
               <el-button type="primary" link size="small" @click="copyError(row)">复制</el-button>
             </div>
             <span v-else style="color:var(--el-text-color-secondary)">-</span>
@@ -281,12 +314,12 @@ onMounted(fetchList)
     </div>
 
     <!-- 图片预览弹窗 -->
-    <el-dialog v-model="previewDlg" title="生成结果预览" width="680px">
-      <div v-if="previewRow">
+    <el-dialog v-model="previewDlg" title="生成任务详情" width="680px">
+      <div v-if="previewRow" v-loading="previewLoading">
         <div style="font-size:13px;color:var(--el-text-color-secondary);margin-bottom:10px;word-break:break-all">
           {{ previewRow.prompt }}
         </div>
-        <div style="display:flex;flex-wrap:wrap;gap:8px">
+        <div v-if="previewRow.result_urls_parsed?.length" style="display:flex;flex-wrap:wrap;gap:8px">
           <button
             v-for="(url, idx) in previewRow.result_urls_parsed"
             :key="idx"
@@ -303,8 +336,18 @@ onMounted(fetchList)
             />
           </button>
         </div>
-        <div v-if="previewRow.error" style="margin-top:12px;color:var(--el-color-danger);font-size:12px;word-break:break-all">
-          错误:{{ previewRow.error }}
+        <div v-else-if="!previewLoading" class="empty-preview">
+          {{ previewRow.status === 'failed' ? '本次任务没有生成图片' : '暂无可预览图片，任务可能还未完成' }}
+        </div>
+        <div v-if="previewRow.status === 'failed' || previewRow.error || previewRow.error_message" class="task-error-panel">
+          <div class="task-error-title">
+            <el-tag :type="errorType(previewRow)" size="small">{{ errorReason(previewRow) }}</el-tag>
+            <el-button type="primary" link size="small" @click="copyError(previewRow)">复制失败原因</el-button>
+          </div>
+          <div class="task-error-message">{{ errorDetail(previewRow) || '暂无失败详情' }}</div>
+          <div v-if="previewRow.error_detail && previewRow.error_detail !== previewRow.error_message" class="task-error-raw">
+            原始详情:{{ previewRow.error_detail }}
+          </div>
         </div>
       </div>
     </el-dialog>
@@ -356,13 +399,26 @@ onMounted(fetchList)
   min-width: 0;
 }
 
-.error-detail {
+.error-detail,
+.error-detail-btn {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--el-text-color-regular);
+}
+
+.error-detail-btn {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.error-detail-btn:hover {
+  color: var(--el-color-primary);
 }
 
 .image-task-thumb {
@@ -388,5 +444,42 @@ onMounted(fetchList)
   max-height: 72vh;
   object-fit: contain;
   user-select: none;
+}
+
+.empty-preview {
+  padding: 32px 0;
+  text-align: center;
+  color: var(--el-text-color-secondary);
+}
+
+.task-error-panel {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  background: var(--el-fill-color-lighter);
+}
+
+.task-error-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.task-error-message,
+.task-error-raw {
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.task-error-message {
+  color: var(--el-color-danger);
+}
+
+.task-error-raw {
+  margin-top: 6px;
+  color: var(--el-text-color-secondary);
 }
 </style>

@@ -28,3 +28,14 @@ func TestBuildAdminTaskWhereIncludesDownstreamKeywordFields(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminTaskListSQLSkipsLargeResultURLs(t *testing.T) {
+	sql := adminTaskListSQL("1=1")
+
+	if strings.Contains(sql, "t.result_urls") {
+		t.Fatalf("admin list sql selects large result_urls column: %s", sql)
+	}
+	if !strings.Contains(sql, "t.file_ids") {
+		t.Fatalf("admin list sql should keep file_ids for lightweight result count: %s", sql)
+	}
+}

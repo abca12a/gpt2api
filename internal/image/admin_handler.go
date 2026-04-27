@@ -1,6 +1,7 @@
 package image
 
 import (
+	"errors"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -50,15 +51,26 @@ func (h *AdminHandler) List(c *gin.Context) {
 	type rowOut struct {
 		AdminTaskRow
 		ResultURLsParsed []string `json:"result_urls_parsed"`
+		ResultCount      int      `json:"result_count"`
+		HasResult        bool     `json:"has_result"`
 		ErrorCode        string   `json:"error_code,omitempty"`
 		ErrorMessage     string   `json:"error_message,omitempty"`
 		ErrorDetail      string   `json:"error_detail,omitempty"`
 	}
 	out := make([]rowOut, 0, len(rows))
 	for _, r := range rows {
+		fileIDs := r.DecodeFileIDs()
+		resultCount := len(fileIDs)
+		if resultCount == 0 && r.Status == StatusSuccess {
+			resultCount = r.N
+			if resultCount <= 0 {
+				resultCount = 1
+			}
+		}
 		row := rowOut{
-			AdminTaskRow:     r,
-			ResultURLsParsed: BuildTaskImageURLs(&r.Task, ImageProxyTTL),
+			AdminTaskRow: r,
+			ResultCount:  resultCount,
+			HasResult:    len(fileIDs) > 0 || r.Status == StatusSuccess,
 		}
 		if r.Status == StatusFailed || r.Error != "" {
 			row.ErrorCode, row.ErrorDetail, row.ErrorMessage = TaskErrorFields(r.Error)
@@ -72,4 +84,39 @@ func (h *AdminHandler) List(c *gin.Context) {
 		"page":      page,
 		"page_size": size,
 	})
+}
+
+// Images GET /api/admin/image-tasks/:id/images
+func (h *AdminHandler) Images(c *gin.Context) {
+	taskID := c.Param("id")
+	if taskID == "" {
+		resp.BadRequest(c, "task id required")
+		return
+	}
+
+	t, err := h.dao.Get(c.Request.Context(), taskID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			resp.NotFound(c, "task not found")
+			return
+		}
+		resp.Internal(c, err.Error())
+		return
+	}
+
+	urls := BuildTaskImageURLs(t, ImageProxyTTL)
+	out := gin.H{
+		"task_id":            t.TaskID,
+		"status":             t.Status,
+		"error":              t.Error,
+		"result_urls_parsed": urls,
+		"result_count":       len(urls),
+	}
+	if t.Status == StatusFailed || t.Error != "" {
+		code, detail, message := TaskErrorFields(t.Error)
+		out["error_code"] = code
+		out["error_detail"] = detail
+		out["error_message"] = message
+	}
+	resp.OK(c, out)
 }

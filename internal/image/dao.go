@@ -182,23 +182,27 @@ func (d *DAO) ListAdmin(ctx context.Context, f AdminTaskFilter, limit, offset in
 		return nil, 0, err
 	}
 
-	listSQL := `
-SELECT t.id, t.task_id, t.user_id, t.key_id, t.model_id, t.account_id,
-       t.downstream_user_id, t.downstream_username, t.downstream_user_email, t.downstream_user_label,
-       t.prompt, t.n, t.size, t.upscale, t.status,
-       t.conversation_id, t.file_ids, t.result_urls, t.error,
-       t.estimated_credit, t.credit_cost,
-       t.created_at, t.started_at, t.finished_at,
-       COALESCE(u.email, '') AS user_email
-  FROM image_tasks t
-  LEFT JOIN users u ON u.id = t.user_id
- WHERE ` + where + `
- ORDER BY t.id DESC
- LIMIT ? OFFSET ?`
+	listSQL := adminTaskListSQL(where)
 	args = append(args, limit, offset)
 	var out []AdminTaskRow
 	err := d.db.SelectContext(ctx, &out, listSQL, args...)
 	return out, total, err
+}
+
+func adminTaskListSQL(where string) string {
+	return `
+	SELECT t.id, t.task_id, t.user_id, t.key_id, t.model_id, t.account_id,
+	       t.downstream_user_id, t.downstream_username, t.downstream_user_email, t.downstream_user_label,
+	       t.prompt, t.n, t.size, t.upscale, t.status,
+	       t.conversation_id, t.file_ids, t.error,
+	       t.estimated_credit, t.credit_cost,
+	       t.created_at, t.started_at, t.finished_at,
+	       COALESCE(u.email, '') AS user_email
+	  FROM image_tasks t
+	  LEFT JOIN users u ON u.id = t.user_id
+	 WHERE ` + where + `
+	 ORDER BY t.id DESC
+	 LIMIT ? OFFSET ?`
 }
 
 func buildAdminTaskWhere(f AdminTaskFilter) (string, []interface{}) {
