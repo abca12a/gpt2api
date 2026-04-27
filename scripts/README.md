@@ -65,6 +65,19 @@ node scripts/smoke.mjs \
 - 对全新库:能完整跑通
 - 对已经跑过的库:要么复用相同 admin 账号(`--admin-email` 指向那个),要么清空 users 表再跑
 
+## check-codex-auth-plans.sh · Codex 账号计划校验
+
+检查 `cli-proxy-api` 的 Codex auth 目录，确保图片 Codex 通道只混入 `plus/team` 账号，不允许 `free` 或未知后缀账号文件进入生产通道。
+
+```bash
+scripts/check-codex-auth-plans.sh
+```
+
+- 默认检查 `/home/ubuntu/CLIProxyAPI/auths`
+- 可用 `CODEX_AUTH_DIR=/path/to/auths` 覆盖目录
+- 只输出文件名和汇总计数，不读取或打印 token 内容
+- 退出码 `0` 表示全部合规；`1` 表示存在 `free/未知` 账号；`2` 表示目录不存在
+
 ### 与 CI 配合
 
 GitHub Actions 示例骨架:
@@ -79,4 +92,3 @@ GitHub Actions 示例骨架:
 - name: smoke
   run: node scripts/smoke.mjs --base http://localhost:8080
 ```
-

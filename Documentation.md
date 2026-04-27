@@ -81,6 +81,7 @@
 - 2026-04-27 15:40-15:55 CST 排查号池出图耗时：账号池容量不是瓶颈，409 个未删账号中约 330 个满足调度条件，代理探测正常，Redis 账号锁基本为空，成功任务 `created_at -> started_at` 等待时间 p95 为 0 秒。近 24 小时成功任务平均约 124 秒、p50 约 106 秒、p90 约 204 秒、p95 约 246 秒；近 1 小时直连外置通道成功平均约 90 秒。主要波动来自外置 `codex-cli-proxy-image` 在 15:47-15:52 间连续 `context deadline exceeded`，任务会先等外置无参考图 90 秒/有参考图 2 分钟，再回落内置账号池，因此即使账号池有空闲也会被额外加 90-120 秒。该通道当时一度 `fail_count=3/unhealthy`，随后 15:52:49 又成功并恢复 healthy；后续若再次出现成批慢单，优先看通道连续超时和是否需要临时禁用/增加熔断跳过，而不是先补账号。
 - 同次排查确认：`/p/img/<task>` 首次代理取图/超分会额外消耗数秒到二十余秒（样本约 3-26 秒），这不计入 `image_tasks.finished_at`，但会影响下游“看到图/保存图”的体感总耗时。区分问题时应把“任务生成耗时”和“代理下载/超分/保存耗时”分开看。
 - 2026-04-27 16:50 CST 隔离测试 free 账号走 Codex 图片通道：用 gpt2api 中 `plan_type=free` 的账号 297、278 分别生成临时 `cli-proxy-api` auth-dir，并在独立容器端口 `127.0.0.1:18317` 复用生产 `gpt-image-2` Codex payload 测试 `/v1/images/generations`；两次均在约 2 秒返回 400 `invalid_request_error`，上游消息为 `Tool choice 'image_generation' not found in 'tools' parameter.`。同日对比：生产 Plus/Team Codex 通道可成功出图，内置 Web Runner 强制 free 账号也可出图。当前结论是 free 账号可以走 Web Runner 图片链路，但不具备/未暴露 Codex `image_generation` 工具，不能作为 Codex image channel 主力。测试容器和临时 token 文件已清理。
+- 2026-04-27 17:05 CST 复核生产 Codex auth 目录 `/home/ubuntu/CLIProxyAPI/auths`：当前无 free 账号文件，合计 14 个 Codex auth 文件，其中 11 个 `plus`、3 个 `team`，无未知后缀；gpt2api 的 `gpt-image-2` 只映射到外置 `codex-cli-proxy-image -> http://cli-proxy-api:8317`，不会把本仓库 `oai_accounts.plan_type=free` 自动接入 Codex 通道。已新增 `scripts/check-codex-auth-plans.sh`，后续导入/轮换 Codex 账号后必须运行，发现 `*-free.json` 或未知后缀即失败，避免 free 混入 Codex 图片通道。
 
 ## 已清理的历史流水
 
