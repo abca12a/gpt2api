@@ -19,6 +19,7 @@ import (
 	"github.com/432539/gpt2api/internal/backup"
 	"github.com/432539/gpt2api/internal/billing"
 	"github.com/432539/gpt2api/internal/channel"
+	"github.com/432539/gpt2api/internal/codexusage"
 	"github.com/432539/gpt2api/internal/config"
 	"github.com/432539/gpt2api/internal/db"
 	"github.com/432539/gpt2api/internal/gateway"
@@ -278,6 +279,10 @@ func main() {
 
 	accountH.SetRefresher(accRefresher)
 	accountH.SetProber(accQuota)
+	accountH.SetCodexUsageProvider(codexusage.New(codexusage.Options{
+		AuthDir: cfg.CodexUsage.AuthDir,
+		LogPath: cfg.CodexUsage.LogPath,
+	}))
 	accountH.SetSettings(settingsSvc)
 	accountH.SetProxyResolver(acctProxyResolver)
 

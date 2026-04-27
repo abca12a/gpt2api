@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/432539/gpt2api/internal/codexusage"
 	"github.com/432539/gpt2api/internal/settings"
 	"github.com/432539/gpt2api/pkg/resp"
 )
@@ -27,9 +28,14 @@ type Handler struct {
 	svc           *Service
 	refresher     *Refresher
 	prober        *QuotaProber
+	codexUsage    CodexUsageProvider
 	settings      *settings.Service
 	proxyResolver ProxyURLResolver
 	oauth         *openAIOAuthManager
+}
+
+type CodexUsageProvider interface {
+	Snapshot(ctx context.Context) (*codexusage.Snapshot, error)
 }
 
 func NewHandler(s *Service) *Handler {
@@ -44,6 +50,8 @@ func (h *Handler) SetRefresher(r *Refresher) { h.refresher = r }
 
 // SetProber 注入额度探测器(可选)。
 func (h *Handler) SetProber(p *QuotaProber) { h.prober = p }
+
+func (h *Handler) SetCodexUsageProvider(p CodexUsageProvider) { h.codexUsage = p }
 
 // SetSettings 注入系统设置服务,用于自动刷新开关的读写。
 func (h *Handler) SetSettings(s *settings.Service) { h.settings = s }
@@ -242,7 +250,15 @@ func (h *Handler) QuotaSummary(c *gin.Context) {
 		resp.Internal(c, err.Error())
 		return
 	}
-	resp.OK(c, s)
+	out := gin.H{
+		"total_remaining": s.TotalRemaining,
+		"total_capacity":  s.TotalCapacity,
+		"active_accounts": s.ActiveAccounts,
+	}
+	if snap := h.codexUsageSnapshot(c.Request.Context()); snap != nil {
+		out["codex_image_usage"] = snap.Summary
+	}
+	resp.OK(c, out)
 }
 
 // GET /api/admin/accounts
@@ -265,6 +281,7 @@ func (h *Handler) List(c *gin.Context) {
 		resp.Internal(c, err.Error())
 		return
 	}
+	h.attachCodexUsage(c.Request.Context(), list)
 	resp.OK(c, gin.H{"list": list, "total": total, "page": page, "page_size": size})
 }
 
@@ -276,7 +293,39 @@ func (h *Handler) Get(c *gin.Context) {
 		resp.NotFound(c, err.Error())
 		return
 	}
+	h.attachCodexUsage(c.Request.Context(), []*Account{a})
 	resp.OK(c, a)
+}
+
+func (h *Handler) attachCodexUsage(ctx context.Context, list []*Account) {
+	if len(list) == 0 {
+		return
+	}
+	snap := h.codexUsageSnapshot(ctx)
+	if snap == nil {
+		return
+	}
+	for _, item := range list {
+		if item == nil {
+			continue
+		}
+		usage := snap.ByEmail[strings.ToLower(strings.TrimSpace(item.Email))]
+		if usage != nil {
+			copyUsage := *usage
+			item.CodexImageUsage = &copyUsage
+		}
+	}
+}
+
+func (h *Handler) codexUsageSnapshot(ctx context.Context) *codexusage.Snapshot {
+	if h.codexUsage == nil {
+		return nil
+	}
+	snap, err := h.codexUsage.Snapshot(ctx)
+	if err != nil || snap == nil || !snap.StatsAvailable {
+		return nil
+	}
+	return snap
 }
 
 // PATCH /api/admin/accounts/:id

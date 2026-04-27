@@ -28,11 +28,36 @@ export interface Account {
   image_quota_reset_at?:   { Time: string; Valid: boolean } | string | null
   image_quota_updated_at?: { Time: string; Valid: boolean } | string | null
 
+  codex_image_usage?: CodexImageUsage
+
   has_rt: boolean
   has_st: boolean
 
   created_at: string
   updated_at: string
+}
+
+export interface CodexImageUsage {
+  stats_available: boolean
+  external_pool: boolean
+  external_disabled: boolean
+  external_plan: string
+  requests_today: number
+  success_today: number
+  failed_today: number
+  quota_429_today: number
+  last_used_at?: string | null
+}
+
+export interface CodexImageUsageSummary {
+  stats_available: boolean
+  active_accounts: number
+  disabled_accounts: number
+  requests_today: number
+  success_today: number
+  failed_today: number
+  quota_429_events_today: number
+  quota_429_accounts_today: number
 }
 
 export interface Page<T> {
@@ -49,6 +74,7 @@ export interface QuotaSummary {
   total_remaining: number
   total_capacity: number
   active_accounts: number
+  codex_image_usage?: CodexImageUsageSummary
 }
 
 export function getQuotaSummary() {

@@ -18,6 +18,7 @@ type Config struct {
 	Security             SecurityConfig             `mapstructure:"security"`
 	Scheduler            SchedulerConfig            `mapstructure:"scheduler"`
 	Upstream             UpstreamConfig             `mapstructure:"upstream"`
+	CodexUsage           CodexUsageConfig           `mapstructure:"codex_usage"`
 	ImageSuperResolution ImageSuperResolutionConfig `mapstructure:"image_super_resolution"`
 	EPay                 EPayConfig                 `mapstructure:"epay"`
 	Backup               BackupConfig               `mapstructure:"backup"`
@@ -80,6 +81,11 @@ type UpstreamConfig struct {
 	BaseURL           string `mapstructure:"base_url"`
 	RequestTimeoutSec int    `mapstructure:"request_timeout_sec"`
 	SSEReadTimeoutSec int    `mapstructure:"sse_read_timeout_sec"`
+}
+
+type CodexUsageConfig struct {
+	AuthDir string `mapstructure:"auth_dir"`
+	LogPath string `mapstructure:"log_path"`
 }
 
 type ImageSuperResolutionConfig struct {
@@ -169,6 +175,8 @@ func Get() *Config {
 }
 
 func setDefaults(v *viper.Viper) {
+	v.SetDefault("codex_usage.auth_dir", "")
+	v.SetDefault("codex_usage.log_path", "")
 	v.SetDefault("image_super_resolution.enabled", false)
 	v.SetDefault("image_super_resolution.access_key_id", "")
 	v.SetDefault("image_super_resolution.access_key_secret", "")

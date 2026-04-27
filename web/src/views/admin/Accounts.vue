@@ -152,6 +152,19 @@ function typeLabel(t: string) {
   return map[t] || t || '-'
 }
 
+function codexUsage(row: accountApi.Account): accountApi.CodexImageUsage | null {
+  const usage = row.codex_image_usage
+  if (!usage || !usage.stats_available || !usage.external_pool) return null
+  return usage
+}
+
+function codexPoolLabel(row: accountApi.Account): string {
+  const usage = codexUsage(row)
+  if (!usage) return '-'
+  const plan = usage.external_plan ? usage.external_plan.toUpperCase() : 'Codex'
+  return usage.external_disabled ? `${plan} 已停用` : `${plan} 生图池`
+}
+
 // ========== 即将过期高亮 ==========
 function expiresClass(v: any): string {
   const s = asDate(v)
@@ -954,11 +967,23 @@ onBeforeUnmount(() => {
           <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
             <h2 class="page-title" style="margin:0">GPT 账号池</h2>
             <el-tag v-if="quotaSummary" type="success" size="small" style="font-size:13px">
-              当前剩余总额度&nbsp;<b>{{ quotaSummary.total_remaining }}</b>
-              &nbsp;/&nbsp;{{ quotaSummary.total_capacity }}
+              Web 图剩余&nbsp;<b>{{ quotaSummary.total_remaining }}</b>
+              <template v-if="quotaSummary.total_capacity > 0">
+                &nbsp;/&nbsp;{{ quotaSummary.total_capacity }}
+              </template>
               &nbsp;（{{ quotaSummary.active_accounts }} 个账号）
             </el-tag>
-            <el-tag v-else type="info" size="small">额度统计加载中…</el-tag>
+            <el-tag
+              v-if="quotaSummary?.codex_image_usage?.stats_available"
+              type="warning" size="small" style="font-size:13px"
+            >
+              Codex 今日&nbsp;<b>{{ quotaSummary.codex_image_usage.success_today }}</b>
+              / {{ quotaSummary.codex_image_usage.requests_today }} 成功
+              <span v-if="quotaSummary.codex_image_usage.quota_429_events_today">
+                · 429 {{ quotaSummary.codex_image_usage.quota_429_events_today }} 次
+              </span>
+            </el-tag>
+            <el-tag v-if="!quotaSummary" type="info" size="small">额度统计加载中…</el-tag>
           </div>
           <div class="page-sub">
             统一管理 ChatGPT Plus / Team / Codex 账号:JSON / OAuth / AT / RT / ST 批量导入 · 自动刷新 · 图片额度探测 · 风控熔断轮转
@@ -1084,7 +1109,7 @@ onBeforeUnmount(() => {
             <span :class="expiresClass(row.token_expires_at)">{{ fmtTime(row.token_expires_at) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="生图剩余" width="96" align="center">
+        <el-table-column label="Web图剩余" width="100" align="center">
           <template #default="{ row }">
             <template v-if="row.image_quota_remaining >= 0">
               <el-tooltip
@@ -1096,6 +1121,40 @@ onBeforeUnmount(() => {
               </el-tooltip>
             </template>
             <span v-else class="muted">未探测</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="Codex今日" width="136" align="center">
+          <template #default="{ row }">
+            <template v-if="codexUsage(row)">
+              <el-tooltip placement="top">
+                <template #content>
+                  <div style="line-height:1.8">
+                    <div>{{ codexPoolLabel(row) }}</div>
+                    <div>今日请求:{{ codexUsage(row)?.requests_today || 0 }}</div>
+                    <div>成功:{{ codexUsage(row)?.success_today || 0 }} · 失败:{{ codexUsage(row)?.failed_today || 0 }}</div>
+                    <div v-if="codexUsage(row)?.quota_429_today" style="color:#f56c6c">
+                      命中上游额度限制:{{ codexUsage(row)?.quota_429_today }} 次
+                    </div>
+                    <div v-if="codexUsage(row)?.last_used_at" style="color:#a1a5ad">
+                      最近使用:{{ fmtTime(codexUsage(row)?.last_used_at) }}
+                    </div>
+                    <div style="color:#a1a5ad">
+                      该统计来自外置 CLIProxyAPI Codex 生图日志，不等同 Web 图剩余。
+                    </div>
+                  </div>
+                </template>
+                <span class="quota">
+                  <b>{{ codexUsage(row)?.success_today || 0 }}</b>
+                  <span class="muted"> / </span>
+                  {{ codexUsage(row)?.requests_today || 0 }}
+                  <el-tag
+                    v-if="codexUsage(row)?.quota_429_today"
+                    size="small" type="danger" effect="plain" style="margin-left:4px"
+                  >429</el-tag>
+                </span>
+              </el-tooltip>
+            </template>
+            <span v-else class="muted">-</span>
           </template>
         </el-table-column>
         <el-table-column label="今日已用 / 上限" width="150" align="center">
