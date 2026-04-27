@@ -154,3 +154,21 @@ func TestImageChannelAsyncTimeoutCapsExternalChannelBeforeFallback(t *testing.T)
 		t.Fatalf("reference async timeout = %s, want 2m", got)
 	}
 }
+
+func TestLimitImageChannelResultCapsToRequestedN(t *testing.T) {
+	result := &adapter.ImageResult{
+		URLs: []string{"https://example.test/1.png", "https://example.test/2.png"},
+		B64s: []string{"b64-1"},
+	}
+
+	got := limitImageChannelResult(result, 1)
+	if got == result {
+		t.Fatal("limitImageChannelResult should not mutate the original result")
+	}
+	if len(got.URLs) != 1 || got.URLs[0] != "https://example.test/1.png" || len(got.B64s) != 0 {
+		t.Fatalf("limited result = %#v, want only first URL", got)
+	}
+	if len(result.URLs) != 2 || len(result.B64s) != 1 {
+		t.Fatalf("original result mutated: %#v", result)
+	}
+}

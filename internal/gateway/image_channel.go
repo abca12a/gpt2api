@@ -133,6 +133,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		openAIError(c, failure.HTTPStatus, failure.Code, failure.Message)
 		return true
 	}
+	result = limitImageChannelResult(result, req.N)
 	_ = h.Channels.Svc().MarkHealth(context.Background(), selected.Channel, true, "")
 
 	// 渠道级倍率叠乘
@@ -379,6 +380,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 			}
 			return
 		}
+		result = limitImageChannelResult(result, job.Request.N)
 		_ = h.Channels.Svc().MarkHealth(context.Background(), selected.Channel, true, "")
 
 		channelRatio := selected.Channel.Ratio
@@ -502,6 +504,7 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 		openAIError(c, failure.HTTPStatus, failure.Code, failure.Message)
 		return true
 	}
+	result = limitImageChannelResult(result, req.N)
 	_ = h.Channels.Svc().MarkHealth(context.Background(), selected.Channel, true, "")
 
 	channelRatio := selected.Channel.Ratio
@@ -617,6 +620,36 @@ func imageChannelResultURLs(result *adapter.ImageResult) []string {
 		urls = append(urls, "data:image/png;base64,"+b)
 	}
 	return urls
+}
+
+func limitImageChannelResult(result *adapter.ImageResult, requested int) *adapter.ImageResult {
+	if result == nil {
+		return nil
+	}
+	if requested <= 0 {
+		requested = 1
+	}
+	limited := *result
+	remaining := requested
+	if len(result.URLs) > 0 {
+		if len(result.URLs) >= remaining {
+			limited.URLs = append([]string(nil), result.URLs[:remaining]...)
+			limited.B64s = nil
+			return &limited
+		}
+		limited.URLs = append([]string(nil), result.URLs...)
+		remaining -= len(limited.URLs)
+	} else {
+		limited.URLs = nil
+	}
+	if len(result.B64s) > remaining {
+		limited.B64s = append([]string(nil), result.B64s[:remaining]...)
+	} else if len(result.B64s) > 0 {
+		limited.B64s = append([]string(nil), result.B64s...)
+	} else {
+		limited.B64s = nil
+	}
+	return &limited
 }
 
 func actualCount(r *adapter.ImageResult) int {

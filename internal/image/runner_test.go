@@ -71,6 +71,33 @@ func TestRunParallelRetriesSubImageOnPollTimeout(t *testing.T) {
 	}
 }
 
+func TestRunCapsSingleRequestToRequestedN(t *testing.T) {
+	r := &Runner{
+		runOnceHook: func(ctx context.Context, opt RunOptions, result *RunResult) (bool, string, error) {
+			result.AccountID = 42
+			result.ConversationID = "conv_1"
+			result.FileIDs = []string{"file_1", "file_2"}
+			result.SignedURLs = []string{"https://example.test/1.png", "https://example.test/2.png"}
+			result.ContentTypes = []string{"image/png", "image/png"}
+			return true, "", nil
+		},
+	}
+
+	result := r.Run(context.Background(), RunOptions{N: 1, MaxAttempts: 1})
+	if result.Status != StatusSuccess {
+		t.Fatalf("status = %q, want success", result.Status)
+	}
+	if len(result.FileIDs) != 1 || result.FileIDs[0] != "file_1" {
+		t.Fatalf("file ids = %#v, want only first image", result.FileIDs)
+	}
+	if len(result.SignedURLs) != 1 || result.SignedURLs[0] != "https://example.test/1.png" {
+		t.Fatalf("signed urls = %#v, want only first image", result.SignedURLs)
+	}
+	if len(result.ContentTypes) != 1 || result.ContentTypes[0] != "image/png" {
+		t.Fatalf("content types = %#v, want only first image", result.ContentTypes)
+	}
+}
+
 func TestImageFailureCodeFromAssistantDetectsModerationText(t *testing.T) {
 	got := imageFailureCodeFromAssistant(ErrUpstream, "I can't help create that image because it may violate our safety policy.")
 	if got != ErrContentModeration {

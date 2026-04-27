@@ -16,6 +16,7 @@
 - 2026-04-27 排查下游 AI 创作任务 `task_gOIdvPLUbrHpy8EdzNcmPzDo4T0WrL1J`：号池任务 `img_871fdec3952f4aa88fb3988a` 实际成功，但外置 `codex-cli-proxy-image` 参考图请求先卡到 7 分钟超时，随后才回落内置 ChatGPT Web Runner，导致总耗时约 8 分钟。为避免同类卡顿，异步图片外置渠道现在无参考图最多等待 90 秒、有参考图最多等待 2 分钟，超时后尽快走内置 Runner 兜底；下游前端轮询窗口需覆盖到 15 分钟。
 - 2026-04-27 修复下游图生图保存回归：对外 `ImageGenerations / ImageTask / ImageTaskCompat / ImageEdits / chat->image` 返回的本站 `/p/img` 代理图，现在会按当前请求 `Host/X-Forwarded-Proto` 输出绝对 URL（生产为 `https://lmage2.dimilinks.com/p/img/...`）。原因是下游前端/保存器曾把相对 `/p/img` 补成 `https://dimilinks.com/p/img/...`，下载到 HTML 后触发“图片未能保存到本机”或上游 `unsupported MIME type text/html`；`internal/image` 包内部仍保留相对 path，只有网关对外响应层补 origin。
 - 2026-04-27 管理员后台“生成记录”列表已改为轻量加载：列表不再查询/返回 `image_tasks.result_urls` 大字段（生产表约 1877 行但该列累计约 2.5GB，单页曾需秒级加载），只返回任务元数据、结果数量和失败摘要；点击“查看结果 / 查看失败”时再调用 `GET /api/admin/image-tasks/:id/images` 懒加载图片 URL 或失败详情。后续不要把 base64/data URL 重新放回列表接口。
+- 2026-04-27 排查生成记录 `image_tasks.id=1963 / img_bd53c1f501c942b7ad7f9031`：请求入库 `n=1`，但 ChatGPT Web SSE 一次返回了 2 个 sediment 图片引用，旧 Runner 只判断“已满足 ≥N”后跳过轮询，却没有把超出的引用截断，导致任务落库和下游展示 2 张。已在内置 Runner 与外置图片渠道成功结果落库/结算前统一按请求 `n` 截断；这不是用户绕过 `n`，而是上游多产出未被服务端裁剪。
 - `file_ids` 的单图元素可携带 `account_id / conversation_id / file_ref`；图片代理优先使用单图元信息回源，兼容旧任务的任务级账号信息。
 - 2026-04-25 已将 `upscale=2k/4k` 从本地 Catmull-Rom 插值切换为阿里云生成式图像超分：`/p/img` 首次访问拉取 ChatGPT 原图后调用 `GenerateSuperResolutionImage`，轮询 `GetAsyncJobResult` 并立即下载结果；失败回落原图且不再回退本地插值，成功结果仍只缓存在当前进程 LRU。阿里 AK/SK 只写本机忽略文件 `deploy/.env` 和环境变量，不写入 Git。
 - 本地已合并上游多渠道能力，并保留 OAuth 导入、额度汇总、个人图片代理、nginx/端口等本地定制。

@@ -157,6 +157,9 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 		}
 	}
 
+	if result.Status == StatusSuccess {
+		capRunResultImages(result, opt.N)
+	}
 	result.DurationMs = time.Since(start).Milliseconds()
 
 	// 落库
@@ -296,6 +299,7 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 		result.Status = StatusSuccess
 		result.ErrorCode = ""
 		result.ErrorMessage = ""
+		capRunResultImages(result, n)
 		logger.L().Info("image runner parallel done",
 			zap.String("task_id", opt.TaskID),
 			zap.Int("requested", n),
@@ -585,6 +589,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	if len(fileRefs) == 0 {
 		return false, imageFailureCodeFromAssistant(ErrUpstream, assistantText), imageFailureError("no image ref produced", assistantText, "")
 	}
+	fileRefs = capImageRefs(fileRefs, opt.N)
 
 	// 6) 对每个 ref 取签名 URL
 	var signedURLs []string
@@ -616,6 +621,34 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	result.SignedURLs = signedURLs
 	result.ContentTypes = contentTypes
 	return true, "", nil
+}
+
+func capImageRefs(refs []string, requested int) []string {
+	if requested <= 0 {
+		requested = 1
+	}
+	if len(refs) <= requested {
+		return refs
+	}
+	return refs[:requested]
+}
+
+func capRunResultImages(result *RunResult, requested int) {
+	if result == nil {
+		return
+	}
+	if requested <= 0 {
+		requested = 1
+	}
+	if len(result.FileIDs) > requested {
+		result.FileIDs = result.FileIDs[:requested]
+	}
+	if len(result.SignedURLs) > requested {
+		result.SignedURLs = result.SignedURLs[:requested]
+	}
+	if len(result.ContentTypes) > requested {
+		result.ContentTypes = result.ContentTypes[:requested]
+	}
 }
 
 func imagePollMaxWait(sseResult chatgpt.ImageSSEResult, fileRefs []string, maxWait time.Duration) time.Duration {
