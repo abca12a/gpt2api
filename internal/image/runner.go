@@ -510,6 +510,19 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		fileRefs = append(fileRefs, "sed:"+s)
 	}
 	assistantText := sseResult.AssistantText
+	if len(refs) > 0 {
+		referenceSet := referenceUploadFileIDSet(refs)
+		if len(referenceSet) > 0 {
+			beforeCount := len(fileRefs)
+			fileRefs = filterOutReferenceFileIDs(fileRefs, referenceSet)
+			if beforeCount != len(fileRefs) {
+				logger.L().Info("image runner stripped reference file_ids from SSE-captured refs",
+					zap.String("task_id", opt.TaskID),
+					zap.Int("before", beforeCount),
+					zap.Int("after", len(fileRefs)))
+			}
+		}
+	}
 
 	// SSE 已经把期望数量的图带回来了 → 直接下载,跳过 Poll,省时间
 	if len(fileRefs) >= opt.N {
@@ -591,6 +604,9 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		return false, imageFailureCodeFromAssistant(ErrUpstream, assistantText), imageFailureError("no image ref produced", assistantText, "")
 	}
 	fileRefs = capImageRefs(fileRefs, opt.N)
+	if len(fileRefs) == 0 {
+		return false, imageFailureCodeFromAssistant(ErrUpstream, assistantText), imageFailureError("no generated image ref produced", assistantText, "")
+	}
 
 	// 6) 对每个 ref 取签名 URL
 	var signedURLs []string
@@ -632,6 +648,39 @@ func capImageRefs(refs []string, requested int) []string {
 		return refs
 	}
 	return refs[:requested]
+}
+
+func referenceUploadFileIDSet(refs []*chatgpt.UploadedFile) map[string]struct{} {
+	referenceSet := make(map[string]struct{})
+	for _, uploadedFile := range refs {
+		if uploadedFile == nil {
+			continue
+		}
+		fileID := strings.TrimSpace(uploadedFile.FileID)
+		if fileID == "" {
+			continue
+		}
+		referenceSet[strings.TrimPrefix(fileID, "sed:")] = struct{}{}
+	}
+	return referenceSet
+}
+
+func filterOutReferenceFileIDs(fileRefs []string, referenceSet map[string]struct{}) []string {
+	if len(referenceSet) == 0 {
+		return fileRefs
+	}
+	filteredRefs := make([]string, 0, len(fileRefs))
+	for _, fileRef := range fileRefs {
+		if strings.HasPrefix(fileRef, "sed:") {
+			filteredRefs = append(filteredRefs, fileRef)
+			continue
+		}
+		if _, isReference := referenceSet[fileRef]; isReference {
+			continue
+		}
+		filteredRefs = append(filteredRefs, fileRef)
+	}
+	return filteredRefs
 }
 
 func capRunResultImages(result *RunResult, requested int) {

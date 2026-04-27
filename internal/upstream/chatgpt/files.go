@@ -95,34 +95,9 @@ func (c *Client) UploadFile(ctx context.Context, data []byte, fileName string) (
 		step1Body["width"] = out.Width
 	}
 	b1, _ := json.Marshal(step1Body)
-	req1, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.opts.BaseURL+"/backend-api/files",
-		bytes.NewReader(b1))
+	step1Resp, err := c.createUploadFile(ctx, b1)
 	if err != nil {
 		return nil, err
-	}
-	c.commonHeaders(req1)
-	req1.Header.Set("Content-Type", "application/json")
-	req1.Header.Set("Accept", "application/json")
-	res1, err := c.hc.Do(req1)
-	if err != nil {
-		return nil, fmt.Errorf("create file: %w", err)
-	}
-	defer res1.Body.Close()
-	buf1, _ := io.ReadAll(res1.Body)
-	if res1.StatusCode >= 400 {
-		return nil, &UpstreamError{Status: res1.StatusCode, Message: "create file failed", Body: string(buf1)}
-	}
-	var step1Resp struct {
-		FileID    string `json:"file_id"`
-		UploadURL string `json:"upload_url"`
-		Status    string `json:"status"`
-	}
-	if err := json.Unmarshal(buf1, &step1Resp); err != nil {
-		return nil, fmt.Errorf("decode create-file resp: %w (body=%s)", err, truncateStr(string(buf1), 200))
-	}
-	if step1Resp.FileID == "" || step1Resp.UploadURL == "" {
-		return nil, fmt.Errorf("create-file empty: %s", truncateStr(string(buf1), 200))
 	}
 	out.FileID = step1Resp.FileID
 
@@ -146,6 +121,60 @@ func (c *Client) UploadFile(ctx context.Context, data []byte, fileName string) (
 	out.DownloadURL = downloadURL
 
 	return out, nil
+}
+
+type createUploadFileResponse struct {
+	FileID    string `json:"file_id"`
+	UploadURL string `json:"upload_url"`
+	Status    string `json:"status"`
+}
+
+func (c *Client) createUploadFile(ctx context.Context, body []byte) (createUploadFileResponse, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			c.opts.BaseURL+"/backend-api/files",
+			bytes.NewReader(body))
+		if err != nil {
+			return createUploadFileResponse{}, err
+		}
+		c.commonHeaders(req)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		res, err := c.hc.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("create file: %w", err)
+			if attempt < maxAttempts && isRetryableUploadError(ctx, err) {
+				if err := sleepWithContext(ctx, uploadRetryDelay(attempt)); err != nil {
+					return createUploadFileResponse{}, lastErr
+				}
+				continue
+			}
+			return createUploadFileResponse{}, lastErr
+		}
+		buf, _ := io.ReadAll(res.Body)
+		_ = res.Body.Close()
+		if res.StatusCode >= 400 {
+			lastErr = &UpstreamError{Status: res.StatusCode, Message: "create file failed", Body: string(buf)}
+			if attempt < maxAttempts && isRetryableUploadStatus(res.StatusCode) {
+				if err := sleepWithContext(ctx, uploadRetryDelay(attempt)); err != nil {
+					return createUploadFileResponse{}, lastErr
+				}
+				continue
+			}
+			return createUploadFileResponse{}, lastErr
+		}
+		var step1Resp createUploadFileResponse
+		if err := json.Unmarshal(buf, &step1Resp); err != nil {
+			return createUploadFileResponse{}, fmt.Errorf("decode create-file resp: %w (body=%s)", err, truncateStr(string(buf), 200))
+		}
+		if step1Resp.FileID == "" || step1Resp.UploadURL == "" {
+			return createUploadFileResponse{}, fmt.Errorf("create-file empty: %s", truncateStr(string(buf), 200))
+		}
+		return step1Resp, nil
+	}
+	return createUploadFileResponse{}, lastErr
 }
 
 func (c *Client) registerUploadedFile(ctx context.Context, fileID string) (string, error) {

@@ -523,6 +523,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	// 7) usage
 	rec.Status = usage.StatusSuccess
 	rec.CreditCost = cost
+	rec.ImageCount = imageCountFromSignedURLs(res.SignedURLs, req.N)
 
 	// 8) DAO 回写 credit_cost(Runner 已经 MarkSuccess,这里只补 credit_cost)
 	if h.DAO != nil {
@@ -759,6 +760,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 	rec.Status = usage.StatusSuccess
 	rec.CreditCost = cost
 	rec.DurationMs = int(time.Since(startAt).Milliseconds())
+	rec.ImageCount = imageCountFromSignedURLs(res.SignedURLs, 1)
 
 	// 以 chat 响应返回(content 里内嵌 markdown 图片)。
 	var sb strings.Builder
@@ -1609,6 +1611,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 
 	rec.Status = usage.StatusSuccess
 	rec.CreditCost = cost
+	rec.ImageCount = imageCountFromSignedURLs(res.SignedURLs, n)
 	if h.DAO != nil {
 		_ = h.DAO.UpdateCost(c.Request.Context(), taskID, cost)
 	}
@@ -1776,6 +1779,16 @@ func parseIntClamp(s string, min, max int) (int, error) {
 		v = max
 	}
 	return v, nil
+}
+
+func imageCountFromSignedURLs(signedURLs []string, requested int) int {
+	if len(signedURLs) > 0 {
+		return len(signedURLs)
+	}
+	if requested > 0 {
+		return requested
+	}
+	return 1
 }
 
 func maybeAppendClaritySuffix(prompt string) string {

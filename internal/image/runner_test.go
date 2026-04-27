@@ -129,3 +129,21 @@ func TestReferenceUploadBadRequestStaysUpstream(t *testing.T) {
 		t.Fatalf("classifyReferenceUploadError = %q, want %q", got, ErrUpstream)
 	}
 }
+
+func TestFilterOutReferenceFileIDsKeepsGeneratedImages(t *testing.T) {
+	referenceSet := referenceUploadFileIDSet([]*chatgpt.UploadedFile{
+		{FileID: "file_reference"},
+		{FileID: "sed:legacy_reference"},
+	})
+
+	got := filterOutReferenceFileIDs([]string{
+		"file_reference",
+		"file_generated",
+		"sed:file_reference",
+		"legacy_reference",
+	}, referenceSet)
+	want := []string{"file_generated", "sed:file_reference"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("filtered refs = %#v, want %#v", got, want)
+	}
+}

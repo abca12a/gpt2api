@@ -211,9 +211,12 @@ type probeOutcome struct {
 // 适合用于后台定时探测。
 //
 // 请求 body 参照抓包样例;响应关心的字段是:
-//   - limits_progress[].feature_name == "image_gen" → remaining / reset_after
+//   - limits_progress[].feature_name == "image_gen" → remaining / max_value / reset_after
 //   - default_model_slug  → 账号默认模型
 //   - blocked_features    → 被风控限制的功能;非空需要关注
+//
+// total 优先取上游 max_value / cap / total / limit;缺失时用今日已用 + 剩余额度估算,
+// 避免 UI 长期停在“待探测”。
 //
 // 指纹注意事项(曾在这里踩过 403):
 //   - TLS ClientHello 必须是 Chrome parrot(uTLS),由 q.clientFor 返回的 transport 提供;
@@ -295,18 +298,32 @@ func (q *QuotaProber) doProbe(ctx context.Context, a *Account, accessToken strin
 		return
 	}
 
-	var payload struct {
-		Type             string   `json:"type"`
-		BlockedFeatures  []string `json:"blocked_features"`
-		DefaultModelSlug string   `json:"default_model_slug"`
-		LimitsProgress   []struct {
-			FeatureName string `json:"feature_name"`
-			Remaining   *int   `json:"remaining"`
-			ResetAfter  string `json:"reset_after"`
-		} `json:"limits_progress"`
-	}
-	if err = json.Unmarshal(data, &payload); err != nil {
-		return
+	out, err = parseQuotaProbePayload(data, a, time.Now())
+	return
+}
+
+type quotaProbePayload struct {
+	Type             string               `json:"type"`
+	BlockedFeatures  []string             `json:"blocked_features"`
+	DefaultModelSlug string               `json:"default_model_slug"`
+	LimitsProgress   []quotaLimitProgress `json:"limits_progress"`
+}
+
+type quotaLimitProgress struct {
+	FeatureName string `json:"feature_name"`
+	Remaining   *int   `json:"remaining"`
+	ResetAfter  string `json:"reset_after"`
+	MaxValue    *int   `json:"max_value"`
+	Cap         *int   `json:"cap"`
+	Total       *int   `json:"total"`
+	Limit       *int   `json:"limit"`
+}
+
+func parseQuotaProbePayload(data []byte, account *Account, now time.Time) (probeOutcome, error) {
+	out := probeOutcome{remaining: -1, total: -1}
+	var payload quotaProbePayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return out, err
 	}
 	out.defaultModel = payload.DefaultModelSlug
 	out.blockedFeatures = payload.BlockedFeatures
@@ -315,20 +332,40 @@ func (q *QuotaProber) doProbe(ctx context.Context, a *Account, accessToken strin
 		if !isImageFeature(item.FeatureName) {
 			continue
 		}
-		if item.Remaining != nil {
-			if out.remaining < 0 || *item.Remaining < out.remaining {
-				out.remaining = *item.Remaining
-			}
+		if item.Remaining != nil && (out.remaining < 0 || *item.Remaining < out.remaining) {
+			out.remaining = *item.Remaining
+		}
+		if maxValue := pickInt(item.MaxValue, item.Cap, item.Total, item.Limit); maxValue != nil && *maxValue > out.total {
+			out.total = *maxValue
 		}
 		if item.ResetAfter != "" {
-			if t, e := time.Parse(time.RFC3339, item.ResetAfter); e == nil {
-				if out.resetAt.IsZero() || t.Before(out.resetAt) {
-					out.resetAt = t
+			if resetTime, parseErr := time.Parse(time.RFC3339, item.ResetAfter); parseErr == nil {
+				if out.resetAt.IsZero() || resetTime.Before(out.resetAt) {
+					out.resetAt = resetTime
 				}
 			}
 		}
 	}
-	return
+
+	if out.total <= 0 && out.remaining >= 0 {
+		usedToday := 0
+		if account != nil && account.TodayUsedDate.Valid && isSameLocalDay(account.TodayUsedDate.Time, now) {
+			usedToday = account.TodayUsedCount
+		}
+		if usedToday+out.remaining > 0 {
+			out.total = usedToday + out.remaining
+		}
+	}
+	return out, nil
+}
+
+func pickInt(values ...*int) *int {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 // fallbackDeviceID 兜底 Oai-Device-Id:用账号 ID 拼一个固定的 uuid-like 字符串,

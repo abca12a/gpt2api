@@ -92,3 +92,51 @@ func TestUploadFileRetriesTransientPUT(t *testing.T) {
 		t.Fatal("uploaded registration was not called")
 	}
 }
+
+func TestUploadFileRetriesTransientCreateFile(t *testing.T) {
+	var createCalls int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/files":
+			if atomic.AddInt32(&createCalls, 1) == 1 {
+				http.Error(w, "try again", http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"file_id":"file_test","upload_url":"https://upload.example.test/raw","status":"success"}`))
+		case "/backend-api/files/file_test/uploaded":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"success","download_url":"https://download.example.test/file.png"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer api.Close()
+
+	client := &Client{
+		opts: Options{
+			BaseURL:       api.URL,
+			AuthToken:     "token",
+			DeviceID:      "device",
+			UserAgent:     DefaultUserAgent,
+			ClientVersion: DefaultClientVersion,
+			Language:      DefaultLanguage,
+		},
+		hc: api.Client(),
+		uploadHC: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		})},
+	}
+
+	if _, err := client.UploadFile(context.Background(), []byte("fake image bytes"), "ref.png"); err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	if atomic.LoadInt32(&createCalls) != 2 {
+		t.Fatalf("create calls = %d, want 2", createCalls)
+	}
+}

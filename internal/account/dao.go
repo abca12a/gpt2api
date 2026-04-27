@@ -25,6 +25,16 @@ func fill(a *Account) {
 	}
 	a.HasRT = a.RefreshTokenEnc.Valid && a.RefreshTokenEnc.String != ""
 	a.HasST = a.SessionTokenEnc.Valid && a.SessionTokenEnc.String != ""
+	if a.TodayUsedCount > 0 && (!a.TodayUsedDate.Valid || !isSameLocalDay(a.TodayUsedDate.Time, time.Now())) {
+		a.TodayUsedCount = 0
+	}
+}
+
+func isSameLocalDay(leftTime, rightTime time.Time) bool {
+	location := time.Local
+	leftTime = leftTime.In(location)
+	rightTime = rightTime.In(location)
+	return leftTime.Year() == rightTime.Year() && leftTime.Month() == rightTime.Month() && leftTime.Day() == rightTime.Day()
 }
 
 func fillAll(rows []*Account) {
@@ -146,10 +156,11 @@ func (d *DAO) ListNeedRefresh(ctx context.Context, aheadSec int, limit int) ([]*
 }
 
 // ListNeedProbeQuota 返回需要探测图片额度的账号。命中以下任一条件即纳入:
-//   (a) 从未探测过(image_quota_updated_at IS NULL);
-//   (b) 上次探测超过 minIntervalSec 秒(常规轮询);
-//   (c) **剩余额度=0 且已过 reset_at**:这种"归零等重置"的账号要第一时间补探,
-//       不受 minIntervalSec 限制,避免 5 小时轮询间隔导致的额度恢复滞后显示。
+//
+//	(a) 从未探测过(image_quota_updated_at IS NULL);
+//	(b) 上次探测超过 minIntervalSec 秒(常规轮询);
+//	(c) **剩余额度=0 且已过 reset_at**:这种"归零等重置"的账号要第一时间补探,
+//	    不受 minIntervalSec 限制,避免 5 小时轮询间隔导致的额度恢复滞后显示。
 func (d *DAO) ListNeedProbeQuota(ctx context.Context, minIntervalSec int, limit int) ([]*Account, error) {
 	rows := make([]*Account, 0, limit)
 	threshold := time.Now().Add(-time.Duration(minIntervalSec) * time.Second)
@@ -377,7 +388,11 @@ func (d *DAO) RecordRefreshError(ctx context.Context, id uint64, source string, 
 func (d *DAO) ApplyQuotaResult(ctx context.Context, id uint64, remaining, total int, resetAt *time.Time) error {
 	q := `UPDATE oai_accounts
           SET image_quota_remaining = CASE WHEN ? < 0 THEN image_quota_remaining ELSE ? END,
-              image_quota_total     = CASE WHEN ? < 0 THEN image_quota_total     ELSE ? END,
+              image_quota_total     = GREATEST(
+                  image_quota_total,
+                  CASE WHEN ? < 0 THEN 0 ELSE ? END,
+                  CASE WHEN ? < 0 THEN 0 ELSE ? END
+              ),
               image_quota_reset_at  = ?,
               image_quota_updated_at = ?
           WHERE id = ? AND deleted_at IS NULL`
@@ -387,7 +402,11 @@ func (d *DAO) ApplyQuotaResult(ctx context.Context, id uint64, remaining, total 
 	} else {
 		reset = nil
 	}
-	_, err := d.db.ExecContext(ctx, q, remaining, remaining, total, total, reset, time.Now(), id)
+	_, err := d.db.ExecContext(ctx, q,
+		remaining, remaining,
+		total, total,
+		remaining, remaining,
+		reset, time.Now(), id)
 	return err
 }
 

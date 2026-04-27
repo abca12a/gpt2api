@@ -52,7 +52,7 @@ GET  /v1/tasks/{task_id}
 
 - `gpt2api` 服务：`gpt2api-server/mysql/redis/nginx` 正常，`/healthz` 返回 ok。
 - Codex 图片渠道：`cli-proxy-api` 容器运行中，且与 `gpt2api-server` 同在 `deploy_default` 网络。
-- 容器内解析：`gpt2api-server` 内 `cli-proxy-api` 能解析到容器 IP，并且 `http://cli-proxy-api:8317/health` 返回 ok。
+- 容器内解析：`gpt2api-server` 内 `cli-proxy-api` 能解析到容器 IP，并且 `http://cli-proxy-api:8317/healthz` 返回 ok。
 - 数据库路由：`upstream_channels` 存在 `codex-cli-proxy-image`，`base_url=http://cli-proxy-api:8317`，`enabled=1`；`channel_model_mappings` 存在 `gpt-image-2 -> gpt-image-2 / modality=image / enabled=1`。
 - 下游分组：`new-api` token 需要落在支持 `gpt-image-2` 的分组；如果错误是 `No available channel for model gpt-image-2 under group default`，说明请求通常还没进入 gpt2api。
 
@@ -61,7 +61,7 @@ GET  /v1/tasks/{task_id}
 ```bash
 docker compose -f deploy/docker-compose.yml ps
 curl -fsS http://127.0.0.1:8080/healthz
-docker exec gpt2api-server sh -c 'getent hosts cli-proxy-api && wget -qO- --timeout=3 http://cli-proxy-api:8317/health'
+docker exec gpt2api-server sh -c 'getent hosts cli-proxy-api && wget -qO- --timeout=3 http://cli-proxy-api:8317/healthz'
 ```
 
 ## 2. 路由列表

@@ -163,6 +163,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	rec.Status = usage.StatusSuccess
 	rec.ModelID = m.ID
 	rec.CreditCost = finalCost
+	rec.ImageCount = actualCount(result)
 
 	c.JSON(http.StatusOK, ImageGenResponse{
 		Created: time.Now().Unix(),
@@ -401,6 +402,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		}
 		rec.Status = usage.StatusSuccess
 		rec.CreditCost = finalCost
+		rec.ImageCount = actualCount(result)
 	}()
 }
 
@@ -523,6 +525,7 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	rec.ModelID = m.ID
 	rec.CreditCost = finalCost
 	rec.DurationMs = int(time.Since(startAt).Milliseconds())
+	rec.ImageCount = actualCount(result)
 
 	c.JSON(http.StatusOK, imageChannelChatResponse(m.Slug, result))
 	return true

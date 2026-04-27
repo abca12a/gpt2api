@@ -172,3 +172,12 @@ func TestLimitImageChannelResultCapsToRequestedN(t *testing.T) {
 		t.Fatalf("original result mutated: %#v", result)
 	}
 }
+
+func TestActualCountFallsBackToOneForEmptySuccessfulChannelResult(t *testing.T) {
+	if got := actualCount(&adapter.ImageResult{}); got != 1 {
+		t.Fatalf("actualCount(empty result) = %d, want 1", got)
+	}
+	if got := actualCount(&adapter.ImageResult{URLs: []string{"u1"}, B64s: []string{"b1"}}); got != 2 {
+		t.Fatalf("actualCount(two images) = %d, want 2", got)
+	}
+}

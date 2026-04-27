@@ -764,15 +764,20 @@ const i2iResult = ref<PlayImageData[]>([])
 const i2iError = ref('')
 const i2iPreview = ref(false)
 const i2iAbort = ref<AbortController | null>(null)
-const MAX_REF_BYTES = 4 * 1024 * 1024 // 4MB
+const MAX_REF_COUNT = 4
+const MAX_REF_BYTES = 20 * 1024 * 1024
 
 function handleFilePick(e: Event) {
   const input = e.target as HTMLInputElement
   const files = input.files
   if (!files) return
   for (const file of Array.from(files)) {
+    if (refImages.value.length >= MAX_REF_COUNT) {
+      ElMessage.warning('参考图最多 4 张')
+      break
+    }
     if (file.size > MAX_REF_BYTES) {
-      ElMessage.warning(`${file.name} 超过 4MB 限制`)
+      ElMessage.warning(`${file.name} 超过 20MB 限制`)
       continue
     }
     const reader = new FileReader()
@@ -1261,11 +1266,11 @@ watch(activeTab, (v) => {
             </div>
 
             <div class="side-row">
-              <label class="side-lbl">参考图 <span class="side-val">{{ refImages.length }}/多</span></label>
+              <label class="side-lbl">参考图 <span class="side-val">{{ refImages.length }}/4</span></label>
               <label class="upload-zone">
                 <el-icon class="up-ic"><UploadFilled /></el-icon>
                 <div class="up-t">点击选择 / 拖拽图片到这里</div>
-                <div class="up-s">最多多张,每张 ≤ 4MB</div>
+                <div class="up-s">最多 4 张,每张 ≤ 20MB</div>
                 <input type="file" accept="image/*" multiple @change="handleFilePick" />
               </label>
 

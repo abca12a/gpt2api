@@ -27,7 +27,9 @@
 
 - 下游公网入口始终是 `https://lmage2.dimilinks.com/v1`；下游不要直接调用 `cliproxyapi` 公网域名或浏览器直连号池内部接口。
 - 生产 `gpt-image-2` 优先走数据库中的外置 image channel：`codex-cli-proxy-image -> http://cli-proxy-api:8317`，映射为 `gpt-image-2 -> gpt-image-2 / modality=image`。
-- `gpt2api-server` 与 `cli-proxy-api` 必须同在 Docker 网络 `deploy_default`；容器内 `cli-proxy-api` DNS 和 `/health` 要可用。
+- `gpt2api-server` 与 `cli-proxy-api` 必须同在 Docker 网络 `deploy_default`；容器内 `cli-proxy-api` DNS 和 `/healthz` 要可用。
+- 外置 Codex image channel 使用 `/home/ubuntu/CLIProxyAPI/auths/codex-*.json` 文件池，由 `cli-proxy-api` 独立调度；`gpt2api-server` 只挂载该目录和日志用于路由、展示与统计，不直接把数据库 `oai_accounts` 当作外置 Codex 调度池。
+- 外置 Codex auth 文件可以与数据库账号邮箱重合，但两边不是同一个队列：外置池消耗 Codex usage/credits，内置 ChatGPT Web Runner 消耗 Web 图片额度。
 - 外置 Codex/OpenAI image channel 在同渠道重试后若仍遇到 `502/5xx`、超时、EOF、connection reset、broken pipe 等瞬态错误，会回落内置 ChatGPT Web Runner，并强制调度 `plan_type=free` 账号。
 - `content_policy_violation / content_moderation / moderation_blocked / safety system` 归为 `content_moderation`，不兜底、不标记渠道 unhealthy，也不继续换渠道绕过安全策略。
 - `400 invalid_value / image_generation_user_error / minimum pixel budget` 属于用户请求参数错误，返回 `invalid_request_error` 并保留详情，不切 Free 账号。
@@ -49,6 +51,7 @@
 
 - OpenAI 兼容网关错误按 APIMart 常见类型归类：401=`authentication_error`、402=`payment_required`、429=`rate_limit_error`、5xx=`server_error/service_unavailable`；APIMart 兼容模式下 HTTP 错误的 `error.code` 改为数字状态码。
 - ChatGPT Web Runner 会同时提取图片 SSE 和 conversation mapping 中最新 assistant 文本；如果上游没有给出图片引用但返回自然语言拒绝/说明，会写入 `image_tasks.error` detail。
+- 管理员账号池页的“Codex今日”来自外置 CLIProxyAPI 日志，只统计请求数、成功数、失败数和 429 次数；它不是官方 Codex 剩余 credits，也不等同“Web 图剩余”。
 - `GET /v1/tasks/:id` 失败时除 `error{code,message,detail}` 外，还返回顶层 `error_code / error_message / error_msg / message / error_detail / failure_reason / failed_reason / fail_reason`，方便下游不同读取路径展示原因。
 - 管理员“生成记录”列表不再查询或返回 `image_tasks.result_urls` 大字段，只返回任务元数据、结果数量和失败摘要；点击“查看结果 / 查看失败”时再调用 `GET /api/admin/image-tasks/:id/images` 懒加载。
 - 后台生成记录不要使用 `el-image` 内置预览承载结果图；使用普通 `img` 与受控 `el-dialog`，避免 base64/data URL 误跳 `about:blank#blocked`。
@@ -74,6 +77,7 @@
 
 ## 最近变更
 
+- 2026-04-27：手工移植元项目 2026-04-26 的关键修复：图生图 SSE 结果会剔除参考图 file_id；用量日志成功图片按真实产出张数写入并对历史 image_count=0 兜底；账号额度探测支持 max_value/cap/total/limit 和“今日已用+剩余”估算；UploadFile 创建文件步骤加入瞬时错误重试；在线体验参考图限制对齐后端 4 张/20MB。
 - 2026-04-27：外置图片渠道等待窗口收敛为无参考图 90 秒、有参考图 2 分钟；超时后尽快走内置 Runner 兜底，下游前端轮询窗口需覆盖到 15 分钟。
 - 2026-04-27：对外 `/p/img` 代理图统一补绝对 URL，避免下游把相对路径补到错误域名后下载到 HTML。
 - 2026-04-27：管理员“生成记录”改为轻量列表与懒加载图片/失败详情；不要把 base64/data URL 或 `result_urls` 大字段重新放回列表接口。
