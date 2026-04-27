@@ -539,7 +539,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
 	for i := range res.SignedURLs {
-		d := ImageGenData{URL: image.BuildImageProxyURL(taskID, i, image.ImageProxyTTL)}
+		d := ImageGenData{URL: imageProxyURLForRequest(c, taskID, i)}
 		if i < len(res.FileIDs) {
 			d.FileID = image.PublicFileID(res.FileIDs[i])
 		}
@@ -578,7 +578,7 @@ func (h *ImagesHandler) ImageTask(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, buildImageTaskPayload(t))
+	c.JSON(http.StatusOK, buildImageTaskPayload(t, c))
 }
 
 // ImageTaskCompat GET /v1/tasks/:id。
@@ -614,7 +614,7 @@ func (h *ImagesHandler) ImageTaskCompat(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, buildImageTaskCompatPayload(t))
+	c.JSON(http.StatusOK, buildImageTaskCompatPayload(t, c))
 }
 
 // handleChatAsImage 是 /v1/chat/completions 发现 model.type=image 时的转派点。
@@ -769,7 +769,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		if i > 0 {
 			sb.WriteString("\n\n")
 		}
-		sb.WriteString(fmt.Sprintf("![generated](%s)", image.BuildImageProxyURL(taskID, i, image.ImageProxyTTL)))
+		sb.WriteString(fmt.Sprintf("![generated](%s)", imageProxyURLForRequest(c, taskID, i)))
 	}
 	resp := ChatCompletionResponse{
 		ID:      "chatcmpl-" + uuid.NewString(),
@@ -1129,7 +1129,7 @@ func writeAsyncImageSubmit(c *gin.Context, taskID string) {
 	})
 }
 
-func buildImageTaskPayload(t *image.Task) gin.H {
+func buildImageTaskPayload(t *image.Task, contexts ...*gin.Context) gin.H {
 	out := gin.H{
 		"task_id":         t.TaskID,
 		"status":          t.Status,
@@ -1138,13 +1138,13 @@ func buildImageTaskPayload(t *image.Task) gin.H {
 		"finished_at":     nullableUnix(t.FinishedAt),
 		"error":           t.Error,
 		"credit_cost":     t.CreditCost,
-		"data":            imageTaskData(t),
+		"data":            imageTaskData(t, contexts...),
 	}
 	attachImageTaskErrorFields(out, t.Error, t.Status == image.StatusFailed)
 	return out
 }
 
-func buildImageTaskCompatPayload(t *image.Task) gin.H {
+func buildImageTaskCompatPayload(t *image.Task, contexts ...*gin.Context) gin.H {
 	status, progress := imageTaskCompatStatus(t.Status)
 	out := gin.H{
 		"id":         t.TaskID,
@@ -1161,7 +1161,7 @@ func buildImageTaskCompatPayload(t *image.Task) gin.H {
 	if t.Status == image.StatusSuccess {
 		out["result"] = gin.H{
 			"created": t.CreatedAt.Unix(),
-			"data":    imageTaskData(t),
+			"data":    imageTaskData(t, contexts...),
 		}
 		return out
 	}
@@ -1198,18 +1198,78 @@ func attachImageTaskErrorFields(out gin.H, stored string, include bool) {
 	}
 }
 
-func imageTaskData(t *image.Task) []ImageGenData {
+func imageTaskData(t *image.Task, contexts ...*gin.Context) []ImageGenData {
 	urls := image.BuildTaskImageURLs(t, image.ImageProxyTTL)
 	data := make([]ImageGenData, 0, len(urls))
 	fileIDs := t.DecodeFileIDs()
+	var c *gin.Context
+	if len(contexts) > 0 {
+		c = contexts[0]
+	}
 	for i, url := range urls {
-		d := ImageGenData{URL: url}
+		d := ImageGenData{URL: absoluteImageURLForRequest(c, url)}
 		if i < len(fileIDs) {
 			d.FileID = image.PublicFileID(fileIDs[i])
 		}
 		data = append(data, d)
 	}
 	return data
+}
+
+func imageProxyURLForRequest(c *gin.Context, taskID string, idx int) string {
+	return absoluteImageURLForRequest(c, image.BuildImageProxyURL(taskID, idx, image.ImageProxyTTL))
+}
+
+func absoluteImageURLForRequest(c *gin.Context, rawURL string) string {
+	if !strings.HasPrefix(rawURL, "/p/img/") {
+		return rawURL
+	}
+	origin := requestOrigin(c)
+	if origin == "" {
+		return rawURL
+	}
+	return origin + rawURL
+}
+
+func requestOrigin(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	host := firstForwardedValue(c.GetHeader("X-Forwarded-Host"))
+	if host == "" {
+		host = strings.TrimSpace(c.Request.Host)
+	}
+	if !safeHTTPHost(host) {
+		return ""
+	}
+	proto := strings.ToLower(firstForwardedValue(c.GetHeader("X-Forwarded-Proto")))
+	if proto != "http" && proto != "https" {
+		if c.Request.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	return proto + "://" + host
+}
+
+func firstForwardedValue(value string) string {
+	if idx := strings.Index(value, ","); idx >= 0 {
+		value = value[:idx]
+	}
+	return strings.TrimSpace(value)
+}
+
+func safeHTTPHost(host string) bool {
+	if host == "" || strings.ContainsAny(host, "/\\@ \t\r\n") {
+		return false
+	}
+	for _, r := range host {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func imageTaskCompatStatus(status string) (string, int) {
@@ -1562,7 +1622,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
 	for i := range res.SignedURLs {
-		d := ImageGenData{URL: image.BuildImageProxyURL(taskID, i, image.ImageProxyTTL)}
+		d := ImageGenData{URL: imageProxyURLForRequest(c, taskID, i)}
 		if i < len(res.FileIDs) {
 			d.FileID = image.PublicFileID(res.FileIDs[i])
 		}

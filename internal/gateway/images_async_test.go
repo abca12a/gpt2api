@@ -331,6 +331,42 @@ func TestBuildImageTaskCompatPayloadSuccess(t *testing.T) {
 	}
 }
 
+func TestBuildImageTaskCompatPayloadUsesRequestOriginForProxyURLs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	req := httptest.NewRequest(http.MethodGet, "/v1/tasks/img_abc", nil)
+	req.Host = "lmage2.dimilinks.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	c.Request = req
+
+	task := &imagepkg.Task{
+		TaskID:    "img_abc",
+		Status:    imagepkg.StatusSuccess,
+		FileIDs:   []byte(`["file_123"]`),
+		CreatedAt: time.Unix(1777040000, 0),
+	}
+
+	body, err := json.Marshal(buildImageTaskCompatPayload(task, c))
+	if err != nil {
+		t.Fatalf("marshal compat payload: %v", err)
+	}
+
+	var got struct {
+		Result struct {
+			Data []ImageGenData `json:"data"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal compat payload: %v", err)
+	}
+	if len(got.Result.Data) != 1 {
+		t.Fatalf("result data len = %d, want 1", len(got.Result.Data))
+	}
+	if !strings.HasPrefix(got.Result.Data[0].URL, "https://lmage2.dimilinks.com/p/img/img_abc/0") {
+		t.Fatalf("url = %q, want absolute image pool URL", got.Result.Data[0].URL)
+	}
+}
+
 func TestBuildImageTaskCompatPayloadFallsBackToDirectResultURL(t *testing.T) {
 	task := &imagepkg.Task{
 		TaskID:     "img_channel",
