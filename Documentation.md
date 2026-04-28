@@ -81,6 +81,7 @@
 
 ## 最近变更
 
+- 2026-04-28：`fix(image): align apimart reference image protocol` 已部署到当前号池。部署路径为：在构建机 `43.152.240.30` 的 `/home/ubuntu/gpt2api-build-6d119d5` 运行 `bash deploy/build-local.sh` 产出 `deploy/bin/gpt2api`、`deploy/bin/goose` 和 `web/dist/`，再回传到当前仓库后执行 `docker compose -f deploy/docker-compose.yml build server && docker compose -f deploy/docker-compose.yml up -d server`。部署后 `gpt2api-server` 于 `2026-04-28 16:07:03 +0800` 重启，容器健康状态为 `healthy`，容器内 `http://127.0.0.1:8080/healthz`、容器内到 `http://cli-proxy-api:8317/healthz` 以及本机 `https://127.0.0.1/healthz` 均返回 `ok`。
 - 2026-04-28：已对齐 APIMart `gpt-image-2` 官方文档的图生图协议。当前 `apimart.ai` 渠道在存在参考图时不再走通用 OpenAI 兼容的 `/v1/images/edits`，而是改走 `/v1/images/generations` 并发送 `image_urls[]`；同时 `openai` 适配器开始读取 `upstream_channels.extra` 中的 `official_fallback` 布尔配置并透传给 APIMart。已补适配器单测覆盖“参考图走 generations + image_urls”和“official_fallback 透传”。
 - 2026-04-28：已修复异步图片渠道成功任务在 `file_ids=null` 且 `result_urls` 为 `data:image/...;base64` 时，后台“生成记录”详情和 `/v1/tasks/{id}` 直接返回多 MB JSON 的问题。当前逻辑会把这类内联图片也改走本站 `/p/img/...` 代理，由代理按需解码并返回图片字节；这样不会再把整张图 base64 直接回给前端。排查时已确认这不是整机负载问题：当时主机负载不高，但最近任务中大量成功任务的 `result_urls` 长度在 3MB~14MB，足以触发管理后台 30 秒 axios 超时。修复已在当前号池 `gpt2api-server` 部署。
 - 2026-04-28：已把 `apimart(channel_id=2)` 补上映射 `gpt-image-2 -> gpt-image-2 / modality=image`，并在当前号池部署“APIMart 异步任务 + 比例尺寸/分辨率保留”修复。真实烟测时短暂停掉 `cli-proxy-api`，日志出现 `channel_id=1 codex-cli-proxy-image ... no such host` 后，同一任务 `img_de94e2474a8b4a21ac64fe13` 最终 `succeeded`，结果图来自 `upload.apimart.ai`，证明链路已按“Codex 失败 -> APIMart -> 内置 free runner”顺序工作。
