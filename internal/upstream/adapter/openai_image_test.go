@@ -129,6 +129,72 @@ func TestOpenAIImageGenerateUsesEditsEndpointForReferenceImages(t *testing.T) {
 	}
 }
 
+func TestOpenAIImageGenerateUsesAPIMartGenerationsForReferenceImages(t *testing.T) {
+	var (
+		taskPolls int
+		payload   map[string]any
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/apimart.ai/v1/images/generations":
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":[{"status":"submitted","task_id":"task_ref_123"}]}`))
+		case "/apimart.ai/v1/tasks/task_ref_123":
+			taskPolls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":{"status":"completed","result":{"images":[{"url":["https://example.test/apimart-ref.png"]}]}}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	a := NewOpenAI(Params{
+		BaseURL: srv.URL + "/apimart.ai",
+		APIKey:  "test-key",
+		Extra:   `{"official_fallback":true}`,
+	})
+	result, err := a.ImageGenerate(context.Background(), "gpt-image-2", &ImageRequest{
+		Prompt:      "edit",
+		N:           1,
+		Size:        "1024x1024",
+		AspectRatio: "1:1",
+		Resolution:  "1k",
+		Images:      []string{"data:image/png;base64,aaa", "https://example.test/ref.jpg"},
+	})
+	if err != nil {
+		t.Fatalf("ImageGenerate: %v", err)
+	}
+	if result == nil || len(result.URLs) != 1 || result.URLs[0] != "https://example.test/apimart-ref.png" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if taskPolls != 1 {
+		t.Fatalf("task polls = %d, want 1", taskPolls)
+	}
+	if payload["size"] != "1:1" {
+		t.Fatalf("payload size = %#v, want 1:1", payload["size"])
+	}
+	if payload["resolution"] != "1k" {
+		t.Fatalf("payload resolution = %#v, want 1k", payload["resolution"])
+	}
+	if payload["official_fallback"] != true {
+		t.Fatalf("payload official_fallback = %#v, want true", payload["official_fallback"])
+	}
+	if _, ok := payload["images"]; ok {
+		t.Fatalf("payload should not contain images for apimart reference mode: %#v", payload)
+	}
+	imageURLs, ok := payload["image_urls"].([]any)
+	if !ok || len(imageURLs) != 2 {
+		t.Fatalf("image_urls = %#v, want 2 entries", payload["image_urls"])
+	}
+	if imageURLs[0] != "data:image/png;base64,aaa" || imageURLs[1] != "https://example.test/ref.jpg" {
+		t.Fatalf("unexpected image_urls: %#v", imageURLs)
+	}
+}
+
 func TestOpenAIImageGenerateClassifiesContentPolicyViolation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

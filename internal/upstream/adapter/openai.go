@@ -20,9 +20,10 @@ import (
 // kimi 兼容端点等)都遵循 OpenAI 接口规范,差别只在 BaseURL 和 APIKey。
 // 因此这个适配器同时适用:BaseURL 允许带或不带 /v1 后缀,我们做一次规整。
 type openaiAdapter struct {
-	baseURL string
-	apiKey  string
-	client  *http.Client
+	baseURL                 string
+	apiKey                  string
+	client                  *http.Client
+	apimartOfficialFallback *bool
 }
 
 // NewOpenAI 构造一个 OpenAI 兼容适配器。
@@ -35,10 +36,17 @@ func NewOpenAI(p Params) *openaiAdapter {
 	if timeout <= 0 {
 		timeout = 120 * time.Second
 	}
+	var extra struct {
+		OfficialFallback *bool `json:"official_fallback"`
+	}
+	if strings.TrimSpace(p.Extra) != "" {
+		_ = json.Unmarshal([]byte(p.Extra), &extra)
+	}
 	return &openaiAdapter{
-		baseURL: base,
-		apiKey:  p.APIKey,
-		client:  &http.Client{Timeout: timeout},
+		baseURL:                 base,
+		apiKey:                  p.APIKey,
+		client:                  &http.Client{Timeout: timeout},
+		apimartOfficialFallback: extra.OfficialFallback,
 	}
 }
 
@@ -208,25 +216,40 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 		"n":      n,
 		"size":   size,
 	}
-	if isAPIMartImageEndpoint(a.baseURL) {
+	isAPIMart := isAPIMartImageEndpoint(a.baseURL)
+	if isAPIMart {
 		if ratio := strings.TrimSpace(req.AspectRatio); ratio != "" {
 			payload["size"] = ratio
 		}
 		if resolution := normalizeAPIMartResolution(req.Resolution); resolution != "" {
 			payload["resolution"] = resolution
 		}
+		if a.apimartOfficialFallback != nil {
+			payload["official_fallback"] = *a.apimartOfficialFallback
+		}
 	}
 	path := "/images/generations"
 	if len(req.Images) > 0 {
-		path = "/images/edits"
-		images := make([]map[string]string, 0, len(req.Images))
-		for _, imageURL := range req.Images {
-			if strings.TrimSpace(imageURL) == "" {
-				continue
+		if isAPIMart {
+			imageURLs := make([]string, 0, len(req.Images))
+			for _, imageURL := range req.Images {
+				if strings.TrimSpace(imageURL) == "" {
+					continue
+				}
+				imageURLs = append(imageURLs, imageURL)
 			}
-			images = append(images, map[string]string{"image_url": imageURL})
+			payload["image_urls"] = imageURLs
+		} else {
+			path = "/images/edits"
+			images := make([]map[string]string, 0, len(req.Images))
+			for _, imageURL := range req.Images {
+				if strings.TrimSpace(imageURL) == "" {
+					continue
+				}
+				images = append(images, map[string]string{"image_url": imageURL})
+			}
+			payload["images"] = images
 		}
-		payload["images"] = images
 	}
 	if req.Quality != "" {
 		payload["quality"] = req.Quality

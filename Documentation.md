@@ -28,6 +28,8 @@
 - 下游公网入口始终是 `https://lmage2.dimilinks.com/v1`；下游不要直接调用 `cliproxyapi` 公网域名或浏览器直连号池内部接口。
 - 生产 `gpt-image-2` 优先走数据库中的外置 image channel：`codex-cli-proxy-image -> http://cli-proxy-api:8317`，映射为 `gpt-image-2 -> gpt-image-2 / modality=image`。
 - 外置 OpenAI 兼容图片渠道若返回 APIMart 异步任务格式 `{code:200,data:[{status:"submitted",task_id}]}`，当前适配器会自动轮询 `/v1/tasks/{task_id}` 直到 `completed/failed/cancelled`，因此可把 `apimart` 之类的异步 OpenAI 兼容图片渠道接在 Codex route 之后做第二跳兜底。
+- APIMart `gpt-image-2` 的图生图要按其文档走 `POST /v1/images/generations + image_urls[]`，不要沿用通用 OpenAI 兼容的 `POST /v1/images/edits + images[{image_url}]`；当前适配器已对 `apimart.ai` 基于域名做该特判。
+- APIMart 渠道若需要启用它自身的官方兜底，可在 `upstream_channels.extra` 写 JSON `{"official_fallback":true}`；当前 `openai` 适配器会把该字段原样透传给 APIMart 图片请求。
 - 走外置图片渠道时，会同时保留原始比例尺寸 `size=1:1/16:9/...` 与 `resolution=1k/2k/4k` 给 APIMart 这类比例协议上游；Codex/native 渠道仍可继续吃转换后的像素尺寸，不再因为第二跳协议不同而把 `1:1` 强制压成 `1024x1024`。
 - `gpt2api-server` 与 `cli-proxy-api` 必须同在 Docker 网络 `deploy_default`；容器内 `cli-proxy-api` DNS 和 `/healthz` 要可用。
 - 外置 Codex image channel 使用 `/home/ubuntu/CLIProxyAPI/auths/codex-*.json` 文件池，由 `cli-proxy-api` 独立调度；`gpt2api-server` 只挂载该目录和日志用于路由、展示与统计，不直接把数据库 `oai_accounts` 当作外置 Codex 调度池。
@@ -79,6 +81,7 @@
 
 ## 最近变更
 
+- 2026-04-28：已对齐 APIMart `gpt-image-2` 官方文档的图生图协议。当前 `apimart.ai` 渠道在存在参考图时不再走通用 OpenAI 兼容的 `/v1/images/edits`，而是改走 `/v1/images/generations` 并发送 `image_urls[]`；同时 `openai` 适配器开始读取 `upstream_channels.extra` 中的 `official_fallback` 布尔配置并透传给 APIMart。已补适配器单测覆盖“参考图走 generations + image_urls”和“official_fallback 透传”。
 - 2026-04-28：已修复异步图片渠道成功任务在 `file_ids=null` 且 `result_urls` 为 `data:image/...;base64` 时，后台“生成记录”详情和 `/v1/tasks/{id}` 直接返回多 MB JSON 的问题。当前逻辑会把这类内联图片也改走本站 `/p/img/...` 代理，由代理按需解码并返回图片字节；这样不会再把整张图 base64 直接回给前端。排查时已确认这不是整机负载问题：当时主机负载不高，但最近任务中大量成功任务的 `result_urls` 长度在 3MB~14MB，足以触发管理后台 30 秒 axios 超时。修复已在当前号池 `gpt2api-server` 部署。
 - 2026-04-28：已把 `apimart(channel_id=2)` 补上映射 `gpt-image-2 -> gpt-image-2 / modality=image`，并在当前号池部署“APIMart 异步任务 + 比例尺寸/分辨率保留”修复。真实烟测时短暂停掉 `cli-proxy-api`，日志出现 `channel_id=1 codex-cli-proxy-image ... no such host` 后，同一任务 `img_de94e2474a8b4a21ac64fe13` 最终 `succeeded`，结果图来自 `upload.apimart.ai`，证明链路已按“Codex 失败 -> APIMart -> 内置 free runner”顺序工作。
 - 2026-04-28：已补齐构建机 `43.152.240.30` 的基础构建环境。`ubuntu` 用户下安装了系统级 `nodejs`/`npm`，并把 `/usr/local/go/bin` 提前注入到 `~/.bashrc` 的非交互分支与 `~/.profile`，保证 `ssh 构建机 'cmd'` 这类远程非交互执行也能直接拿到 `go`。随后在构建机同步当前工作树并完整跑通 `bash deploy/build-local.sh`，成功产出 `deploy/bin/gpt2api`、`deploy/bin/goose` 和 `web/dist/index.html`；当前只剩 Sass legacy JS API 与 Vite 大 chunk 警告，不影响构建成功。
