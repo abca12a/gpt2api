@@ -52,3 +52,25 @@ func TestBuildTaskImageURLsFallsBackToLegacyResultURLs(t *testing.T) {
 		t.Fatalf("expected legacy upstream fallback, got %#v", urls)
 	}
 }
+
+func TestBuildTaskImageURLsProxiesInlineDataURLsWithoutFileIDs(t *testing.T) {
+	resultURLs, err := json.Marshal([]string{"data:image/png;base64,aGVsbG8="})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &Task{
+		TaskID:     "inline-task",
+		ResultURLs: resultURLs,
+	}
+
+	urls := BuildTaskImageURLs(task, time.Hour)
+	if len(urls) != 1 {
+		t.Fatalf("expected 1 url, got %d", len(urls))
+	}
+	if !strings.HasPrefix(urls[0], "/p/img/inline-task/0") {
+		t.Fatalf("inline data url should use proxy, got %q", urls[0])
+	}
+	if strings.Contains(urls[0], "data:image") {
+		t.Fatalf("inline data url leaked to client: %q", urls[0])
+	}
+}

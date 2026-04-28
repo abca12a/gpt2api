@@ -44,7 +44,9 @@ func BuildImageProxyURL(taskID string, idx int, ttl time.Duration) string {
 // BuildTaskImageURLs 返回任务对前端可展示的图片 URL。
 // 有 file_ids 的任务统一返回本站签名代理 URL,避免后台/个人历史页直接暴露
 // 上游短期直链导致刷新后 403、过期或缺少鉴权而加载失败。
-// 极老任务若没有 file_ids,则保留 result_urls 作为兼容兜底。
+// file_ids 缺失时:
+//   - 普通 http(s) 结果继续保留原样作为兼容兜底；
+//   - inline data URL 也改走本站代理,避免把大块 base64 直接塞给前端。
 func BuildTaskImageURLs(t *Task, ttl time.Duration) []string {
 	if t == nil {
 		return nil
@@ -61,7 +63,13 @@ func BuildTaskImageURLs(t *Task, ttl time.Duration) []string {
 			out = append(out, BuildImageProxyURL(t.TaskID, i, ttl))
 			continue
 		}
-		out = append(out, urls[i])
+		if i < len(urls) && IsInlineImageDataURL(urls[i]) {
+			out = append(out, BuildImageProxyURL(t.TaskID, i, ttl))
+			continue
+		}
+		if i < len(urls) {
+			out = append(out, urls[i])
+		}
 	}
 	return out
 }

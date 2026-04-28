@@ -389,7 +389,7 @@ func TestBuildImageTaskCompatPayloadUsesRequestOriginForProxyURLs(t *testing.T) 
 	}
 }
 
-func TestBuildImageTaskCompatPayloadFallsBackToDirectResultURL(t *testing.T) {
+func TestBuildImageTaskCompatPayloadProxiesInlineResultURL(t *testing.T) {
 	task := &imagepkg.Task{
 		TaskID:     "img_channel",
 		Status:     imagepkg.StatusSuccess,
@@ -410,8 +410,14 @@ func TestBuildImageTaskCompatPayloadFallsBackToDirectResultURL(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("unmarshal compat payload: %v", err)
 	}
-	if len(got.Result.Data) != 1 || got.Result.Data[0].URL != "data:image/png;base64,abc" {
-		t.Fatalf("direct result URL not preserved: %#v", got.Result.Data)
+	if len(got.Result.Data) != 1 {
+		t.Fatalf("result data len = %d, want 1", len(got.Result.Data))
+	}
+	if !strings.HasPrefix(got.Result.Data[0].URL, "/p/img/img_channel/0") {
+		t.Fatalf("inline result URL should use proxy, got %#v", got.Result.Data)
+	}
+	if strings.Contains(got.Result.Data[0].URL, "data:image") {
+		t.Fatalf("inline result URL leaked to client: %#v", got.Result.Data)
 	}
 }
 

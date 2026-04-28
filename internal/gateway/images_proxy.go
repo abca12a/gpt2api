@@ -85,55 +85,80 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
+
+	var (
+		body []byte
+		ct   string
+	)
+
 	fids := t.DecodeFileIDs()
-	if idx >= len(fids) {
-		c.AbortWithStatus(http.StatusNotFound)
-		return
-	}
-	accountID, conversationID, ref := image.DecodeImageRefMeta(fids[idx])
-	ref = image.StripPreviewRef(ref) // 可能是 "sed:xxxx" 或 "xxxx"
-	if accountID == 0 {
-		accountID = t.AccountID
-	}
-	if conversationID == "" {
-		conversationID = t.ConversationID
-	}
-	if accountID == 0 || conversationID == "" || h.ImageAccResolver == nil {
-		c.AbortWithStatus(http.StatusServiceUnavailable)
-		return
-	}
+	if idx < len(fids) {
+		accountID, conversationID, ref := image.DecodeImageRefMeta(fids[idx])
+		ref = image.StripPreviewRef(ref) // 可能是 "sed:xxxx" 或 "xxxx"
+		if accountID == 0 {
+			accountID = t.AccountID
+		}
+		if conversationID == "" {
+			conversationID = t.ConversationID
+		}
+		if accountID == 0 || conversationID == "" || h.ImageAccResolver == nil {
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+		defer cancel()
 
-	at, deviceID, cookies, err := h.ImageAccResolver.AuthToken(ctx, accountID)
-	if err != nil {
-		logger.L().Warn("image proxy resolve account",
-			zap.Error(err), zap.Uint64("account_id", accountID))
-		c.AbortWithStatus(http.StatusBadGateway)
-		return
-	}
-	proxyURL := h.ImageAccResolver.ProxyURL(ctx, accountID)
+		at, deviceID, cookies, err := h.ImageAccResolver.AuthToken(ctx, accountID)
+		if err != nil {
+			logger.L().Warn("image proxy resolve account",
+				zap.Error(err), zap.Uint64("account_id", accountID))
+			c.AbortWithStatus(http.StatusBadGateway)
+			return
+		}
+		proxyURL := h.ImageAccResolver.ProxyURL(ctx, accountID)
 
-	cli, err := chatgpt.New(chatgpt.Options{
-		AuthToken: at,
-		DeviceID:  deviceID,
-		ProxyURL:  proxyURL,
-		Cookies:   cookies,
-		Timeout:   h.upstreamTimeout(),
-	})
-	if err != nil {
-		logger.L().Warn("image proxy build client", zap.Error(err))
-		c.AbortWithStatus(http.StatusBadGateway)
-		return
-	}
+		cli, err := chatgpt.New(chatgpt.Options{
+			AuthToken: at,
+			DeviceID:  deviceID,
+			ProxyURL:  proxyURL,
+			Cookies:   cookies,
+			Timeout:   h.upstreamTimeout(),
+		})
+		if err != nil {
+			logger.L().Warn("image proxy build client", zap.Error(err))
+			c.AbortWithStatus(http.StatusBadGateway)
+			return
+		}
 
-	signedURL, err := cli.ImageDownloadURL(ctx, conversationID, ref)
-	if err != nil {
-		logger.L().Warn("image proxy download_url",
-			zap.Error(err), zap.String("task_id", taskID), zap.String("ref", ref))
-		c.AbortWithStatus(http.StatusBadGateway)
-		return
+		signedURL, err := cli.ImageDownloadURL(ctx, conversationID, ref)
+		if err != nil {
+			logger.L().Warn("image proxy download_url",
+				zap.Error(err), zap.String("task_id", taskID), zap.String("ref", ref))
+			c.AbortWithStatus(http.StatusBadGateway)
+			return
+		}
+
+		body, ct, err = cli.FetchImage(ctx, signedURL, 16*1024*1024)
+		if err != nil {
+			logger.L().Warn("image proxy fetch",
+				zap.Error(err), zap.String("task_id", taskID))
+			c.AbortWithStatus(http.StatusBadGateway)
+			return
+		}
+	} else {
+		urls := t.DecodeResultURLs()
+		if idx >= len(urls) || !image.IsInlineImageDataURL(urls[idx]) {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		body, ct, err = image.DecodeInlineImageDataURL(urls[idx])
+		if err != nil {
+			logger.L().Warn("image proxy decode inline result",
+				zap.Error(err), zap.String("task_id", taskID), zap.Int("idx", idx))
+			c.AbortWithStatus(http.StatusBadGateway)
+			return
+		}
 	}
 
 	// 按需超分:若 task 上打了 upscale 标记,先走进程内 LRU,命中则直接返回。
@@ -150,13 +175,6 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 		}
 	}
 
-	body, ct, err := cli.FetchImage(ctx, signedURL, 16*1024*1024)
-	if err != nil {
-		logger.L().Warn("image proxy fetch",
-			zap.Error(err), zap.String("task_id", taskID))
-		c.AbortWithStatus(http.StatusBadGateway)
-		return
-	}
 	if ct == "" {
 		ct = "image/png"
 	}
