@@ -67,6 +67,7 @@
 - `/v1/tasks/batch` 当前不建议用于 `gpt-image-2`，因为号池未提供批量任务查询接口。
 - 下游 `new-api` token 必须命中含 `gpt-image-2` 渠道的分组；错误里出现 `under group default` 时，请求通常还没进入 gpt2api。
 - 下游用量日志中的 `LogTypeConsume / quota=0 / use_time=0 / 操作 textGenerate` 只是异步提交记录，不代表任务成功；最终状态看 `tasks.status/fail_reason`、错误日志和号池 `image_tasks.error`。
+- 下游 `new-api` 的 `Request ID` 不会原样透传成号池 `gpt2api` 的 `request_id`；跨系统排查时，优先用下游公开 `task_id` 在 `tasks.private_data.upstream_task_id` 映射到号池 `img_*` 任务号，或按提交时间窗口对齐两边日志。
 - 下游前端 `/console/logs` 已新增状态说明：图片失败日志显示“图像生成失败”和后端错误原因，异步提交日志显示“图像生成已提交”。
 - 2026-04-28 进一步确认：下游 `new-api` 的 `default` 分组里，`gpt-image-2` 当前会优先选 `channels.id=18 / 图片上游apimart / https://api.apimart.ai`，因为它的 ability/channel priority 高于 `channels.id=20 / 自有账号 / https://lmage2.dimilinks.com`。因此登录态 `POST /pg/images/generations?async=true` 若命中 `group=default`，请求会直接走下游 APIMart，不会进入当前号池；若要先经过号池，需在下游调整 `gpt-image-2` 的分组归属或优先级。
 
