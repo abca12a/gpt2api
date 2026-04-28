@@ -27,6 +27,8 @@
 
 - 下游公网入口始终是 `https://lmage2.dimilinks.com/v1`；下游不要直接调用 `cliproxyapi` 公网域名或浏览器直连号池内部接口。
 - 生产 `gpt-image-2` 优先走数据库中的外置 image channel：`codex-cli-proxy-image -> http://cli-proxy-api:8317`，映射为 `gpt-image-2 -> gpt-image-2 / modality=image`。
+- 外置 OpenAI 兼容图片渠道若返回 APIMart 异步任务格式 `{code:200,data:[{status:"submitted",task_id}]}`，当前适配器会自动轮询 `/v1/tasks/{task_id}` 直到 `completed/failed/cancelled`，因此可把 `apimart` 之类的异步 OpenAI 兼容图片渠道接在 Codex route 之后做第二跳兜底。
+- 走外置图片渠道时，会同时保留原始比例尺寸 `size=1:1/16:9/...` 与 `resolution=1k/2k/4k` 给 APIMart 这类比例协议上游；Codex/native 渠道仍可继续吃转换后的像素尺寸，不再因为第二跳协议不同而把 `1:1` 强制压成 `1024x1024`。
 - `gpt2api-server` 与 `cli-proxy-api` 必须同在 Docker 网络 `deploy_default`；容器内 `cli-proxy-api` DNS 和 `/healthz` 要可用。
 - 外置 Codex image channel 使用 `/home/ubuntu/CLIProxyAPI/auths/codex-*.json` 文件池，由 `cli-proxy-api` 独立调度；`gpt2api-server` 只挂载该目录和日志用于路由、展示与统计，不直接把数据库 `oai_accounts` 当作外置 Codex 调度池。
 - 外置 Codex auth 文件可以与数据库账号邮箱重合，但两边不是同一个队列：外置池消耗 Codex usage/credits，内置 ChatGPT Web Runner 消耗 Web 图片额度。
@@ -77,6 +79,10 @@
 
 ## 最近变更
 
+- 2026-04-28：已把 `apimart(channel_id=2)` 补上映射 `gpt-image-2 -> gpt-image-2 / modality=image`，并在当前号池部署“APIMart 异步任务 + 比例尺寸/分辨率保留”修复。真实烟测时短暂停掉 `cli-proxy-api`，日志出现 `channel_id=1 codex-cli-proxy-image ... no such host` 后，同一任务 `img_de94e2474a8b4a21ac64fe13` 最终 `succeeded`，结果图来自 `upload.apimart.ai`，证明链路已按“Codex 失败 -> APIMart -> 内置 free runner”顺序工作。
+- 2026-04-28：已补齐构建机 `43.152.240.30` 的基础构建环境。`ubuntu` 用户下安装了系统级 `nodejs`/`npm`，并把 `/usr/local/go/bin` 提前注入到 `~/.bashrc` 的非交互分支与 `~/.profile`，保证 `ssh 构建机 'cmd'` 这类远程非交互执行也能直接拿到 `go`。随后在构建机同步当前工作树并完整跑通 `bash deploy/build-local.sh`，成功产出 `deploy/bin/gpt2api`、`deploy/bin/goose` 和 `web/dist/index.html`；当前只剩 Sass legacy JS API 与 Vite 大 chunk 警告，不影响构建成功。
+- 2026-04-28：已将当前 Codex 环境公钥对应的私钥 `~/.ssh/cliproxyapi_212_50_232_214_ed25519` 加入构建机 `43.152.240.30` 上 `ubuntu` 用户的 `~/.ssh/authorized_keys`，并完成免密 SSH 验证。后续涉及老前端或画布构建时，可直接从当前号池机器进入构建机，不再依赖临时密码登录。
+- 2026-04-28：为 OpenAI 兼容图片适配器补充 APIMart 异步任务兼容。`/v1/images/generations` 若返回 `task_id`，服务端会自动轮询 `/v1/tasks/{id}` 并提取 `result.images[].url`；这样数据库里的 `apimart` 渠道可以作为 `gpt-image-2` 的第二跳外置兜底，而不是只能直落内置 free runner。
 - 2026-04-28：量化最近 24 小时 `gpt2api-server` 日志，外置 Codex 图片渠道触发 `fallback to free account runner` 约 68 次，而异步生图提交约 182 次；主要触发源不是参数错误，而是 `cli-proxy-api:8317` 在旧的 90 秒/2 分钟窗口内大量 `context deadline exceeded`。已把外置渠道异步等待策略改为“每次独立限时后再重试一次”：无参考图单次 2 分钟、总窗口 4 分 30 秒；有参考图单次 3 分钟、总窗口 6 分 30 秒，避免第一次超时直接耗尽上下文导致会员链路过早切 Free。
 - 2026-04-28：上述“减少 Codex 会员链路过早切 Free”修复已在当前号池部署。执行 `bash deploy/build-local.sh`、`docker compose -f deploy/docker-compose.yml build server`、`docker compose -f deploy/docker-compose.yml up -d server` 后，`gpt2api-server` 容器重新启动并恢复 `healthy`；容器内 `http://127.0.0.1:8080/healthz` 与 `http://cli-proxy-api:8317/healthz` 均返回 ok。本次重启有 1 个运行中图片任务被标记为 interrupted。
 - 2026-04-27：手工移植元项目 2026-04-26 的关键修复：图生图 SSE 结果会剔除参考图 file_id；用量日志成功图片按真实产出张数写入并对历史 image_count=0 兜底；账号额度探测支持 max_value/cap/total/limit 和“今日已用+剩余”估算；UploadFile 创建文件步骤加入瞬时错误重试；在线体验参考图限制对齐后端 4 张/20MB。

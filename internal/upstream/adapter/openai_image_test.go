@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -164,5 +165,99 @@ func TestOpenAIImageGenerateClassifiesSafetySystemMessage(t *testing.T) {
 	}
 	if !IsContentModerationError(err) {
 		t.Fatalf("expected safety-system message to classify as content moderation, got %v", err)
+	}
+}
+
+func TestOpenAIImageGeneratePollsAPIMartAsyncTask(t *testing.T) {
+	var taskPolls int
+	var payload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer test-key" {
+			t.Fatalf("authorization = %q", auth)
+		}
+		switch r.URL.Path {
+		case "/apimart.ai/v1/images/generations":
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":[{"status":"submitted","task_id":"task_123"}]}`))
+		case "/apimart.ai/v1/tasks/task_123":
+			taskPolls++
+			if got := r.URL.Query().Get("language"); got != "en" {
+				t.Fatalf("language query = %q, want en", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if taskPolls == 1 {
+				_, _ = w.Write([]byte(`{"code":200,"data":{"status":"processing","progress":40}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":200,"data":{"status":"completed","result":{"images":[{"url":["https://example.test/apimart.png"]}]}}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	a := NewOpenAI(Params{BaseURL: srv.URL + "/apimart.ai", APIKey: "test-key"})
+	result, err := a.ImageGenerate(context.Background(), "gpt-image-2", &ImageRequest{
+		Prompt:      "draw",
+		N:           1,
+		Size:        "1536x864",
+		AspectRatio: "16:9",
+		Resolution:  "2k",
+	})
+	if err != nil {
+		t.Fatalf("ImageGenerate: %v", err)
+	}
+	if result == nil || len(result.URLs) != 1 || result.URLs[0] != "https://example.test/apimart.png" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if taskPolls != 2 {
+		t.Fatalf("task polls = %d, want 2", taskPolls)
+	}
+	if payload["size"] != "16:9" {
+		t.Fatalf("payload size = %#v, want 16:9", payload["size"])
+	}
+	if payload["resolution"] != "2k" {
+		t.Fatalf("payload resolution = %#v, want 2k", payload["resolution"])
+	}
+}
+
+func TestOpenAIImageGenerateReturnsTaskFailureDetails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/images/generations":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":[{"status":"submitted","task_id":"task_456"}]}`))
+		case "/v1/tasks/task_456":
+			if got := r.URL.Query(); got.Get("language") != "en" {
+				t.Fatalf("unexpected query: %s", got.Encode())
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":{"status":"failed","error":{"code":"content_policy_violation","type":"server_error","message":"sensitive content detected"}}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	a := NewOpenAI(Params{BaseURL: srv.URL, APIKey: "test-key"})
+	_, err := a.ImageGenerate(context.Background(), "gpt-image-2", &ImageRequest{Prompt: "draw"})
+	if err == nil {
+		t.Fatal("expected task failure error")
+	}
+	var upstreamErr *UpstreamHTTPError
+	if !strings.Contains(err.Error(), "content_policy_violation") {
+		t.Fatalf("error should preserve task code, got %v", err)
+	}
+	if !IsContentModerationError(err) {
+		t.Fatalf("expected task failure to classify as content moderation, got %v", err)
+	}
+	if !errors.As(err, &upstreamErr) {
+		t.Fatalf("expected UpstreamHTTPError, got %T", err)
+	}
+	if upstreamErr.Status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", upstreamErr.Status)
 	}
 }

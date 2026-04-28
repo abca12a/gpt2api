@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -207,6 +208,14 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 		"n":      n,
 		"size":   size,
 	}
+	if isAPIMartImageEndpoint(a.baseURL) {
+		if ratio := strings.TrimSpace(req.AspectRatio); ratio != "" {
+			payload["size"] = ratio
+		}
+		if resolution := normalizeAPIMartResolution(req.Resolution); resolution != "" {
+			payload["resolution"] = resolution
+		}
+	}
 	path := "/images/generations"
 	if len(req.Images) > 0 {
 		path = "/images/edits"
@@ -257,13 +266,20 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 	if resp.StatusCode >= 400 {
 		return nil, upstreamErr(resp)
 	}
+	bodyData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("openai: image read: %w", err)
+	}
+	if taskID := parseAPIMartImageTaskID(bodyData); taskID != "" {
+		return a.pollAPIMartImageTask(ctx, taskID)
+	}
 	var obj struct {
 		Data []struct {
 			URL string `json:"url"`
 			B64 string `json:"b64_json"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&obj); err != nil {
+	if err := json.Unmarshal(bodyData, &obj); err != nil {
 		return nil, fmt.Errorf("openai: image decode: %w", err)
 	}
 	r := &ImageResult{}
@@ -279,6 +295,205 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 		return nil, errors.New("openai: empty image response")
 	}
 	return r, nil
+}
+
+func isAPIMartImageEndpoint(baseURL string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(baseURL)), "apimart.ai")
+}
+
+func normalizeAPIMartResolution(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.ReplaceAll(normalized, " ", "")
+	normalized = strings.ReplaceAll(normalized, "_", "")
+	normalized = strings.ReplaceAll(normalized, "-", "")
+	switch normalized {
+	case "1k", "2k", "4k":
+		return normalized
+	default:
+		return ""
+	}
+}
+
+func parseAPIMartImageTaskID(body []byte) string {
+	var payload struct {
+		Code any `json:"code"`
+		Data []struct {
+			Status string `json:"status"`
+			TaskID string `json:"task_id"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(body, &payload) != nil || len(payload.Data) == 0 {
+		return ""
+	}
+	if valueString(payload.Code) != "200" {
+		return ""
+	}
+	first := payload.Data[0]
+	status := strings.ToLower(strings.TrimSpace(first.Status))
+	if first.TaskID == "" || (status != "" && status != "submitted") {
+		return ""
+	}
+	return first.TaskID
+}
+
+func (a *openaiAdapter) pollAPIMartImageTask(ctx context.Context, taskID string) (*ImageResult, error) {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		result, done, err := a.fetchAPIMartImageTask(ctx, taskID)
+		if err != nil {
+			return nil, err
+		}
+		if done {
+			return result, nil
+		}
+		timer.Reset(2 * time.Second)
+	}
+}
+
+func (a *openaiAdapter) fetchAPIMartImageTask(ctx context.Context, taskID string) (*ImageResult, bool, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		a.endpoint("/tasks/"+url.PathEscape(taskID)+"?language=en"), nil)
+	if err != nil {
+		return nil, false, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return nil, false, fmt.Errorf("openai: task poll request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, false, upstreamErr(resp)
+	}
+	bodyData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, false, fmt.Errorf("openai: task poll read: %w", err)
+	}
+	var payload struct {
+		Code any `json:"code"`
+		Data struct {
+			Status       string `json:"status"`
+			Message      string `json:"message"`
+			ErrorMessage string `json:"error_message"`
+			Error        struct {
+				Code    any    `json:"code"`
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+			Result struct {
+				Images []struct {
+					URL any `json:"url"`
+				} `json:"images"`
+			} `json:"result"`
+		} `json:"data"`
+		Error struct {
+			Code    any    `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(bodyData, &payload); err != nil {
+		return nil, false, fmt.Errorf("openai: task poll decode: %w", err)
+	}
+	status := strings.ToLower(strings.TrimSpace(payload.Data.Status))
+	switch status {
+	case "pending", "processing", "":
+		return nil, false, nil
+	case "completed":
+		result := &ImageResult{}
+		for _, image := range payload.Data.Result.Images {
+			result.URLs = append(result.URLs, nonEmptyStrings(image.URL)...)
+		}
+		if len(result.URLs) == 0 && len(result.B64s) == 0 {
+			return nil, false, errors.New("openai: empty apimart task result")
+		}
+		return result, true, nil
+	case "failed", "cancelled":
+		return nil, false, apimartTaskError(payload, bodyData)
+	default:
+		return nil, false, fmt.Errorf("openai: unexpected apimart task status %q", payload.Data.Status)
+	}
+}
+
+func apimartTaskError(payload struct {
+	Code any `json:"code"`
+	Data struct {
+		Status       string `json:"status"`
+		Message      string `json:"message"`
+		ErrorMessage string `json:"error_message"`
+		Error        struct {
+			Code    any    `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Result struct {
+			Images []struct {
+				URL any `json:"url"`
+			} `json:"images"`
+		} `json:"result"`
+	} `json:"data"`
+	Error struct {
+		Code    any    `json:"code"`
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}, body []byte) error {
+	statusCode := http.StatusBadGateway
+	if strings.EqualFold(strings.TrimSpace(payload.Data.Status), "failed") {
+		statusCode = http.StatusInternalServerError
+	}
+	errCode := valueString(payload.Data.Error.Code)
+	if errCode == "" {
+		errCode = valueString(payload.Error.Code)
+	}
+	errType := strings.TrimSpace(payload.Data.Error.Type)
+	if errType == "" {
+		errType = strings.TrimSpace(payload.Error.Type)
+	}
+	message := strings.TrimSpace(payload.Data.Error.Message)
+	if message == "" {
+		message = strings.TrimSpace(payload.Data.ErrorMessage)
+	}
+	if message == "" {
+		message = strings.TrimSpace(payload.Data.Message)
+	}
+	if message == "" {
+		message = strings.TrimSpace(payload.Error.Message)
+	}
+	if message == "" {
+		message = "apimart task " + strings.TrimSpace(payload.Data.Status)
+	}
+	return &UpstreamHTTPError{
+		Status:  statusCode,
+		Code:    errCode,
+		Type:    errType,
+		Message: message,
+		Body:    strings.TrimSpace(string(body)),
+	}
+}
+
+func nonEmptyStrings(v any) []string {
+	switch x := v.(type) {
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return nil
+		}
+		return []string{x}
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, item := range x {
+			out = append(out, nonEmptyStrings(item)...)
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func supportsImageResponseFormat(model string) bool {

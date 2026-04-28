@@ -55,6 +55,8 @@ type ImageRequest struct {
 	Prompt            string   `json:"prompt"`
 	N                 int      `json:"n,omitempty"`
 	Size              string   `json:"size,omitempty"`
+	AspectRatio       string   `json:"aspect_ratio,omitempty"`
+	Resolution        string   `json:"resolution,omitempty"`
 	Images            []string `json:"images,omitempty"`
 	Quality           string   `json:"quality,omitempty"`
 	Style             string   `json:"style,omitempty"`

@@ -541,6 +541,8 @@ func imageAdapterRequest(m *modelpkg.Model, req *ImageGenRequest, refs []imagepk
 		Prompt:            req.Prompt,
 		N:                 req.N,
 		Size:              req.Size,
+		AspectRatio:       req.AspectRatio,
+		Resolution:        req.Resolution,
 		Images:            referenceImageDataURLs(refs),
 		Quality:           req.Quality,
 		Style:             req.Style,

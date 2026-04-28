@@ -111,6 +111,7 @@ type ImageGenRequest struct {
 	Prompt            string     `json:"prompt"`
 	N                 int        `json:"n"`
 	Size              string     `json:"size"`
+	AspectRatio       string     `json:"-"`
 	Quality           string     `json:"quality,omitempty"`
 	Style             string     `json:"style,omitempty"`
 	ResponseFormat    string     `json:"response_format,omitempty"` // url | b64_json(暂仅支持 url)
@@ -881,6 +882,7 @@ func imageRequestForChannel(req *ImageGenRequest, explicitUpscale string) *Image
 		return nil
 	}
 	out := *req
+	out.AspectRatio = req.Size
 	if size := nativeImageChannelSize(req.Size, imageChannelLongSide(req, explicitUpscale)); size != "" {
 		out.Size = size
 	}
