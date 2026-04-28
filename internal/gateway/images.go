@@ -34,6 +34,11 @@ const maxReferenceImageBytes = 20 * 1024 * 1024
 // 同一次请求最多携带的参考图数量。
 const maxReferenceImages = 4
 
+const (
+	asyncImageNoReferenceTimeout = 8 * time.Minute
+	asyncImageReferenceTimeout   = 8*time.Minute + 30*time.Second
+)
+
 // chatMsg 是 OpenAI chat message 的本地别名,便于 handleChatAsImage 内部表达。
 type chatMsg = chatgpt.ChatMessage
 
@@ -241,14 +246,14 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 func asyncImageTaskTimeout(maxAttempts int, hasReferences bool) time.Duration {
 	attempts, perAttemptTimeout, _, _ := asyncImageRunTuning(maxAttempts, hasReferences)
 	timeout := time.Duration(attempts)*perAttemptTimeout + 30*time.Second
-	if !hasReferences && timeout > 5*time.Minute {
-		return 5 * time.Minute
+	if hasReferences {
+		if timeout != asyncImageReferenceTimeout {
+			return asyncImageReferenceTimeout
+		}
+		return timeout
 	}
-	if hasReferences && timeout < 6*time.Minute {
-		return 6 * time.Minute
-	}
-	if timeout > 15*time.Minute {
-		return 15 * time.Minute
+	if timeout > asyncImageNoReferenceTimeout {
+		return asyncImageNoReferenceTimeout
 	}
 	return timeout
 }
@@ -258,7 +263,10 @@ func asyncImageRunTuning(maxAttempts int, hasReferences bool) (int, time.Duratio
 		maxAttempts = 1
 	}
 	if hasReferences {
-		return maxAttempts, 6 * time.Minute, 300 * time.Second, 30 * time.Second
+		if maxAttempts > 2 {
+			maxAttempts = 2
+		}
+		return maxAttempts, 3 * time.Minute, 90 * time.Second, 15 * time.Second
 	}
 	if maxAttempts < 5 {
 		maxAttempts = 5

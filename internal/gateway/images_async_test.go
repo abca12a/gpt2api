@@ -124,8 +124,8 @@ func TestAsyncImageRunTuningCapsNoReferenceAttempts(t *testing.T) {
 }
 
 func TestAsyncImageTaskTimeoutUsesTunedNoReferenceWindow(t *testing.T) {
-	if got := asyncImageTaskTimeout(0, false); got != 5*time.Minute {
-		t.Fatalf("asyncImageTaskTimeout = %s, want 5m", got)
+	if got := asyncImageTaskTimeout(0, false); got != 8*time.Minute {
+		t.Fatalf("asyncImageTaskTimeout = %s, want 8m", got)
 	}
 }
 
@@ -134,20 +134,20 @@ func TestAsyncImageRunTuningKeepsReferenceRetryBudget(t *testing.T) {
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
 	}
-	if perAttempt != 6*time.Minute {
-		t.Fatalf("perAttempt = %s, want 6m", perAttempt)
+	if perAttempt != 3*time.Minute {
+		t.Fatalf("perAttempt = %s, want 3m", perAttempt)
 	}
-	if pollMaxWait != 300*time.Second {
-		t.Fatalf("pollMaxWait = %s, want 300s", pollMaxWait)
+	if pollMaxWait != 90*time.Second {
+		t.Fatalf("pollMaxWait = %s, want 90s", pollMaxWait)
 	}
-	if dispatchTimeout != 30*time.Second {
-		t.Fatalf("dispatchTimeout = %s, want 30s", dispatchTimeout)
+	if dispatchTimeout != 15*time.Second {
+		t.Fatalf("dispatchTimeout = %s, want 15s", dispatchTimeout)
 	}
 }
 
 func TestAsyncImageTaskTimeoutAllowsTwoReferenceAttempts(t *testing.T) {
-	if got := asyncImageTaskTimeout(2, true); got != 12*time.Minute+30*time.Second {
-		t.Fatalf("asyncImageTaskTimeout = %s, want 12m30s", got)
+	if got := asyncImageTaskTimeout(2, true); got != 8*time.Minute+30*time.Second {
+		t.Fatalf("asyncImageTaskTimeout = %s, want 8m30s", got)
 	}
 }
 

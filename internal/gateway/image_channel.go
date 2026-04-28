@@ -298,14 +298,17 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		if h.DAO != nil {
 			_ = h.DAO.MarkRunning(context.Background(), job.TaskID, 0)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), imageChannelAsyncTimeout(len(job.References) > 0))
-		defer cancel()
+		hasReferences := len(job.References) > 0
+		taskCtx, cancelTask := context.WithTimeout(context.Background(), imageChannelTaskTimeout(hasReferences))
+		defer cancelTask()
+		channelCtx, cancelChannel := context.WithTimeout(taskCtx, imageChannelAsyncTimeout(hasReferences))
+		defer cancelChannel()
 
 		var lastErr error
 		var result *adapter.ImageResult
 		var selected *channel.Route
 		for _, rt := range job.Routes {
-			r, err := imageChannelGenerateWithRetry(ctx, rt, job.Request, job.TaskID, imageChannelAsyncPerAttemptTimeout(len(job.References) > 0), nil)
+			r, err := imageChannelGenerateWithRetry(channelCtx, rt, job.Request, job.TaskID, imageChannelAsyncPerAttemptTimeout(hasReferences), nil)
 			if err != nil {
 				lastErr = err
 				if adapter.IsContentModerationError(err) {
@@ -343,7 +346,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 					zap.String("task_id", job.TaskID),
 					zap.Error(lastErr))
 				fallbackOpt := imageChannelFreeFallbackRunOptions(job)
-				fallbackCtx, cancelFallback := context.WithTimeout(context.Background(), asyncImageTaskTimeout(fallbackOpt.MaxAttempts, len(job.References) > 0))
+				fallbackCtx, cancelFallback := withImageChannelFallbackContext(taskCtx, fallbackOpt.MaxAttempts, hasReferences)
 				fallback := h.Runner.Run(fallbackCtx, fallbackOpt)
 				cancelFallback()
 				rec.AccountID = fallback.AccountID
@@ -757,18 +760,25 @@ func imageChannelFreeFallbackRunOptions(job imageChannelAsyncJob) imagepkg.RunOp
 
 func imageChannelAsyncPerAttemptTimeout(hasReferences bool) time.Duration {
 	if hasReferences {
-		return 3 * time.Minute
+		return 2 * time.Minute
 	}
 	return 2 * time.Minute
 }
 
 func imageChannelAsyncTimeout(hasReferences bool) time.Duration {
 	const maxAttempts = 2
-	timeout := time.Duration(maxAttempts)*imageChannelAsyncPerAttemptTimeout(hasReferences) + 30*time.Second
-	if timeout > 8*time.Minute {
-		return 8 * time.Minute
+	return time.Duration(maxAttempts)*imageChannelAsyncPerAttemptTimeout(hasReferences) + 30*time.Second
+}
+
+func imageChannelTaskTimeout(hasReferences bool) time.Duration {
+	return asyncImageTaskTimeout(0, hasReferences)
+}
+
+func withImageChannelFallbackContext(parent context.Context, maxAttempts int, hasReferences bool) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
 	}
-	return timeout
+	return context.WithTimeout(parent, asyncImageTaskTimeout(maxAttempts, hasReferences))
 }
 
 type imageChannelFailure struct {

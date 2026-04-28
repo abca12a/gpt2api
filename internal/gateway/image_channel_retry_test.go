@@ -174,11 +174,40 @@ func TestImageChannelAsyncTimeoutCapsExternalChannelBeforeFallback(t *testing.T)
 	if got := imageChannelAsyncTimeout(false); got != 4*time.Minute+30*time.Second {
 		t.Fatalf("no-reference async timeout = %s, want 4m30s", got)
 	}
-	if got := imageChannelAsyncPerAttemptTimeout(true); got != 3*time.Minute {
-		t.Fatalf("reference async per-attempt timeout = %s, want 3m", got)
+	if got := imageChannelAsyncPerAttemptTimeout(true); got != 2*time.Minute {
+		t.Fatalf("reference async per-attempt timeout = %s, want 2m", got)
 	}
-	if got := imageChannelAsyncTimeout(true); got != 6*time.Minute+30*time.Second {
-		t.Fatalf("reference async timeout = %s, want 6m30s", got)
+	if got := imageChannelAsyncTimeout(true); got != 4*time.Minute+30*time.Second {
+		t.Fatalf("reference async timeout = %s, want 4m30s", got)
+	}
+	if got := imageChannelTaskTimeout(false); got != 8*time.Minute {
+		t.Fatalf("no-reference task timeout = %s, want 8m", got)
+	}
+	if got := imageChannelTaskTimeout(true); got != 8*time.Minute+30*time.Second {
+		t.Fatalf("reference task timeout = %s, want 8m30s", got)
+	}
+	if imageChannelAsyncTimeout(true) >= imageChannelTaskTimeout(true) {
+		t.Fatalf("reference channel timeout %s should leave fallback reserve inside total task timeout %s", imageChannelAsyncTimeout(true), imageChannelTaskTimeout(true))
+	}
+}
+
+func TestImageChannelFallbackContextDoesNotExtendPastParentDeadline(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelParent()
+
+	child, cancelChild := withImageChannelFallbackContext(parent, 2, true)
+	defer cancelChild()
+
+	parentDeadline, ok := parent.Deadline()
+	if !ok {
+		t.Fatal("parent should have deadline")
+	}
+	childDeadline, ok := child.Deadline()
+	if !ok {
+		t.Fatal("child should have deadline")
+	}
+	if childDeadline.After(parentDeadline) {
+		t.Fatalf("child deadline %s should not extend past parent %s", childDeadline, parentDeadline)
 	}
 }
 

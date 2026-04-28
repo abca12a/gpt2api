@@ -74,7 +74,7 @@
 ## 排查入口
 
 - 慢单先分层：`new-api` 分组/任务状态、gpt2api `image_tasks`、外置 `codex-cli-proxy-image` 健康、内置 Runner、`/p/img` 回源/超分/保存链路分别看；不要只补账号。
-- 成功任务 `created_at -> started_at` 等待时间正常但总体慢时，优先查外置渠道连续超时；无参考图外置最多等待 90 秒，有参考图最多等待 2 分钟，任务总超时随重试延长并封顶 15 分钟。
+- 成功任务 `created_at -> started_at` 等待时间正常但总体慢时，优先查外置渠道连续超时；当前异步任务改为“双层预算”：整单总窗口无参考图 8 分钟、参考图 8 分 30 秒；外置 Codex/APIMart 渠道在整单窗口内单独占用 4 分 30 秒，free runner 兜底只复用剩余时间，不再重新起一整段独立倒计时。
 - `/p/img/<task>` 首次代理取图或超分可能额外消耗数秒到二十余秒，不计入 `image_tasks.finished_at`；区分“生成耗时”和“代理下载/超分/保存耗时”。
 - 参考图不生效先看 gpt2api 图片参数日志的 `reference_count`：`0` 表示前端或 `new-api` 没传到号池，`>0` 后再查上传和上游生成效果。
 - 图片裂图先看任务是否有 `file_ids` 和单图代理元信息；浏览器直接访问上游临时图链失败，通常不是任务生成失败。
@@ -91,7 +91,8 @@
 - 2026-04-28：已补齐构建机 `43.152.240.30` 的基础构建环境。`ubuntu` 用户下安装了系统级 `nodejs`/`npm`，并把 `/usr/local/go/bin` 提前注入到 `~/.bashrc` 的非交互分支与 `~/.profile`，保证 `ssh 构建机 'cmd'` 这类远程非交互执行也能直接拿到 `go`。随后在构建机同步当前工作树并完整跑通 `bash deploy/build-local.sh`，成功产出 `deploy/bin/gpt2api`、`deploy/bin/goose` 和 `web/dist/index.html`；当前只剩 Sass legacy JS API 与 Vite 大 chunk 警告，不影响构建成功。
 - 2026-04-28：已将当前 Codex 环境公钥对应的私钥 `~/.ssh/cliproxyapi_212_50_232_214_ed25519` 加入构建机 `43.152.240.30` 上 `ubuntu` 用户的 `~/.ssh/authorized_keys`，并完成免密 SSH 验证。后续涉及老前端或画布构建时，可直接从当前号池机器进入构建机，不再依赖临时密码登录。
 - 2026-04-28：为 OpenAI 兼容图片适配器补充 APIMart 异步任务兼容。`/v1/images/generations` 若返回 `task_id`，服务端会自动轮询 `/v1/tasks/{id}` 并提取 `result.images[].url`；这样数据库里的 `apimart` 渠道可以作为 `gpt-image-2` 的第二跳外置兜底，而不是只能直落内置 free runner。
-- 2026-04-28：量化最近 24 小时 `gpt2api-server` 日志，外置 Codex 图片渠道触发 `fallback to free account runner` 约 68 次，而异步生图提交约 182 次；主要触发源不是参数错误，而是 `cli-proxy-api:8317` 在旧的 90 秒/2 分钟窗口内大量 `context deadline exceeded`。已把外置渠道异步等待策略改为“每次独立限时后再重试一次”：无参考图单次 2 分钟、总窗口 4 分 30 秒；有参考图单次 3 分钟、总窗口 6 分 30 秒，避免第一次超时直接耗尽上下文导致会员链路过早切 Free。
+- 2026-04-28：量化最近 24 小时 `gpt2api-server` 日志，外置 Codex 图片渠道触发 `fallback to free account runner` 约 68 次，而异步生图提交约 182 次；主要触发源不是参数错误，而是 `cli-proxy-api:8317` 在旧的 90 秒/2 分钟窗口内大量 `context deadline exceeded`。现已把外置渠道改成“单次独立限时 + 同渠道最多重试一次”，并把外置阶段收敛到统一 `4 分 30 秒` 窗口；其中参考图单次等待也从 3 分钟收短到 2 分钟，避免 Codex/APIMart 两跳都把 free 兜底时间吃空。
+- 2026-04-28：继续收敛异步图片长尾后确认，`10+` 分钟不出图的主因是“外置图片渠道超时后，再给 free runner 新开一整段总预算”，而不是任务根本没下发。现已将图片任务改为共享总窗口：无参考图整单 8 分钟、参考图整单 8 分 30 秒；外置渠道仍只占用前 4 分 30 秒，Codex/APIMart 连续超时后，free runner 只吃剩余时间，不再把总时长串行叠加到 10~15 分钟以上。此次阈值保留了近 24 小时里真实存在的 `7m53s` 参考图成功单空间，同时把此前 `12m47s` 的失败长尾提前收口。
 - 2026-04-28：上述“减少 Codex 会员链路过早切 Free”修复已在当前号池部署。执行 `bash deploy/build-local.sh`、`docker compose -f deploy/docker-compose.yml build server`、`docker compose -f deploy/docker-compose.yml up -d server` 后，`gpt2api-server` 容器重新启动并恢复 `healthy`；容器内 `http://127.0.0.1:8080/healthz` 与 `http://cli-proxy-api:8317/healthz` 均返回 ok。本次重启有 1 个运行中图片任务被标记为 interrupted。
 - 2026-04-27：手工移植元项目 2026-04-26 的关键修复：图生图 SSE 结果会剔除参考图 file_id；用量日志成功图片按真实产出张数写入并对历史 image_count=0 兜底；账号额度探测支持 max_value/cap/total/limit 和“今日已用+剩余”估算；UploadFile 创建文件步骤加入瞬时错误重试；在线体验参考图限制对齐后端 4 张/20MB。
 - 2026-04-27：上述元项目关键修复已部署到当前号池 `gpt2api-server`；部署命令为 `bash deploy/build-local.sh` 后 `docker compose -f deploy/docker-compose.yml build server && docker compose -f deploy/docker-compose.yml up -d server`，本机与 Nginx `/healthz` 均返回 ok，容器内 `cli-proxy-api:8317/healthz` 可达。重启时有 1 个运行中图片任务被标记为 interrupted。
