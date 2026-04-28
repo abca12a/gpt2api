@@ -78,6 +78,7 @@
 ## 最近变更
 
 - 2026-04-28：量化最近 24 小时 `gpt2api-server` 日志，外置 Codex 图片渠道触发 `fallback to free account runner` 约 68 次，而异步生图提交约 182 次；主要触发源不是参数错误，而是 `cli-proxy-api:8317` 在旧的 90 秒/2 分钟窗口内大量 `context deadline exceeded`。已把外置渠道异步等待策略改为“每次独立限时后再重试一次”：无参考图单次 2 分钟、总窗口 4 分 30 秒；有参考图单次 3 分钟、总窗口 6 分 30 秒，避免第一次超时直接耗尽上下文导致会员链路过早切 Free。
+- 2026-04-28：上述“减少 Codex 会员链路过早切 Free”修复已在当前号池部署。执行 `bash deploy/build-local.sh`、`docker compose -f deploy/docker-compose.yml build server`、`docker compose -f deploy/docker-compose.yml up -d server` 后，`gpt2api-server` 容器重新启动并恢复 `healthy`；容器内 `http://127.0.0.1:8080/healthz` 与 `http://cli-proxy-api:8317/healthz` 均返回 ok。本次重启有 1 个运行中图片任务被标记为 interrupted。
 - 2026-04-27：手工移植元项目 2026-04-26 的关键修复：图生图 SSE 结果会剔除参考图 file_id；用量日志成功图片按真实产出张数写入并对历史 image_count=0 兜底；账号额度探测支持 max_value/cap/total/limit 和“今日已用+剩余”估算；UploadFile 创建文件步骤加入瞬时错误重试；在线体验参考图限制对齐后端 4 张/20MB。
 - 2026-04-27：上述元项目关键修复已部署到当前号池 `gpt2api-server`；部署命令为 `bash deploy/build-local.sh` 后 `docker compose -f deploy/docker-compose.yml build server && docker compose -f deploy/docker-compose.yml up -d server`，本机与 Nginx `/healthz` 均返回 ok，容器内 `cli-proxy-api:8317/healthz` 可达。重启时有 1 个运行中图片任务被标记为 interrupted。
 - 2026-04-27：外置图片渠道等待窗口收敛为无参考图 90 秒、有参考图 2 分钟；超时后尽快走内置 Runner 兜底，下游前端轮询窗口需覆盖到 15 分钟。
