@@ -41,6 +41,27 @@ func (s *stubImageChannelAdapter) ImageGenerate(context.Context, string, *adapte
 	return s.steps[idx].result, s.steps[idx].err
 }
 
+type blockingImageChannelAdapter struct {
+	calls int
+}
+
+func (s *blockingImageChannelAdapter) Type() string { return "blocking" }
+
+func (s *blockingImageChannelAdapter) Chat(context.Context, string, *adapter.ChatRequest) (adapter.ChatStream, error) {
+	return nil, nil
+}
+
+func (s *blockingImageChannelAdapter) ImageGenerate(ctx context.Context, _ string, _ *adapter.ImageRequest) (*adapter.ImageResult, error) {
+	s.calls++
+	if s.calls == 1 {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return &adapter.ImageResult{B64s: []string{"retry-ok"}}, nil
+}
+
+func (s *blockingImageChannelAdapter) Ping(context.Context) error { return nil }
+
 func (s *stubImageChannelAdapter) Ping(context.Context) error { return nil }
 
 func TestImageChannelGenerateWithRetryRetriesTransientUpstreamDisconnect(t *testing.T) {
@@ -53,7 +74,7 @@ func TestImageChannelGenerateWithRetryRetriesTransientUpstreamDisconnect(t *test
 		}},
 	}
 
-	got, err := imageChannelGenerateWithRetry(context.Background(), rt, &adapter.ImageRequest{Prompt: "draw"}, "img_retry", func(context.Context, time.Duration) error {
+	got, err := imageChannelGenerateWithRetry(context.Background(), rt, &adapter.ImageRequest{Prompt: "draw"}, "img_retry", 0, func(context.Context, time.Duration) error {
 		return nil
 	})
 	if err != nil {
@@ -77,7 +98,7 @@ func TestImageChannelGenerateWithRetryDoesNotRetryClientError(t *testing.T) {
 		}},
 	}
 
-	_, err := imageChannelGenerateWithRetry(context.Background(), rt, &adapter.ImageRequest{Prompt: "draw"}, "img_no_retry", func(context.Context, time.Duration) error {
+	_, err := imageChannelGenerateWithRetry(context.Background(), rt, &adapter.ImageRequest{Prompt: "draw"}, "img_no_retry", 0, func(context.Context, time.Duration) error {
 		return nil
 	})
 	if err == nil {
@@ -147,11 +168,17 @@ func TestImageChannelFreeFallbackRunOptionsRequireFreePlan(t *testing.T) {
 }
 
 func TestImageChannelAsyncTimeoutCapsExternalChannelBeforeFallback(t *testing.T) {
-	if got := imageChannelAsyncTimeout(false); got != 90*time.Second {
-		t.Fatalf("no-reference async timeout = %s, want 90s", got)
+	if got := imageChannelAsyncPerAttemptTimeout(false); got != 2*time.Minute {
+		t.Fatalf("no-reference async per-attempt timeout = %s, want 2m", got)
 	}
-	if got := imageChannelAsyncTimeout(true); got != 2*time.Minute {
-		t.Fatalf("reference async timeout = %s, want 2m", got)
+	if got := imageChannelAsyncTimeout(false); got != 4*time.Minute+30*time.Second {
+		t.Fatalf("no-reference async timeout = %s, want 4m30s", got)
+	}
+	if got := imageChannelAsyncPerAttemptTimeout(true); got != 3*time.Minute {
+		t.Fatalf("reference async per-attempt timeout = %s, want 3m", got)
+	}
+	if got := imageChannelAsyncTimeout(true); got != 6*time.Minute+30*time.Second {
+		t.Fatalf("reference async timeout = %s, want 6m30s", got)
 	}
 }
 
@@ -179,5 +206,28 @@ func TestActualCountFallsBackToOneForEmptySuccessfulChannelResult(t *testing.T) 
 	}
 	if got := actualCount(&adapter.ImageResult{URLs: []string{"u1"}, B64s: []string{"b1"}}); got != 2 {
 		t.Fatalf("actualCount(two images) = %d, want 2", got)
+	}
+}
+func TestImageChannelGenerateWithRetryUsesIndependentAttemptTimeout(t *testing.T) {
+	rt := &channel.Route{
+		Channel:       &channel.Channel{ID: 1, Name: "codex-cli-proxy-image"},
+		UpstreamModel: "gpt-image-2",
+		Adapter:       &blockingImageChannelAdapter{},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	got, err := imageChannelGenerateWithRetry(ctx, rt, &adapter.ImageRequest{Prompt: "draw"}, "img_retry_timeout", 100*time.Millisecond, func(context.Context, time.Duration) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("imageChannelGenerateWithRetry() error = %v, want nil", err)
+	}
+	if got == nil || len(got.B64s) != 1 || got.B64s[0] != "retry-ok" {
+		t.Fatalf("unexpected result: %#v", got)
+	}
+	if stub := rt.Adapter.(*blockingImageChannelAdapter); stub.calls != 2 {
+		t.Fatalf("adapter calls = %d, want 2", stub.calls)
 	}
 }

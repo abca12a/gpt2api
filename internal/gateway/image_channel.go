@@ -89,7 +89,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	var result *adapter.ImageResult
 	var selected *channel.Route
 	for _, rt := range routes {
-		r, err := imageChannelGenerateWithRetry(ctx, rt, ir, "", nil)
+		r, err := imageChannelGenerateWithRetry(ctx, rt, ir, "", 0, nil)
 		if err != nil {
 			lastErr = err
 			if adapter.IsContentModerationError(err) {
@@ -305,7 +305,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		var result *adapter.ImageResult
 		var selected *channel.Route
 		for _, rt := range job.Routes {
-			r, err := imageChannelGenerateWithRetry(ctx, rt, job.Request, job.TaskID, nil)
+			r, err := imageChannelGenerateWithRetry(ctx, rt, job.Request, job.TaskID, imageChannelAsyncPerAttemptTimeout(len(job.References) > 0), nil)
 			if err != nil {
 				lastErr = err
 				if adapter.IsContentModerationError(err) {
@@ -462,7 +462,7 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	var result *adapter.ImageResult
 	var selected *channel.Route
 	for _, rt := range routes {
-		r, err := imageChannelGenerateWithRetry(ctx, rt, ir, "", nil)
+		r, err := imageChannelGenerateWithRetry(ctx, rt, ir, "", 0, nil)
 		if err != nil {
 			lastErr = err
 			if adapter.IsContentModerationError(err) {
@@ -753,11 +753,20 @@ func imageChannelFreeFallbackRunOptions(job imageChannelAsyncJob) imagepkg.RunOp
 	return opt
 }
 
-func imageChannelAsyncTimeout(hasReferences bool) time.Duration {
+func imageChannelAsyncPerAttemptTimeout(hasReferences bool) time.Duration {
 	if hasReferences {
-		return 2 * time.Minute
+		return 3 * time.Minute
 	}
-	return 90 * time.Second
+	return 2 * time.Minute
+}
+
+func imageChannelAsyncTimeout(hasReferences bool) time.Duration {
+	const maxAttempts = 2
+	timeout := time.Duration(maxAttempts)*imageChannelAsyncPerAttemptTimeout(hasReferences) + 30*time.Second
+	if timeout > 8*time.Minute {
+		return 8 * time.Minute
+	}
+	return timeout
 }
 
 type imageChannelFailure struct {
@@ -767,7 +776,7 @@ type imageChannelFailure struct {
 	Detail     string
 }
 
-func imageChannelGenerateWithRetry(ctx context.Context, rt *channel.Route, req *adapter.ImageRequest, taskID string, sleep func(context.Context, time.Duration) error) (*adapter.ImageResult, error) {
+func imageChannelGenerateWithRetry(ctx context.Context, rt *channel.Route, req *adapter.ImageRequest, taskID string, perAttemptTimeout time.Duration, sleep func(context.Context, time.Duration) error) (*adapter.ImageResult, error) {
 	if sleep == nil {
 		sleep = sleepWithContext
 	}
@@ -775,7 +784,13 @@ func imageChannelGenerateWithRetry(ctx context.Context, rt *channel.Route, req *
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		result, err := rt.Adapter.ImageGenerate(ctx, rt.UpstreamModel, req)
+		attemptCtx := ctx
+		cancel := func() {}
+		if perAttemptTimeout > 0 {
+			attemptCtx, cancel = context.WithTimeout(ctx, perAttemptTimeout)
+		}
+		result, err := rt.Adapter.ImageGenerate(attemptCtx, rt.UpstreamModel, req)
+		cancel()
 		if err == nil {
 			return result, nil
 		}
