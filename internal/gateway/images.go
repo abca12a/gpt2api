@@ -104,7 +104,7 @@ type ImagesHandler struct {
 	*Handler
 	Runner          *image.Runner
 	DAO             *image.DAO
-	SuperResolution *image.AliyunSuperResolutionClient
+	SuperResolution *image.LocalSuperResolutionClient
 	// ImageAccResolver 可选:代理下载上游图片时用于解出账号 AT/cookies/proxy。
 	// 未注入时 /p/img 路径会返回 503。
 	ImageAccResolver ImageAccountResolver
@@ -142,10 +142,10 @@ type ImageGenRequest struct {
 	ImageURLs         stringList `json:"image_urls,omitempty"`
 	InputImage        stringList `json:"input_image,omitempty"`
 	InputImages       stringList `json:"input_images,omitempty"`
-	// Upscale 非标准扩展:控制"本服务对原图做 AI 超分"的目标档位。
+	// Upscale 非标准扩展:控制"本服务对原图做本地超分"的目标档位。
 	// 可选值:""(原图直出,默认)/ "2k"(长边 2560) / "4k"(长边 3840)。
-	// 生效时机:图片代理 URL 首次请求时调用外部超分服务,之后进程内
-	// LRU 缓存命中毫秒级返回。仅影响 /v1/images/proxy/... 的出口字节,不改原图。
+	// 生效时机:图片代理 URL 首次请求时做本地高质量缩放,之后进程内
+	// LRU 缓存命中毫秒级返回。当前仅 free 账号可用;仅影响图片代理出口字节,不改原图。
 	Upscale       string `json:"upscale,omitempty"`
 	WaitForResult *bool  `json:"wait_for_result,omitempty"` // false=立即返回 task_id,客户端自行轮询
 

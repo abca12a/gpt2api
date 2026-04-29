@@ -318,8 +318,8 @@ const t2iSize = computed(() =>
 )
 const t2iN = ref(1)
 // AI 超分档位(空=原图 / '2k' / '4k')。
-// 仅在图片代理 URL 首次请求时触发阿里云生成式图像超分,
-// 进程内 LRU 缓存命中后毫秒级返回。
+// 仅在图片代理 URL 首次请求时触发本地高质量缩放,
+// 当前只有 free 账号任务会真正生效;进程内 LRU 缓存命中后毫秒级返回。
 type UpscaleLevel = '' | '2k' | '4k'
 const t2iUpscale = ref<UpscaleLevel>('')
 
@@ -1137,9 +1137,9 @@ watch(activeTab, (v) => {
                 <el-tooltip placement="top" effect="light">
                   <template #content>
                     <div style="max-width:260px;line-height:1.55;">
-                      上游原生出图为 1024 或 1792 px;选择 2K/4K 会在图片加载时调用
-                      <b>阿里云生成式图像超分</b>并以 PNG 输出。<br>
-                      <span style="color:#047857;">这是 AI 超分,会尝试补充细节;</span>首次加载取决于阿里云任务耗时,之后命中本进程缓存。
+                      上游原生出图为 1024 或 1792 px;选择 2K/4K 后,符合条件的任务会在图片加载时做
+                      <b>本地高质量超分</b>并以 PNG 输出。<br>
+                      <span style="color:#047857;">当前仅 free 账号任务会触发超分;</span>首次加载会多一次本地处理,之后命中本进程缓存。
                     </div>
                   </template>
                   <el-icon style="margin-left:4px;color:#94a3b8;cursor:help;"><InfoFilled /></el-icon>
@@ -1315,9 +1315,9 @@ watch(activeTab, (v) => {
                 <el-tooltip placement="top" effect="light">
                   <template #content>
                     <div style="max-width:260px;line-height:1.55;">
-                      上游原生出图为 1024 或 1792 px;选择 2K/4K 会在图片加载时调用
-                      <b>阿里云生成式图像超分</b>并以 PNG 输出。<br>
-                      <span style="color:#047857;">这是 AI 超分,会尝试补充细节;</span>首次加载取决于阿里云任务耗时,之后命中本进程缓存。
+                      上游原生出图为 1024 或 1792 px;选择 2K/4K 后,符合条件的任务会在图片加载时做
+                      <b>本地高质量超分</b>并以 PNG 输出。<br>
+                      <span style="color:#047857;">当前仅 free 账号任务会触发超分;</span>首次加载会多一次本地处理,之后命中本进程缓存。
                     </div>
                   </template>
                   <el-icon style="margin-left:4px;color:#94a3b8;cursor:help;"><InfoFilled /></el-icon>

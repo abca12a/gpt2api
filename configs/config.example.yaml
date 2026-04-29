@@ -56,18 +56,12 @@ upstream:
   request_timeout_sec: 60
   sse_read_timeout_sec: 300
 
-# 阿里云生成式图像超分。启用后 upscale=2k/4k 会在 /p/img 首次访问时调用阿里云,
-# 成功结果仍只缓存在当前进程内。生产请用 GPT2API_IMAGE_SUPER_RESOLUTION_* 环境变量注入 AK/SK。
+# 本地图片超分。启用后 upscale=2k/4k 会在 /p/img 首次访问时执行本地高质量缩放,
+# 成功结果仍只缓存在当前进程内;当前仅 free 账号任务会实际触发。
 image_super_resolution:
   enabled: false
-  access_key_id: ""
-  access_key_secret: ""
-  region_id: "cn-shanghai"
-  endpoint: "imageenhan.cn-shanghai.aliyuncs.com"
   output_format: "png"
   output_quality: 95
-  poll_interval_sec: 2
-  poll_timeout_sec: 120
 
 # 支付(易支付)
 epay:

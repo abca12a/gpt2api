@@ -89,15 +89,9 @@ type CodexUsageConfig struct {
 }
 
 type ImageSuperResolutionConfig struct {
-	Enabled         bool   `mapstructure:"enabled"`
-	AccessKeyID     string `mapstructure:"access_key_id"`
-	AccessKeySecret string `mapstructure:"access_key_secret"`
-	RegionID        string `mapstructure:"region_id"`
-	Endpoint        string `mapstructure:"endpoint"`
-	OutputFormat    string `mapstructure:"output_format"`
-	OutputQuality   int32  `mapstructure:"output_quality"`
-	PollIntervalSec int    `mapstructure:"poll_interval_sec"`
-	PollTimeoutSec  int    `mapstructure:"poll_timeout_sec"`
+	Enabled       bool   `mapstructure:"enabled"`
+	OutputFormat  string `mapstructure:"output_format"`
+	OutputQuality int32  `mapstructure:"output_quality"`
 }
 
 // BackupConfig 数据库备份配置。
@@ -178,12 +172,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("codex_usage.auth_dir", "")
 	v.SetDefault("codex_usage.log_path", "")
 	v.SetDefault("image_super_resolution.enabled", false)
-	v.SetDefault("image_super_resolution.access_key_id", "")
-	v.SetDefault("image_super_resolution.access_key_secret", "")
-	v.SetDefault("image_super_resolution.region_id", "cn-shanghai")
-	v.SetDefault("image_super_resolution.endpoint", "imageenhan.cn-shanghai.aliyuncs.com")
 	v.SetDefault("image_super_resolution.output_format", "png")
 	v.SetDefault("image_super_resolution.output_quality", 95)
-	v.SetDefault("image_super_resolution.poll_interval_sec", 2)
-	v.SetDefault("image_super_resolution.poll_timeout_sec", 120)
 }

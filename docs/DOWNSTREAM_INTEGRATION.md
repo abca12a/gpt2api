@@ -332,7 +332,7 @@ const absoluteUrl = new URL(item.url, GPT2API_ORIGIN).toString()
 - 不要丢掉 `exp` 和 `sig`。
 - 签名 URL 默认有效期约 24 小时。
 - gpt2api 进程重启后，旧签名 URL 会失效；如果前端历史图裂了，应让后端重新查询任务拿新 URL，而不是复用旧 URL。
-- `/p/img` 只适用于任务返回本站签名代理 URL 的场景；Codex image channel 也可能直接返回 `https://...` 或 `data:image/...`。只有内置 Web Runner 的 `/p/img` 回源链路才会下载 chatgpt.com 文件，显式本地超分开启时才会调用阿里云。
+- `/p/img` 只适用于任务返回本站签名代理 URL 的场景；Codex image channel 也可能直接返回 `https://...` 或 `data:image/...`。只有内置 Web Runner 的 `/p/img` 回源链路才会下载 chatgpt.com 文件；显式本地超分开启且任务最终账号为 `free` 时，才会触发本地超分。
 
 ## 5. 关键依赖清单
 

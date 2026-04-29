@@ -30,6 +30,7 @@
 
 - 图片失败诊断：不能只看结构化错误；ChatGPT Web Runner 可能在 assistant 文本里解释拒绝原因但不产出图片引用，必须提取 SSE 和 conversation mapping 的最新 assistant 文本。
 - 内容安全归因：只有出现安全、政策、未成年、内容审核等明确文本或上游信号时才归为 `content_moderation`；普通 `poll_timeout / poll_error / no image ref produced` 不能凭空推断违规。
+- 后台白图：不能看到管理员后台或预览弹窗一片白就判定“没拿到图”；`4k/2k` 任务首次访问 `/p/img/...` 时可能先卡在本地超分或缓存未命中的原图回源阶段，浏览器在响应返回前表现为空白，但原始 PNG 可能已经存在。排查时先看 `image proxy super resolution` 和对应 `/p/img/` 耗时，再核 `file_ids/result_urls` 或直接回源验证原图。
 - 管理员生成记录：不能只移除缩略图外层 `<a target="_blank">` 就认为不会跳转；`el-image` 内置预览仍可能触发 `about:blank#blocked`，应使用普通 `img` 和受控弹窗。
 - 后台性能：不要把 `image_tasks.result_urls` 大字段重新放回生成记录列表；列表只放元数据和摘要，图片/失败详情懒加载。
 

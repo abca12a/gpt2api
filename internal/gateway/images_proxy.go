@@ -37,7 +37,7 @@ import (
 )
 
 // imageUpscaleCache 进程级单例 LRU,用于缓存「原图 → 4K/2K 超分结果」。
-// 首次请求某张图的 4K 会调用外部超分服务,之后同一条代理 URL 的请求毫秒级命中。
+// 首次请求某张图的 4K 会做一次本地高质量缩放,之后同一条代理 URL 的请求毫秒级命中。
 //
 // 放大不会写回 image_tasks / file system —— 所有放大字节都只存在于当前进程的
 // LRU 里,服务重启即销毁,保证磁盘占用为 0。
@@ -46,7 +46,8 @@ var imageUpscaleCache = image.NewUpscaleCache(0, 0)
 // ImageAccountResolver 按账号 ID 解出构造 chatgpt client 所需的敏感字段。
 // 由 main.go 注入。接口里不直接依赖 account 包,保持本层解耦。
 type ImageAccountResolver interface {
-	AuthToken(ctx context.Context, accountID uint64) (at, deviceID, cookies string, err error)
+	AuthToken(ctx context.Context, accountID uint64) (at, deviceID, cookies, planType string, err error)
+	PlanType(ctx context.Context, accountID uint64) string
 	ProxyURL(ctx context.Context, accountID uint64) string
 }
 
@@ -87,8 +88,9 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 	}
 
 	var (
-		body []byte
-		ct   string
+		body           []byte
+		ct             string
+		sourcePlanType string
 	)
 
 	fids := t.DecodeFileIDs()
@@ -109,13 +111,14 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 		defer cancel()
 
-		at, deviceID, cookies, err := h.ImageAccResolver.AuthToken(ctx, accountID)
+		at, deviceID, cookies, planType, err := h.ImageAccResolver.AuthToken(ctx, accountID)
 		if err != nil {
 			logger.L().Warn("image proxy resolve account",
 				zap.Error(err), zap.Uint64("account_id", accountID))
 			c.AbortWithStatus(http.StatusBadGateway)
 			return
 		}
+		sourcePlanType = planType
 		proxyURL := h.ImageAccResolver.ProxyURL(ctx, accountID)
 
 		cli, err := chatgpt.New(chatgpt.Options{
@@ -159,17 +162,20 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 			c.AbortWithStatus(http.StatusBadGateway)
 			return
 		}
+		if t.AccountID > 0 && h.ImageAccResolver != nil {
+			sourcePlanType = h.ImageAccResolver.PlanType(c.Request.Context(), t.AccountID)
+		}
 	}
 
-	// 按需超分:若 task 上打了 upscale 标记,先走进程内 LRU,命中则直接返回。
-	// 未命中再拉原图,调用阿里云生成式图像超分后写入缓存。
+	// 按需超分:若 task 上打了 upscale 标记,且结果来自 free 账号,先走进程内 LRU;
+	// 未命中再做本地高质量缩放并写入缓存。
 	scale := image.ValidateUpscale(t.Upscale)
 	cacheKey := ""
-	if scale != "" {
+	if image.UpscaleAllowedForPlan(scale, sourcePlanType) {
 		cacheKey = fmt.Sprintf("%s|%d|%s", taskID, idx, scale)
 		if data, ctCache, ok := imageUpscaleCache.Get(cacheKey); ok {
 			c.Header("Cache-Control", "private, max-age=3600")
-			c.Header("X-Upscale", scale+";provider=aliyun;cache=hit")
+			c.Header("X-Upscale", scale+";provider=local;cache=hit")
 			c.Data(http.StatusOK, ctCache, data)
 			return
 		}
@@ -180,23 +186,29 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 	}
 
 	if scale != "" {
+		if !image.UpscaleAllowedForPlan(scale, sourcePlanType) {
+			c.Header("Cache-Control", "private, max-age=1800")
+			c.Header("X-Upscale", scale+";provider=local;skip=non-free")
+			c.Data(http.StatusOK, ct, body)
+			return
+		}
 		if h.SuperResolution == nil {
 			logger.L().Warn("image proxy super resolution disabled",
 				zap.String("task_id", taskID), zap.String("scale", scale))
 			c.Header("Cache-Control", "private, max-age=1800")
-			c.Header("X-Upscale", scale+";provider=aliyun;err")
+			c.Header("X-Upscale", scale+";provider=local;err")
 			c.Data(http.StatusOK, ct, body)
 			return
 		}
 
 		started := time.Now()
 		upBytes, upCT, upNoop, err, shared := imageUpscaleCache.Do(cacheKey, func() ([]byte, string, bool, error) {
-			// 并发闸:避免 4K 请求风暴打满外部超分服务并发
+			// 并发闸:避免 4K 请求风暴同时打满本机 CPU
 			imageUpscaleCache.Acquire()
 			defer imageUpscaleCache.Release()
 
-			// 阿里异步超分可能超过浏览器/Cloudflare 单次等待窗口;这里脱离请求上下文,
-			// 让首次请求即使断开也尽量把结果写入进程缓存,后续刷新可命中。
+			// 本地超分放到脱离请求生命周期的上下文里执行,尽量在首个请求断开后
+			// 仍把结果写入缓存,后续刷新可直接命中。
 			srCtx, srCancel := context.WithTimeout(context.Background(), h.SuperResolution.RequestTimeout())
 			defer srCancel()
 			upResult, upErr := h.SuperResolution.Upscale(srCtx, body, ct, scale, taskID)
@@ -212,7 +224,6 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 			logger.L().Info("image proxy super resolution success",
 				zap.String("task_id", taskID),
 				zap.String("scale", scale),
-				zap.String("job_id", upResult.JobID),
 				zap.Duration("cost", time.Since(started)))
 			return upResult.Data, upResult.ContentType, false, nil
 		})
@@ -221,15 +232,15 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 				zap.Error(err), zap.String("task_id", taskID),
 				zap.String("scale", scale), zap.Bool("shared", shared),
 				zap.Duration("cost", time.Since(started)))
-			// 超分失败:回落到原图,不让用户看到白屏;不再回退到本地插值。
+			// 本地超分失败时直接回落原图,不让预览链路被卡死。
 			c.Header("Cache-Control", "private, max-age=1800")
-			c.Header("X-Upscale", scale+";provider=aliyun;err")
+			c.Header("X-Upscale", scale+";provider=local;err")
 			c.Data(http.StatusOK, ct, body)
 			return
 		}
 		if upNoop {
 			c.Header("Cache-Control", "private, max-age=3600")
-			c.Header("X-Upscale", scale+";provider=aliyun;noop")
+			c.Header("X-Upscale", scale+";provider=local;noop")
 			c.Data(http.StatusOK, ct, body)
 			return
 		}
@@ -238,9 +249,9 @@ func (h *ImagesHandler) ImageProxy(c *gin.Context) {
 		}
 		if len(upBytes) > 0 {
 			body = upBytes
-			c.Header("X-Upscale", scale+";provider=aliyun;cache=miss")
+			c.Header("X-Upscale", scale+";provider=local;cache=miss")
 		} else {
-			c.Header("X-Upscale", scale+";provider=aliyun;err")
+			c.Header("X-Upscale", scale+";provider=local;err")
 		}
 		c.Header("Cache-Control", "private, max-age=3600")
 		c.Data(http.StatusOK, ct, body)

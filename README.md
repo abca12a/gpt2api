@@ -1,6 +1,6 @@
 # gpt2api
 
-> 基于逆向 **chatgpt.com** 的 OpenAI 兼容 SaaS 网关 —— 多账号池 / 代理池 / **IMG2 终稿直出** / **批量出图** / **阿里云 2K/4K AI 超分** / **高并发调度** / 积分计费 / 管理后台一体化。
+> 基于逆向 **chatgpt.com** 的 OpenAI 兼容 SaaS 网关 —— 多账号池 / 代理池 / **IMG2 终稿直出** / **批量出图** / **本地 2K/4K 超分(仅 Free 账号)** / **高并发调度** / 积分计费 / 管理后台一体化。
 
 <p align="center">
   <a href="https://github.com/432539/gpt2api/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/432539/gpt2api?style=flat-square"></a>
@@ -27,7 +27,7 @@
 - [七、API 使用示例](#七api-使用示例)
 - [八、重点能力详解](#八重点能力详解)
   - [8.1 IMG2 出图](#81-img2-出图)
-  - [8.2 4K / 2K 高清输出(阿里云生成式图像超分)](#82-4k--2k-高清输出阿里云生成式图像超分)
+  - [8.2 4K / 2K 高清输出(本地超分,仅 Free 账号)](#82-4k--2k-高清输出本地超分仅-free-账号)
   - [8.3 批量出图 / 多张聚合](#83-批量出图--多张聚合)
   - [8.4 高性能高并发调度](#84-高性能高并发调度)
 - [九、管理后台功能概览](#九管理后台功能概览)
@@ -51,7 +51,7 @@
 - 想给公司 / 团队内部开通 OpenAI 风格的代理网关,把所有调用统计、计费、审计集中管理;
 - 想低成本搭一个带积分 / 套餐 / 易支付的 AI API 中台,面向 C 端或 B 端开发者售卖。
 
-> 本项目当前版本**聚焦图片模型**(详见 [8.1 IMG2 出图](#81-img2-出图)、[8.2 4K/2K 高清输出](#82-4k--2k-高清输出阿里云生成式图像超分) 与 [8.3 批量出图](#83-批量出图--多张聚合))。文字通路(`/v1/chat/completions`)代码层完整保留,但因 `chatgpt.com` 新 sentinel 协议存在短期不稳定因素,UI 入口已在当前版本关闭,恢复只需改一行 feature flag,详见 [十一、二次开发](#十一二次开发--定制)。
+> 本项目当前版本**聚焦图片模型**(详见 [8.1 IMG2 出图](#81-img2-出图)、[8.2 4K/2K 高清输出](#82-4k--2k-高清输出本地超分仅-free-账号) 与 [8.3 批量出图](#83-批量出图--多张聚合))。文字通路(`/v1/chat/completions`)代码层完整保留,但因 `chatgpt.com` 新 sentinel 协议存在短期不稳定因素,UI 入口已在当前版本关闭,恢复只需改一行 feature flag,详见 [十一、二次开发](#十一二次开发--定制)。
 
 ---
 
@@ -85,7 +85,7 @@
 | 分类 | 能力 |
 |------|------|
 | **上游协议** | 完整逆向 `chatgpt.com` `f/conversation` 两步 sentinel(`/prepare` + `/finalize`)、PoW、`conduit_token`、全套 `oai-*` / `Sec-Ch-Ua-*` 指纹头 |
-| **图片生成** | 文生图、**图生图 / 多图参考**、**IMG2 正式版直出**(速度优先,SSE 够数即返回,最长 300s 补齐轮询兜底)、**阿里云 2K/4K AI 超分**(按需触发 + 进程内 LRU)、轮询 + SSE 直出双通道 |
+| **图片生成** | 文生图、**图生图 / 多图参考**、**IMG2 正式版直出**(速度优先,SSE 够数即返回,最长 300s 补齐轮询兜底)、**本地 2K/4K 超分**(仅 Free 账号、按需触发 + 进程内 LRU)、轮询 + SSE 直出双通道 |
 | **账号池** | JSON / AT / RT / ST 四种方式批量导入,**自动刷新**、**额度探测**、**风控熔断**、按账号稳定绑定 `oai-device-id` / `oai-session-id` |
 | **代理池** | 支持 HTTP / SOCKS5,健康分自动探测,按账号强绑定代理,避免 IP 指纹混用 |
 | **调度器** | 串行 lease + Redis 分布式锁,`min_interval_sec` 单号最小间隔、`daily_usage_ratio` 日熔断、`cooldown_429_sec` 限速退避 |
@@ -394,7 +394,7 @@ curl https://your-domain.com/v1/images/generations \
 }
 ```
 
-**可选:阿里云 2K / 4K AI 超分** —— 在 body 里加 `"upscale": "2k"` 或 `"upscale": "4k"`,后端会在图片代理 URL 首次被请求时调用阿里云生成式图像超分并以 PNG 返回(长边 2560 / 3840 等比缩)。首次耗时取决于阿里云异步任务,之后进程内 LRU 毫秒级命中;失败会回落到原图。详见 [8.2 4K / 2K 高清输出](#82-4k--2k-高清输出阿里云生成式图像超分)。
+**可选:本地 2K / 4K 超分(仅 Free 账号)** —— 在 body 里加 `"upscale": "2k"` 或 `"upscale": "4k"`。当任务最终落到 `free` 账号时,后端会在图片代理 URL 首次被请求时做本地高质量缩放并返回(长边 2560 / 3840 等比缩);非 `free` 账号会直接返回原图。首次耗时取决于本地处理和缓存命中情况,之后进程内 LRU 毫秒级命中。详见 [8.2 4K / 2K 高清输出](#82-4k--2k-高清输出本地超分仅-free-账号)。
 
 ### 7.2 图生图 / 多图参考(项目扩展字段)
 
@@ -491,50 +491,47 @@ GROUP BY account_id
 ORDER BY success_rate_pct DESC;
 ```
 
-### 8.2 4K / 2K 高清输出(阿里云生成式图像超分)
+### 8.2 4K / 2K 高清输出(本地超分,仅 Free 账号)
 
-`chatgpt.com` 原生只提供 `1024×1024` / `1792×1024` / `1024×1792` 三档原图。面板 / API 都支持扩展字段 `upscale`,在**拿到原图后**由网关调用阿里云生成式图像超分,再把结果以 PNG 返回。
+`chatgpt.com` 原生只提供 `1024×1024` / `1792×1024` / `1024×1792` 三档原图。面板 / API 都支持扩展字段 `upscale`,在**拿到原图后**由网关做本地高质量缩放,再把结果以 PNG 或 JPEG 返回。当前只有最终落到 `free` 账号的任务会实际触发超分;非 `free` 任务会直接返回原图。
 
 #### 档位与尺寸
 
 | `upscale` | 目标长边 | 举例(原 1024×1024) | 举例(原 1792×1024) |
 |-----------|----------|---------------------|---------------------|
 | `""`(默认) | 原图 | 1024×1024 | 1792×1024 |
-| `"2k"` | 2560 | 阿里 Scale≈3 | 阿里 Scale≈2 |
-| `"4k"` | 3840 | 阿里 Scale≈4 | 阿里 Scale≈3 |
+| `"2k"` | 2560 | 本地等比缩放到长边 2560 | 本地等比缩放到长边 2560 |
+| `"4k"` | 3840 | 本地等比缩放到长边 3840 | 本地等比缩放到长边 3840 |
 
-短边按阿里超分结果保持比例;若原图长边已经 ≥ 目标,直接透传原字节。服务不会再用本地 Catmull-Rom 二次补齐尺寸。
+短边按原图比例等比缩放;若原图长边已经 ≥ 目标,直接透传原字节。
 
 #### 工作原理
 
 1. 生图时 `upscale` 只写进 `image_tasks.upscale`,不改变与上游 `chatgpt.com` 的交互,也不影响生图速度;
-2. 图片代理 URL `/p/img/:task_id/:idx` 被请求时,后端按 `task.upscale` 决定是否超分:
+2. 图片代理 URL `/p/img/:task_id/:idx` 被请求时,后端按 `task.upscale` 和最终账号 `plan_type` 决定是否超分:
    - 查进程内 **LRU 缓存**(默认 512MB);
-   - 未命中 → 拉原图 → 上传给阿里云 `GenerateSuperResolutionImage` → 轮询 `GetAsyncJobResult` → 立即下载结果 → 写入 LRU;
+   - 未命中 → 拉原图 → 本地 Catmull-Rom 高质量缩放 → 立即编码输出 → 写入 LRU;
    - 命中 → 毫秒级直接返回字节。
-3. 超分请求有并发信号量限制,避免 4K 请求风暴打满外部服务;
-4. 阿里超分失败会回落到原图,不给用户白屏,且不会再偷偷使用本地插值。
+3. 超分请求有并发信号量限制,避免 4K 请求风暴打满本机 CPU;
+4. 本地超分失败会回落到原图,不给用户白屏。
 
 响应头 `X-Upscale` 便于排障:
 
 ```text
-X-Upscale: 4k;provider=aliyun;cache=miss   # 首次超分
-X-Upscale: 4k;provider=aliyun;cache=hit    # 命中缓存
-X-Upscale: 4k;provider=aliyun;noop         # 原图长边已足够大
-X-Upscale: 4k;provider=aliyun;err          # 超分失败,已回落到原图
+X-Upscale: 4k;provider=local;cache=miss    # 首次超分
+X-Upscale: 4k;provider=local;cache=hit     # 命中缓存
+X-Upscale: 4k;provider=local;noop          # 原图长边已足够大
+X-Upscale: 4k;provider=local;err           # 超分失败,已回落到原图
+X-Upscale: 4k;provider=local;skip=non-free # 非 free 账号,直接返回原图
 ```
 
 #### 配置
 
-生产建议通过环境变量注入 AK/SK,不要写进仓库:
-
 ```env
 IMAGE_SUPER_RESOLUTION_ENABLED=true
-ALIYUN_IMAGE_SUPER_RESOLUTION_ACCESS_KEY_ID=...
-ALIYUN_IMAGE_SUPER_RESOLUTION_ACCESS_KEY_SECRET=...
+IMAGE_SUPER_RESOLUTION_OUTPUT_FORMAT=png
+IMAGE_SUPER_RESOLUTION_OUTPUT_QUALITY=95
 ```
-
-默认地域为 `cn-shanghai`,端点为 `imageenhan.cn-shanghai.aliyuncs.com`,输出格式为 `png`,轮询超时为 120 秒。
 
 #### API 调用
 
@@ -559,10 +556,9 @@ curl https://your-domain.com/v1/images/generations \
 
 #### 取舍与注意事项
 
-- **外部服务成本**:2K/4K 首次访问会消耗阿里云视觉智能开放平台用量,命中缓存后不重复调用;
-- **输入限制**:单图最大 20MB、长边不超过 5000、短边不小于 64、长宽比不超过 2:1;不满足时直接回落原图;
-- **结果有效期**:阿里云结果 URL 有短期有效期,服务会立即下载字节并缓存,不会把临时 URL 暴露给客户端;
-- **失败回落**:阿里云提交、轮询或下载失败时返回原图,响应头会标记 `provider=aliyun;err`。
+- **账号边界**:当前仅 `free` 账号任务会触发超分;Plus / Team / 外置渠道结果都会直接返回原图;
+- **性能取舍**:首次访问会消耗本机 CPU 做高质量缩放,命中缓存后不重复计算;
+- **输入边界**:原图长边已达到目标时直接透传;缩放失败时返回原图并标记 `provider=local;err`。
 
 ### 8.3 批量出图 / 多张聚合
 
@@ -844,7 +840,7 @@ bcrypt 同明文每次生成的 hash 不同都能互相校验,上面的 hash 字
 <details>
 <summary><b>Q9. 4K 超分失败或看起来没有明显变清晰?</b></summary>
 
-当前 `gpt2api` 的 4K / 2K 走**阿里云生成式图像超分**。如果阿里云任务提交、轮询或结果下载失败,服务会自动回落到原图,避免客户端白屏;可通过响应头 `X-Upscale: 4k;provider=aliyun;err` 判断。
+当前 `gpt2api` 的 4K / 2K 走**本地高质量超分**。只有 `free` 账号任务会真正触发;其他账号会直接返回原图。若本地缩放失败,服务会自动回落到原图,避免客户端白屏;可通过响应头 `X-Upscale: 4k;provider=local;err` 判断。
 
 效果仍取决于原图内容:原图纹理过少、构图极简、压缩痕迹重或人脸/文字占比高时,AI 超分未必能补出理想细节。建议优先尝试 `2k`,确认效果和成本后再批量使用 `4k`。
 </details>

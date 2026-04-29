@@ -159,23 +159,17 @@ func main() {
 	}
 	imageRunner := image.NewRunner(sched, imageDAO)
 	imageRunner.SetQuotaDecrementor(accDAO) // 生图成功后立即扣减账号额度
-	superResolution, err := image.NewAliyunSuperResolutionClient(image.AliyunSuperResolutionConfig{
-		Enabled:         cfg.ImageSuperResolution.Enabled,
-		AccessKeyID:     cfg.ImageSuperResolution.AccessKeyID,
-		AccessKeySecret: cfg.ImageSuperResolution.AccessKeySecret,
-		RegionID:        cfg.ImageSuperResolution.RegionID,
-		Endpoint:        cfg.ImageSuperResolution.Endpoint,
-		OutputFormat:    cfg.ImageSuperResolution.OutputFormat,
-		OutputQuality:   cfg.ImageSuperResolution.OutputQuality,
-		PollInterval:    time.Duration(cfg.ImageSuperResolution.PollIntervalSec) * time.Second,
-		PollTimeout:     time.Duration(cfg.ImageSuperResolution.PollTimeoutSec) * time.Second,
+	superResolution, err := image.NewLocalSuperResolutionClient(image.LocalSuperResolutionConfig{
+		Enabled:       cfg.ImageSuperResolution.Enabled,
+		OutputFormat:  cfg.ImageSuperResolution.OutputFormat,
+		OutputQuality: cfg.ImageSuperResolution.OutputQuality,
 	})
 	if err != nil {
 		log.Warn("image super resolution disabled", zap.Error(err))
 	} else if superResolution != nil {
 		log.Info("image super resolution ready",
-			zap.String("provider", "aliyun"),
-			zap.String("endpoint", cfg.ImageSuperResolution.Endpoint))
+			zap.String("provider", "local"),
+			zap.String("output_format", cfg.ImageSuperResolution.OutputFormat))
 	}
 	imagesH := &gateway.ImagesHandler{
 		Handler:         gwH,
@@ -410,23 +404,34 @@ func (r *accountProxyResolver) ProxyURLByID(ctx context.Context, proxyID uint64)
 
 // AuthToken 给图片代理端点用:按 accountID 解出 AT / DeviceID / cookies。
 // 实现 gateway.ImageAccountResolver。
-func (r *accountProxyResolver) AuthToken(ctx context.Context, accountID uint64) (string, string, string, error) {
+func (r *accountProxyResolver) AuthToken(ctx context.Context, accountID uint64) (string, string, string, string, error) {
 	if r == nil || r.accSvc == nil {
-		return "", "", "", fmt.Errorf("account service not ready")
+		return "", "", "", "", fmt.Errorf("account service not ready")
 	}
 	a, err := r.accSvc.Get(ctx, accountID)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	at, err := r.accSvc.DecryptAuthToken(a)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	cookies, _ := r.accSvc.DecryptCookies(ctx, accountID)
-	return at, a.OAIDeviceID, cookies, nil
+	return at, a.OAIDeviceID, cookies, a.PlanType, nil
 }
 
 // ProxyURL 给图片代理端点用:等价于 ProxyURLForAccount。
 func (r *accountProxyResolver) ProxyURL(ctx context.Context, accountID uint64) string {
 	return r.ProxyURLForAccount(ctx, accountID)
+}
+
+func (r *accountProxyResolver) PlanType(ctx context.Context, accountID uint64) string {
+	if r == nil || r.accSvc == nil || accountID == 0 {
+		return ""
+	}
+	a, err := r.accSvc.Get(ctx, accountID)
+	if err != nil || a == nil {
+		return ""
+	}
+	return a.PlanType
 }

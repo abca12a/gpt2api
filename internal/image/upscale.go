@@ -31,6 +31,14 @@ func ValidateUpscale(s string) string {
 // UpscaleTargetLongSide 返回档位对应的"长边目标像素"。0 表示不放大。
 func UpscaleTargetLongSide(scale string) int { return longSideOf(scale) }
 
+// UpscaleAllowedForPlan 只允许 free 账号使用本地超分。
+func UpscaleAllowedForPlan(scale, planType string) bool {
+	if ValidateUpscale(scale) == UpscaleNone {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(planType), "free")
+}
+
 func longSideOf(scale string) int {
 	switch scale {
 	case Upscale2K:
@@ -47,9 +55,9 @@ func longSideOf(scale string) int {
 // UpscaleCache 进程内 LRU 字节缓存,附带一个并发信号量限制同时计算的数量。
 //
 // 设计动机:
-//   - 同一张图第一次按 scale=4k 请求时需要调用外部超分服务;
+//   - 同一张图第一次按 scale=4k 请求时需要做一次本地高质量缩放;
 //     命中缓存后毫秒级返回,交互体验差异巨大。
-//   - 并发闸避免 4K 请求风暴打满外部 API 并发,影响生图主流程。
+//   - 并发闸避免 4K 请求风暴同时打满 CPU,影响生图主流程。
 type UpscaleCache struct {
 	mu       sync.Mutex
 	items    map[string]*list.Element
@@ -142,7 +150,7 @@ func (c *UpscaleCache) Put(key string, data []byte, contentType string) {
 	}
 }
 
-// Do 对同一个 key 合并并发计算,避免多次请求同一张图时重复调用外部超分服务。
+// Do 对同一个 key 合并并发计算,避免多次请求同一张图时重复执行本地缩放。
 func (c *UpscaleCache) Do(key string, fn func() ([]byte, string, bool, error)) ([]byte, string, bool, error, bool) {
 	c.mu.Lock()
 	if f, ok := c.flights[key]; ok {
