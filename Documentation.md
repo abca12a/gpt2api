@@ -18,6 +18,8 @@
 - 2026-04-29 当前外置 Codex auth 文件池共 34 个文件（`plus=31`、`team=3`、`forbidden_or_unknown=0`），未混入 free/未知 plan；但 `codex-cli-proxy-image(channel_id=1)` 当天持续报 `Tool choice 'image_generation' not found in 'tools' parameter.`，`CLIProxyAPI/logs/main.log` 当天已出现 33 次该错误，说明问题不在 auth 文件数量，而在当前外置 Codex 图片执行链路本身。
 - 2026-04-29 当前图片链路状态：近 24 小时 `image_tasks` 共 173 条，`success=163`、`failed=10`，成功率约 `94.2%`；今天截至巡检时共 111 条，`success=105`、`failed=5`，成功率约 `94.6%`。多数成功单是在外置 Codex 或 APIMart 失败后回落内置 free runner 完成，因此“整体可出图”不代表“外置图片号池健康”。
 - 2026-04-29 基于最近 24 小时 `image_tasks.status='success'` 的复盘，第一层外置图片渠道成功单（`account_id=0`）平均耗时约 `99.9s`，而 fallback 到内置 runner 的成功单平均耗时约 `303.7s`。部署后能严格对齐到日志 `reference_count` 的第一层成功样本只有 2 单，均为图生图，耗时分别 `113s` 和 `227s`；同一窗口内尚未拿到“文生图且第一层成功”的严格样本，因此不能拍脑袋把图生图第一层硬切到 `120s` 以下。
+- 2026-04-29 17:10（Asia/Shanghai）补做两组多轮实测后确认：当前 `Codex` 会员链路不是“整体兜不住”。直连 `cli-proxy-api:8317 /v1/images/generations` 的 5 轮文生图全部成功，平均约 `18.4s`；通过当前号池 `gpt2api /v1/images/generations?async=true` 再走完整路由的 5 轮文生图也全部成功，`image_tasks.account_id` 全为 `0`、单任务耗时约 `30~37s`，对应窗口内未出现这些任务的 `channel async image fail, try next` 或 `fallback to free account runner` 日志，说明这 5 单都停在第一层外置 Codex 成功。
+- 2026-04-29 17:10（Asia/Shanghai）同批观测也确认：问题还没“完全解决”，但已经收敛到更窄的边界。最近半小时内仍能看到 `img_d1ad737a2d5d47849df9c0e0 / img_bf0aa13ff29f4d6799835124 / img_cf3953d6b30b4d869957849b` 这类任务先在 `codex-cli-proxy-image` 报 `POST /v1/images/edits ... context deadline exceeded`，随后 fallback 到 `free` 账号成功；`cli-proxy-api` 同时间窗也仍有部分 `plus` auth 自动 refresh 返回 `401`。因此当前更准确的判断是：`文生图` 路径已能稳定命中 Codex 会员池，但 `图生图/edits` 与部分 auth 刷新仍会把慢单推向 `free runner`。
 
 ### 图片任务协议
 
