@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenAIImageGeneratePassesGPTImageOutputParameters(t *testing.T) {
@@ -325,5 +326,72 @@ func TestOpenAIImageGenerateReturnsTaskFailureDetails(t *testing.T) {
 	}
 	if upstreamErr.Status != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", upstreamErr.Status)
+	}
+}
+
+func TestOpenAIImageGeneratePerformsFinalAPIMartPollAfterContextDeadline(t *testing.T) {
+	var taskPolls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/apimart.ai/v1/images/generations":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":[{"status":"submitted","task_id":"task_deadline_123"}]}`))
+		case "/apimart.ai/v1/tasks/task_deadline_123":
+			taskPolls++
+			w.Header().Set("Content-Type", "application/json")
+			if taskPolls == 1 {
+				_, _ = w.Write([]byte(`{"code":200,"data":{"status":"processing","progress":95}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":200,"data":{"status":"completed","result":{"images":[{"url":["https://example.test/apimart-deadline.png"]}]}}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	a := NewOpenAI(Params{BaseURL: srv.URL + "/apimart.ai", APIKey: "test-key"})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	result, err := a.ImageGenerate(ctx, "gpt-image-2", &ImageRequest{Prompt: "draw"})
+	if err != nil {
+		t.Fatalf("ImageGenerate: %v", err)
+	}
+	if result == nil || len(result.URLs) != 1 || result.URLs[0] != "https://example.test/apimart-deadline.png" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if taskPolls != 2 {
+		t.Fatalf("task polls = %d, want 2", taskPolls)
+	}
+}
+
+func TestOpenAIImageGenerateKeepsDeadlineWhenFinalAPIMartPollStillPending(t *testing.T) {
+	var taskPolls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/apimart.ai/v1/images/generations":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":[{"status":"submitted","task_id":"task_deadline_pending"}]}`))
+		case "/apimart.ai/v1/tasks/task_deadline_pending":
+			taskPolls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":{"status":"processing","progress":95}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	a := NewOpenAI(Params{BaseURL: srv.URL + "/apimart.ai", APIKey: "test-key"})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := a.ImageGenerate(ctx, "gpt-image-2", &ImageRequest{Prompt: "draw"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if taskPolls != 2 {
+		t.Fatalf("task polls = %d, want 2", taskPolls)
 	}
 }

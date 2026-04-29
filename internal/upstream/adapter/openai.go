@@ -365,7 +365,7 @@ func (a *openaiAdapter) pollAPIMartImageTask(ctx context.Context, taskID string)
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return a.finalizeAPIMartImageTaskAfterTimeout(taskID, ctx.Err())
 		case <-timer.C:
 		}
 		result, done, err := a.fetchAPIMartImageTask(ctx, taskID)
@@ -377,6 +377,25 @@ func (a *openaiAdapter) pollAPIMartImageTask(ctx context.Context, taskID string)
 		}
 		timer.Reset(2 * time.Second)
 	}
+}
+
+func (a *openaiAdapter) finalizeAPIMartImageTaskAfterTimeout(taskID string, originalErr error) (*ImageResult, error) {
+	if strings.TrimSpace(taskID) == "" || originalErr == nil {
+		return nil, originalErr
+	}
+	finalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, done, err := a.fetchAPIMartImageTask(finalCtx, taskID)
+	if err == nil {
+		if done {
+			return result, nil
+		}
+		return nil, originalErr
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return nil, originalErr
+	}
+	return nil, err
 }
 
 func (a *openaiAdapter) fetchAPIMartImageTask(ctx context.Context, taskID string) (*ImageResult, bool, error) {
