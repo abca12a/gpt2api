@@ -42,6 +42,7 @@
 ## 环境与运维
 
 - Alpine 二进制：部署到 `gpt2api/server` Alpine 镜像前，不能用默认 CGO 动态链接二进制覆盖 `deploy/bin/gpt2api`；应使用 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o deploy/bin/gpt2api ./cmd/server`。
+- Docker 网络：不能只看 `cli-proxy-api` 容器是 `Up` 就判断外置图片渠道正常；如果它在重建后只挂回自己的 `cliproxyapi_default`、没加入 `deploy_default`，`gpt2api-server` 容器内就会对 `cli-proxy-api` 报 `lookup ... on 127.0.0.11:53: no such host`。
 - 机器拓扑：当前 Codex 是号池，不是下游后端；涉及 IP、用户、项目目录、构建机职责时先看 `AGENTS.md`，不要沿用旧对话里的过期结论。
 - SSH 判断：han 给出已记录 IP 并问能否访问/进去时，优先理解为 SSH 登录和项目目录可达性，不要只做 ping/curl；默认 SSH 身份失败不等于远端无可用公钥。
 - 号池数据库：不能把 `deploy/docker-compose.yml` 示例口令当线上 MySQL 口令；查库优先从运行中容器环境读取真实连接信息，对外回复不暴露真实口令或 DSN。

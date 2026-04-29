@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,6 +35,11 @@ const maxReferenceImageBytes = 20 * 1024 * 1024
 
 // 同一次请求最多携带的参考图数量。
 const maxReferenceImages = 4
+
+const (
+	referenceFetchTimeout    = 20 * time.Second
+	referenceFetchMaxAttempt = 2
+)
 
 const (
 	asyncImageNoReferenceTimeout = 8 * time.Minute
@@ -1744,26 +1751,7 @@ func fetchReferenceBytes(ctx context.Context, s string) ([]byte, string, error) 
 		}
 		return []byte(payload), "", nil
 	case strings.HasPrefix(low, "http://"), strings.HasPrefix(low, "https://"):
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s, nil)
-		if err != nil {
-			return nil, "", err
-		}
-		// 15s 基本能覆盖 OSS / CDN / presigned URL
-		hc := &http.Client{Timeout: 15 * time.Second}
-		res, err := hc.Do(req)
-		if err != nil {
-			return nil, "", err
-		}
-		defer res.Body.Close()
-		if res.StatusCode >= 400 {
-			return nil, "", fmt.Errorf("下载失败 HTTP %d", res.StatusCode)
-		}
-		body, err := io.ReadAll(io.LimitReader(res.Body, int64(maxReferenceImageBytes)+1))
-		if err != nil {
-			return nil, "", err
-		}
-		name := filepath.Base(req.URL.Path)
-		return body, name, nil
+		return fetchReferenceHTTPBytes(ctx, s)
 	default:
 		// 当成裸 base64 处理
 		b, err := base64.StdEncoding.DecodeString(s)
@@ -1775,6 +1763,101 @@ func fetchReferenceBytes(ctx context.Context, s string) ([]byte, string, error) 
 		}
 		return b, "", nil
 	}
+}
+
+type referenceFetchHTTPStatusError struct {
+	StatusCode int
+}
+
+func (e referenceFetchHTTPStatusError) Error() string {
+	return fmt.Sprintf("下载失败 HTTP %d", e.StatusCode)
+}
+
+func fetchReferenceHTTPBytes(ctx context.Context, rawURL string) ([]byte, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	source := referenceFetchSourceLabel(rawURL)
+	var lastErr error
+	for attempt := 1; attempt <= referenceFetchMaxAttempt; attempt++ {
+		data, name, err := fetchReferenceHTTPBytesOnce(ctx, rawURL)
+		if err == nil {
+			return data, name, nil
+		}
+		lastErr = err
+		if attempt >= referenceFetchMaxAttempt || !isRetryableReferenceFetchErr(err) {
+			return nil, "", err
+		}
+		logger.L().Warn("reference image fetch transient fail, retry",
+			zap.String("source", source),
+			zap.Int("attempt", attempt),
+			zap.Error(err))
+		if err := sleepWithContext(ctx, time.Duration(attempt)*300*time.Millisecond); err != nil {
+			return nil, "", lastErr
+		}
+	}
+	return nil, "", lastErr
+}
+
+func fetchReferenceHTTPBytesOnce(ctx context.Context, rawURL string) ([]byte, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	hc := &http.Client{Timeout: referenceFetchTimeout}
+	res, err := hc.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= 400 {
+		return nil, "", referenceFetchHTTPStatusError{StatusCode: res.StatusCode}
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, int64(maxReferenceImageBytes)+1))
+	if err != nil {
+		return nil, "", err
+	}
+	name := filepath.Base(req.URL.Path)
+	return body, name, nil
+}
+
+func isRetryableReferenceFetchErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var statusErr referenceFetchHTTPStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode == http.StatusRequestTimeout ||
+			statusErr.StatusCode == http.StatusTooManyRequests ||
+			statusErr.StatusCode >= http.StatusInternalServerError
+	}
+	if errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "unexpected eof") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe")
+}
+
+func referenceFetchSourceLabel(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	path := u.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	return u.Host + path
 }
 
 func parseIntClamp(s string, min, max int) (int, error) {
