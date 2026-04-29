@@ -119,6 +119,7 @@
 - 2026-04-27：对外 `/p/img` 代理图统一补绝对 URL，避免下游把相对路径补到错误域名后下载到 HTML。
 - 2026-04-27：管理员“生成记录”改为轻量列表与懒加载图片/失败详情；不要把 base64/data URL 或 `result_urls` 大字段重新放回列表接口。
 - 2026-04-29：`image_tasks` 已新增结构化 `provider_trace`，同步/异步图片请求都会记录原始命中 provider、每一步尝试顺序、触发 free fallback 的原因、最终成功 provider，以及最终使用的内置账号（若落到 runner）。管理侧“生成记录”列表与详情会直接展示这条链路，`codex / apimart / free runner` 不再需要靠日志人工反推。边界是：外置渠道内部若还有更细的 auth 文件/子账号选择，当前号池只能看到命中的 channel，拿不到它们各自服务内部的具体 auth 标识。
+- 2026-04-29 19:51（Asia/Shanghai）：`feat(image): trace provider fallback chain` 已部署到当前号池。执行流程为：在当前仓库运行 `bash deploy/build-local.sh` 重新产出 `deploy/bin/gpt2api` 与 `web/dist/`，随后执行 `docker compose -f deploy/docker-compose.yml build server && docker compose -f deploy/docker-compose.yml up -d server` 重建 `gpt2api-server`；容器启动时自动执行 goose，`20260429000001_image_tasks_provider_trace.sql` 已成功应用，库内确认存在 `image_tasks.provider_trace`。部署后 `gpt2api-server` 于 `2026-04-29 19:51:33 +0800` 启动并恢复 `healthy`，本机 `https://127.0.0.1/healthz`、容器内 `http://127.0.0.1:8080/healthz` 与容器内 `http://cli-proxy-api:8317/healthz` 均返回正常；本次重启日志记录有 `1` 个运行中图片任务被标记为 `interrupted`。
 - 2026-04-27：内置 Runner 与外置图片渠道成功结果落库/结算前统一按请求 `n` 截断，防止上游多产出导致下游展示多图。
 - 2026-04-27：新增 `scripts/check-codex-auth-plans.sh`，用于 Codex auth 导入/轮换后拦截 free 或未知 plan 文件。
 - 2026-04-27：参考图上传的 Azure PUT/确认链路增加短重试；上传失败归类为 `network_transient`，不再直接当图片参数错误。
