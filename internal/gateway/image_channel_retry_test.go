@@ -113,8 +113,26 @@ func TestIsRetryableImageChannelError(t *testing.T) {
 	if !isRetryableImageChannelError(&adapter.UpstreamHTTPError{Status: http.StatusBadGateway, Code: "internal_server_error", Type: "server_error", Message: "stream disconnected before completion"}) {
 		t.Fatal("502 stream disconnect should be retryable")
 	}
+	if !isRetryableImageChannelError(context.DeadlineExceeded) {
+		t.Fatal("deadline exceeded should remain retryable for fallback classification")
+	}
 	if isRetryableImageChannelError(&adapter.UpstreamHTTPError{Status: http.StatusBadRequest, Code: "invalid_value", Type: "image_generation_user_error", Message: "Invalid size"}) {
 		t.Fatal("400 invalid_value should not be retryable")
+	}
+}
+
+func TestShouldRetrySameImageChannel(t *testing.T) {
+	if !shouldRetrySameImageChannel(&adapter.UpstreamHTTPError{Status: http.StatusBadGateway, Code: "internal_server_error", Type: "server_error", Message: "stream disconnected before completion"}) {
+		t.Fatal("502 stream disconnect should retry same channel")
+	}
+	if shouldRetrySameImageChannel(context.DeadlineExceeded) {
+		t.Fatal("deadline exceeded should not retry same channel")
+	}
+	if shouldRetrySameImageChannel(&adapter.UpstreamHTTPError{Status: http.StatusRequestTimeout, Message: "timeout"}) {
+		t.Fatal("408 timeout should not retry same channel")
+	}
+	if shouldRetrySameImageChannel(&adapter.UpstreamHTTPError{Status: http.StatusBadRequest, Code: "invalid_value", Type: "image_generation_user_error", Message: "Invalid size"}) {
+		t.Fatal("400 invalid_value should not retry same channel")
 	}
 }
 
@@ -168,16 +186,22 @@ func TestImageChannelFreeFallbackRunOptionsRequireFreePlan(t *testing.T) {
 }
 
 func TestImageChannelAsyncTimeoutCapsExternalChannelBeforeFallback(t *testing.T) {
-	if got := imageChannelAsyncPerAttemptTimeout(false); got != 2*time.Minute {
-		t.Fatalf("no-reference async per-attempt timeout = %s, want 2m", got)
+	if got := imageChannelAsyncPerAttemptTimeout(false); got != 90*time.Second {
+		t.Fatalf("no-reference async per-attempt timeout = %s, want 90s", got)
 	}
-	if got := imageChannelAsyncTimeout(false); got != 4*time.Minute+30*time.Second {
-		t.Fatalf("no-reference async timeout = %s, want 4m30s", got)
+	if got := imageChannelAsyncRouteTimeout(false); got != 90*time.Second {
+		t.Fatalf("no-reference async route timeout = %s, want 90s", got)
+	}
+	if got := imageChannelAsyncTimeout(2, false); got != 3*time.Minute+30*time.Second {
+		t.Fatalf("no-reference async timeout = %s, want 3m30s", got)
 	}
 	if got := imageChannelAsyncPerAttemptTimeout(true); got != 2*time.Minute {
 		t.Fatalf("reference async per-attempt timeout = %s, want 2m", got)
 	}
-	if got := imageChannelAsyncTimeout(true); got != 4*time.Minute+30*time.Second {
+	if got := imageChannelAsyncRouteTimeout(true); got != 2*time.Minute {
+		t.Fatalf("reference async route timeout = %s, want 2m", got)
+	}
+	if got := imageChannelAsyncTimeout(2, true); got != 4*time.Minute+30*time.Second {
 		t.Fatalf("reference async timeout = %s, want 4m30s", got)
 	}
 	if got := imageChannelTaskTimeout(false); got != 8*time.Minute {
@@ -186,8 +210,8 @@ func TestImageChannelAsyncTimeoutCapsExternalChannelBeforeFallback(t *testing.T)
 	if got := imageChannelTaskTimeout(true); got != 8*time.Minute+30*time.Second {
 		t.Fatalf("reference task timeout = %s, want 8m30s", got)
 	}
-	if imageChannelAsyncTimeout(true) >= imageChannelTaskTimeout(true) {
-		t.Fatalf("reference channel timeout %s should leave fallback reserve inside total task timeout %s", imageChannelAsyncTimeout(true), imageChannelTaskTimeout(true))
+	if imageChannelAsyncTimeout(2, true) >= imageChannelTaskTimeout(true) {
+		t.Fatalf("reference channel timeout %s should leave fallback reserve inside total task timeout %s", imageChannelAsyncTimeout(2, true), imageChannelTaskTimeout(true))
 	}
 }
 
@@ -237,7 +261,7 @@ func TestActualCountFallsBackToOneForEmptySuccessfulChannelResult(t *testing.T) 
 		t.Fatalf("actualCount(two images) = %d, want 2", got)
 	}
 }
-func TestImageChannelGenerateWithRetryUsesIndependentAttemptTimeout(t *testing.T) {
+func TestImageChannelGenerateWithRetryDoesNotRetryAttemptTimeout(t *testing.T) {
 	rt := &channel.Route{
 		Channel:       &channel.Channel{ID: 1, Name: "codex-cli-proxy-image"},
 		UpstreamModel: "gpt-image-2",
@@ -250,13 +274,13 @@ func TestImageChannelGenerateWithRetryUsesIndependentAttemptTimeout(t *testing.T
 	got, err := imageChannelGenerateWithRetry(ctx, rt, &adapter.ImageRequest{Prompt: "draw"}, "img_retry_timeout", 100*time.Millisecond, func(context.Context, time.Duration) error {
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("imageChannelGenerateWithRetry() error = %v, want nil", err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("imageChannelGenerateWithRetry() error = %v, want deadline exceeded", err)
 	}
-	if got == nil || len(got.B64s) != 1 || got.B64s[0] != "retry-ok" {
+	if got != nil {
 		t.Fatalf("unexpected result: %#v", got)
 	}
-	if stub := rt.Adapter.(*blockingImageChannelAdapter); stub.calls != 2 {
-		t.Fatalf("adapter calls = %d, want 2", stub.calls)
+	if stub := rt.Adapter.(*blockingImageChannelAdapter); stub.calls != 1 {
+		t.Fatalf("adapter calls = %d, want 1", stub.calls)
 	}
 }

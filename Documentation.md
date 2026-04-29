@@ -17,6 +17,7 @@
 - 2026-04-29 当前号池巡检：`gpt2api-server / mysql / redis / nginx / cli-proxy-api` 均在线，`https://127.0.0.1/healthz`、容器内 `http://127.0.0.1:8080/healthz` 与 `http://cli-proxy-api:8317/healthz` 返回正常；数据库 `oai_accounts` 共 409 条，仅 `healthy=17`（`free=8`、`plus=9`），其余 `warned=392`。当前仅 1 条代理、健康分 100、400 个账号已绑定代理，暂无“代理池整体失效”迹象。
 - 2026-04-29 当前外置 Codex auth 文件池共 34 个文件（`plus=31`、`team=3`、`forbidden_or_unknown=0`），未混入 free/未知 plan；但 `codex-cli-proxy-image(channel_id=1)` 当天持续报 `Tool choice 'image_generation' not found in 'tools' parameter.`，`CLIProxyAPI/logs/main.log` 当天已出现 33 次该错误，说明问题不在 auth 文件数量，而在当前外置 Codex 图片执行链路本身。
 - 2026-04-29 当前图片链路状态：近 24 小时 `image_tasks` 共 173 条，`success=163`、`failed=10`，成功率约 `94.2%`；今天截至巡检时共 111 条，`success=105`、`failed=5`，成功率约 `94.6%`。多数成功单是在外置 Codex 或 APIMart 失败后回落内置 free runner 完成，因此“整体可出图”不代表“外置图片号池健康”。
+- 2026-04-29 基于最近 24 小时 `image_tasks.status='success'` 的复盘，第一层外置图片渠道成功单（`account_id=0`）平均耗时约 `99.9s`，而 fallback 到内置 runner 的成功单平均耗时约 `303.7s`。部署后能严格对齐到日志 `reference_count` 的第一层成功样本只有 2 单，均为图生图，耗时分别 `113s` 和 `227s`；同一窗口内尚未拿到“文生图且第一层成功”的严格样本，因此不能拍脑袋把图生图第一层硬切到 `120s` 以下。
 
 ### 图片任务协议
 
@@ -100,6 +101,7 @@
 - 2026-04-28：已将当前 Codex 环境公钥对应的私钥 `~/.ssh/cliproxyapi_212_50_232_214_ed25519` 加入构建机 `43.152.240.30` 上 `ubuntu` 用户的 `~/.ssh/authorized_keys`，并完成免密 SSH 验证。后续涉及老前端或画布构建时，可直接从当前号池机器进入构建机，不再依赖临时密码登录。
 - 2026-04-28：为 OpenAI 兼容图片适配器补充 APIMart 异步任务兼容。`/v1/images/generations` 若返回 `task_id`，服务端会自动轮询 `/v1/tasks/{id}` 并提取 `result.images[].url`；这样数据库里的 `apimart` 渠道可以作为 `gpt-image-2` 的第二跳外置兜底，而不是只能直落内置 free runner。
 - 2026-04-28：量化最近 24 小时 `gpt2api-server` 日志，外置 Codex 图片渠道触发 `fallback to free account runner` 约 68 次，而异步生图提交约 182 次；主要触发源不是参数错误，而是 `cli-proxy-api:8317` 在旧的 90 秒/2 分钟窗口内大量 `context deadline exceeded`。现已把外置渠道改成“单次独立限时 + 同渠道最多重试一次”，并把外置阶段收敛到统一 `4 分 30 秒` 窗口；其中参考图单次等待也从 3 分钟收短到 2 分钟，避免 Codex/APIMart 两跳都把 free 兜底时间吃空。
+- 2026-04-29：继续针对“第一层拖几分钟才切层”收敛策略，代码已调整为“按 route 分配第一层预算”，不再让 `codex-cli-proxy-image` 靠两次 `timeout` 吃光整段外置窗口；同时对 `context deadline exceeded / timeout` 不再在同一渠道内重试，只保留 `502/EOF/stream disconnected` 这类快失败的短重试。当前本地阈值为：无参考图单 route `90s`、两条 route 总预算 `3m30s`；有参考图单 route `2m`、两条 route 总预算 `4m30s`。截至本次记录时该改动已在仓库通过 `go test ./internal/gateway/...`，但尚未热部署，因为线上仍有进行中的图片任务，直接重启会把它们标成 `interrupted`。
 - 2026-04-28：继续收敛异步图片长尾后确认，`10+` 分钟不出图的主因是“外置图片渠道超时后，再给 free runner 新开一整段总预算”，而不是任务根本没下发。现已将图片任务改为共享总窗口：无参考图整单 8 分钟、参考图整单 8 分 30 秒；外置渠道仍只占用前 4 分 30 秒，Codex/APIMart 连续超时后，free runner 只吃剩余时间，不再把总时长串行叠加到 10~15 分钟以上。此次阈值保留了近 24 小时里真实存在的 `7m53s` 参考图成功单空间，同时把此前 `12m47s` 的失败长尾提前收口。
 - 2026-04-28：上述“异步图片总预算收敛”已联动部署到三段链路。当前号池 `gpt2api` 已上线共享总窗口策略；下游后端 `new-api` 已把同步图片等待上限从 10 分钟收短到 9 分钟；下游前端 `new-api-web` 已把首轮轮询从 10 秒提前到 3 秒，并把总等待提示窗口从 15 分钟收短到 9 分钟。部署后分别验证了 `gpt2api-server` 健康检查、`new-api-local` 的 `/api/status`、以及 `https://dimilinks.com/` 的线上 hash，三边均已生效。
 - 2026-04-28：上述“减少 Codex 会员链路过早切 Free”修复已在当前号池部署。执行 `bash deploy/build-local.sh`、`docker compose -f deploy/docker-compose.yml build server`、`docker compose -f deploy/docker-compose.yml up -d server` 后，`gpt2api-server` 容器重新启动并恢复 `healthy`；容器内 `http://127.0.0.1:8080/healthz` 与 `http://cli-proxy-api:8317/healthz` 均返回 ok。本次重启有 1 个运行中图片任务被标记为 interrupted。

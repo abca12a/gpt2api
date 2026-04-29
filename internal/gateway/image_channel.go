@@ -301,14 +301,22 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		hasReferences := len(job.References) > 0
 		taskCtx, cancelTask := context.WithTimeout(context.Background(), imageChannelTaskTimeout(hasReferences))
 		defer cancelTask()
-		channelCtx, cancelChannel := context.WithTimeout(taskCtx, imageChannelAsyncTimeout(hasReferences))
+		channelCtx, cancelChannel := context.WithTimeout(taskCtx, imageChannelAsyncTimeout(len(job.Routes), hasReferences))
 		defer cancelChannel()
 
 		var lastErr error
 		var result *adapter.ImageResult
 		var selected *channel.Route
+		perAttemptTimeout := imageChannelAsyncPerAttemptTimeout(hasReferences)
+		routeTimeout := imageChannelAsyncRouteTimeout(hasReferences)
 		for _, rt := range job.Routes {
-			r, err := imageChannelGenerateWithRetry(channelCtx, rt, job.Request, job.TaskID, imageChannelAsyncPerAttemptTimeout(hasReferences), nil)
+			routeCtx := channelCtx
+			cancelRoute := func() {}
+			if routeTimeout > 0 {
+				routeCtx, cancelRoute = context.WithTimeout(channelCtx, routeTimeout)
+			}
+			r, err := imageChannelGenerateWithRetry(routeCtx, rt, job.Request, job.TaskID, perAttemptTimeout, nil)
+			cancelRoute()
 			if err != nil {
 				lastErr = err
 				if adapter.IsContentModerationError(err) {
@@ -762,12 +770,18 @@ func imageChannelAsyncPerAttemptTimeout(hasReferences bool) time.Duration {
 	if hasReferences {
 		return 2 * time.Minute
 	}
-	return 2 * time.Minute
+	return 90 * time.Second
 }
 
-func imageChannelAsyncTimeout(hasReferences bool) time.Duration {
-	const maxAttempts = 2
-	return time.Duration(maxAttempts)*imageChannelAsyncPerAttemptTimeout(hasReferences) + 30*time.Second
+func imageChannelAsyncRouteTimeout(hasReferences bool) time.Duration {
+	return imageChannelAsyncPerAttemptTimeout(hasReferences)
+}
+
+func imageChannelAsyncTimeout(routeCount int, hasReferences bool) time.Duration {
+	if routeCount <= 0 {
+		routeCount = 1
+	}
+	return time.Duration(routeCount)*imageChannelAsyncRouteTimeout(hasReferences) + 30*time.Second
 }
 
 func imageChannelTaskTimeout(hasReferences bool) time.Duration {
@@ -807,7 +821,7 @@ func imageChannelGenerateWithRetry(ctx context.Context, rt *channel.Route, req *
 			return result, nil
 		}
 		lastErr = err
-		if attempt >= maxAttempts || !isRetryableImageChannelError(err) {
+		if attempt >= maxAttempts || !shouldRetrySameImageChannel(err) {
 			return nil, err
 		}
 		logger.L().Warn("channel image transient fail, retry same channel",
@@ -842,6 +856,28 @@ func isRetryableImageChannelError(err error) bool {
 		strings.Contains(msg, "connection reset") ||
 		strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "broken pipe")
+}
+
+func shouldRetrySameImageChannel(err error) bool {
+	if !isRetryableImageChannelError(err) {
+		return false
+	}
+	return !isImageChannelTimeoutError(err)
+}
+
+func isImageChannelTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var upstream *adapter.UpstreamHTTPError
+	if errors.As(err, &upstream) && upstream.Status == http.StatusRequestTimeout {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "timeout")
 }
 
 func imageChannelRetryDelay(attempt int) time.Duration {
