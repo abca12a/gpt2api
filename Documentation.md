@@ -14,6 +14,9 @@
 - OAuth 导入只是获取账号凭据的新入口，不替换旧导入链路；默认回调仍优先使用 OpenAI/Codex 常用的 `http://localhost:1455/auth/callback`。
 - OAuth 会话状态保存在服务端内存，TTL 为 30 分钟；服务重启或超时后需要重新生成授权链接。
 - OAuth 的 `proxy_id` 同时用于服务端换 token 和新建账号默认代理绑定；更新已有账号时不会自动改绑原代理。
+- 2026-04-29 当前号池巡检：`gpt2api-server / mysql / redis / nginx / cli-proxy-api` 均在线，`https://127.0.0.1/healthz`、容器内 `http://127.0.0.1:8080/healthz` 与 `http://cli-proxy-api:8317/healthz` 返回正常；数据库 `oai_accounts` 共 409 条，仅 `healthy=17`（`free=8`、`plus=9`），其余 `warned=392`。当前仅 1 条代理、健康分 100、400 个账号已绑定代理，暂无“代理池整体失效”迹象。
+- 2026-04-29 当前外置 Codex auth 文件池共 34 个文件（`plus=31`、`team=3`、`forbidden_or_unknown=0`），未混入 free/未知 plan；但 `codex-cli-proxy-image(channel_id=1)` 当天持续报 `Tool choice 'image_generation' not found in 'tools' parameter.`，`CLIProxyAPI/logs/main.log` 当天已出现 33 次该错误，说明问题不在 auth 文件数量，而在当前外置 Codex 图片执行链路本身。
+- 2026-04-29 当前图片链路状态：近 24 小时 `image_tasks` 共 173 条，`success=163`、`failed=10`，成功率约 `94.2%`；今天截至巡检时共 111 条，`success=105`、`failed=5`，成功率约 `94.6%`。多数成功单是在外置 Codex 或 APIMart 失败后回落内置 free runner 完成，因此“整体可出图”不代表“外置图片号池健康”。
 
 ### 图片任务协议
 
