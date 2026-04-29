@@ -21,6 +21,7 @@ type TaskTrace struct {
 	Fallback *TaskTraceFallback `json:"fallback,omitempty"`
 	Final    TaskTraceEndpoint  `json:"final,omitempty"`
 	Steps    []TaskTraceStep    `json:"steps,omitempty"`
+	Timing   *TaskTraceTiming   `json:"timing,omitempty"`
 }
 
 type TaskTraceEndpoint struct {
@@ -208,7 +209,7 @@ func normalizeTaskTrace(trace *TaskTrace) *TaskTrace {
 	if trace == nil {
 		return nil
 	}
-	if trace.Original.Provider == "" && trace.Final.Provider == "" && len(trace.Steps) == 0 && trace.Fallback == nil {
+	if trace.Original.Provider == "" && trace.Final.Provider == "" && len(trace.Steps) == 0 && trace.Fallback == nil && trace.Timing == nil {
 		return nil
 	}
 	return trace

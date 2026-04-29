@@ -116,7 +116,13 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	var selected *channel.Route
 	for _, rt := range routes {
 		step := imageTraceStepForRoute(rt)
-		r, err := imageChannelGenerateWithRetry(ctx, rt, ir, "", 0, nil)
+		observer := &imageChannelGenerateObserver{}
+		routeStart := time.Now()
+		r, err := imageChannelGenerateWithRetry(adapter.WithImageGenerateObserver(ctx, observer), rt, ir, "", 0, nil)
+		recordImageChannelRouteTiming(trace, req.taskID, time.Since(routeStart), observer,
+			zap.Uint64("channel_id", rt.Channel.ID),
+			zap.String("channel_name", rt.Channel.Name),
+		)
 		if err != nil {
 			lastErr = err
 			lastFailure = imageChannelFailureFromErr(err)
@@ -192,6 +198,9 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		if h.DAO != nil && req.taskID != "" {
 			_ = h.DAO.MarkFailedDetail(c.Request.Context(), req.taskID, failure.Code, failure.Detail)
 		}
+		imagepkg.LogTaskLifecycle(req.taskID, trace, imagepkg.StatusFailed, failure.Code,
+			zap.String("mode", "channel"),
+		)
 		refund(failure.Code)
 		openAIError(c, failure.HTTPStatus, failure.Code, failure.Message)
 		return true
@@ -231,6 +240,9 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		_ = h.DAO.MarkSuccess(c.Request.Context(), req.taskID, "", nil, imageChannelResultURLs(result), finalCost)
 		h.persistRequestTrace(c.Request.Context(), req, trace)
 	}
+	imagepkg.LogTaskLifecycle(req.taskID, trace, imagepkg.StatusSuccess, "",
+		zap.String("mode", "channel"),
+	)
 
 	c.JSON(http.StatusOK, ImageGenResponse{
 		Created: time.Now().Unix(),
@@ -348,6 +360,53 @@ type imageChannelAsyncJob struct {
 	RunnerPlans   []imageRunnerFallbackPlan
 }
 
+type imageChannelGenerateObserver struct {
+	submit time.Duration
+	poll   time.Duration
+}
+
+func (o *imageChannelGenerateObserver) RecordSubmitDuration(d time.Duration) {
+	if o == nil || d <= 0 {
+		return
+	}
+	o.submit += d
+}
+
+func (o *imageChannelGenerateObserver) RecordPollDuration(d time.Duration) {
+	if o == nil || d <= 0 {
+		return
+	}
+	o.poll += d
+}
+
+func recordImageChannelRouteTiming(trace *imagepkg.TaskTrace, taskID string, total time.Duration, observer *imageChannelGenerateObserver, fields ...zap.Field) {
+	if trace == nil || total <= 0 {
+		return
+	}
+	var submitDuration time.Duration
+	var pollDuration time.Duration
+	if observer != nil {
+		submitDuration = observer.submit
+		pollDuration = observer.poll
+	}
+	waitDuration := total - submitDuration - pollDuration
+	if waitDuration < 0 {
+		waitDuration = 0
+	}
+	if submitDuration > 0 {
+		trace.AddSubmitDuration(submitDuration)
+		imagepkg.LogTaskStage(taskID, imagepkg.TaskPhaseSubmit, submitDuration, fields...)
+	}
+	if waitDuration > 0 {
+		trace.AddUpstreamWaitDuration(waitDuration)
+		imagepkg.LogTaskStage(taskID, imagepkg.TaskPhaseUpstreamWait, waitDuration, fields...)
+	}
+	if pollDuration > 0 {
+		trace.AddPollDuration(pollDuration)
+		imagepkg.LogTaskStage(taskID, imagepkg.TaskPhaseTaskPoll, pollDuration, fields...)
+	}
+}
+
 func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 	go func() {
 		startAt := time.Now()
@@ -394,8 +453,14 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 			if routeTimeout > 0 {
 				routeCtx, cancelRoute = context.WithTimeout(channelCtx, routeTimeout)
 			}
-			r, err := imageChannelGenerateWithRetry(routeCtx, rt, job.Request, job.TaskID, perAttemptTimeout, nil)
+			observer := &imageChannelGenerateObserver{}
+			routeStart := time.Now()
+			r, err := imageChannelGenerateWithRetry(adapter.WithImageGenerateObserver(routeCtx, observer), rt, job.Request, job.TaskID, perAttemptTimeout, nil)
 			cancelRoute()
+			recordImageChannelRouteTiming(trace, job.TaskID, time.Since(routeStart), observer,
+				zap.Uint64("channel_id", rt.Channel.ID),
+				zap.String("channel_name", rt.Channel.Name),
+			)
 			if err != nil {
 				lastErr = err
 				lastFailure = imageChannelFailureFromErr(err)
@@ -492,6 +557,9 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 					}
 					rec.Status = usage.StatusSuccess
 					rec.CreditCost = job.Cost
+					imagepkg.LogTaskLifecycle(job.TaskID, trace, imagepkg.StatusSuccess, "",
+						zap.String("mode", "channel_runner_fallback"),
+					)
 					return
 				}
 				rec.Status = usage.StatusFailed
@@ -499,6 +567,9 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 				if job.Cost > 0 && h.Billing != nil {
 					_ = h.Billing.Refund(context.Background(), job.UserID, job.KeyID, job.Cost, job.RefID, "image channel async runner fallback refund")
 				}
+				imagepkg.LogTaskLifecycle(job.TaskID, trace, imagepkg.StatusFailed, rec.ErrorCode,
+					zap.String("mode", "channel_runner_fallback"),
+				)
 				return
 			}
 			failure := imageChannelFailureFromErr(lastErr)
@@ -513,6 +584,9 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 			if job.Cost > 0 && h.Billing != nil {
 				_ = h.Billing.Refund(context.Background(), job.UserID, job.KeyID, job.Cost, job.RefID, "image channel async refund")
 			}
+			imagepkg.LogTaskLifecycle(job.TaskID, trace, imagepkg.StatusFailed, failure.Code,
+				zap.String("mode", "channel_async"),
+			)
 			return
 		}
 		result = limitImageChannelResult(result, job.Request.N)
@@ -540,6 +614,9 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		rec.Status = usage.StatusSuccess
 		rec.CreditCost = finalCost
 		rec.ImageCount = actualCount(result)
+		imagepkg.LogTaskLifecycle(job.TaskID, trace, imagepkg.StatusSuccess, "",
+			zap.String("mode", "channel_async"),
+		)
 	}()
 }
 
@@ -626,7 +703,13 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	var selected *channel.Route
 	for _, rt := range routes {
 		step := imageTraceStepForRoute(rt)
-		r, err := imageChannelGenerateWithRetry(ctx, rt, ir, "", 0, nil)
+		observer := &imageChannelGenerateObserver{}
+		routeStart := time.Now()
+		r, err := imageChannelGenerateWithRetry(adapter.WithImageGenerateObserver(ctx, observer), rt, ir, "", 0, nil)
+		recordImageChannelRouteTiming(trace, req.taskID, time.Since(routeStart), observer,
+			zap.Uint64("channel_id", rt.Channel.ID),
+			zap.String("channel_name", rt.Channel.Name),
+		)
 		if err != nil {
 			lastErr = err
 			lastFailure = imageChannelFailureFromErr(err)
@@ -702,6 +785,9 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 		if h.DAO != nil && req.taskID != "" {
 			_ = h.DAO.MarkFailedDetail(c.Request.Context(), req.taskID, failure.Code, failure.Detail)
 		}
+		imagepkg.LogTaskLifecycle(req.taskID, trace, imagepkg.StatusFailed, failure.Code,
+			zap.String("mode", "chat_image_channel"),
+		)
 		refund(failure.Code)
 		openAIError(c, failure.HTTPStatus, failure.Code, failure.Message)
 		return true
@@ -730,6 +816,9 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 		_ = h.DAO.MarkSuccess(c.Request.Context(), req.taskID, "", nil, imageChannelResultURLs(result), finalCost)
 		h.persistRequestTrace(c.Request.Context(), req, trace)
 	}
+	imagepkg.LogTaskLifecycle(req.taskID, trace, imagepkg.StatusSuccess, "",
+		zap.String("mode", "chat_image_channel"),
+	)
 
 	c.JSON(http.StatusOK, imageChannelChatResponse(m.Slug, result))
 	return true
@@ -954,6 +1043,7 @@ func imageChannelFallbackRunOptions(job imageChannelAsyncJob) imagepkg.RunOption
 		PerAttemptTimeout: perAttemptTimeout,
 		PollMaxWait:       pollMaxWait,
 		References:        job.References,
+		Trace:             job.ProviderTrace,
 	}
 	return opt
 }

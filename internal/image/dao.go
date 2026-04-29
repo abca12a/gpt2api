@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"go.uber.org/zap"
+
+	"github.com/432539/gpt2api/pkg/logger"
 )
 
 // ErrNotFound 未找到任务。
@@ -20,8 +23,27 @@ type DAO struct{ db *sqlx.DB }
 // NewDAO 构造。
 func NewDAO(db *sqlx.DB) *DAO { return &DAO{db: db} }
 
+const slowImageDAOQueryThreshold = 300 * time.Millisecond
+
+func (d *DAO) logSlowQuery(op string, startedAt time.Time, fields ...zap.Field) {
+	if d == nil {
+		return
+	}
+	cost := time.Since(startedAt)
+	if cost < slowImageDAOQueryThreshold {
+		return
+	}
+	baseFields := []zap.Field{
+		zap.String("op", op),
+		zap.Duration("cost", cost),
+	}
+	baseFields = append(baseFields, fields...)
+	logger.L().Warn("slow image dao query", baseFields...)
+}
+
 // Create 插入新任务。
 func (d *DAO) Create(ctx context.Context, t *Task) error {
+	startedAt := time.Now()
 	res, err := d.db.ExecContext(ctx, `
 INSERT INTO image_tasks
   (task_id, user_id, key_id, model_id, account_id,
@@ -42,23 +64,28 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, NOW())`,
 	}
 	id, _ := res.LastInsertId()
 	t.ID = uint64(id)
+	d.logSlowQuery("Create", startedAt, zap.String("task_id", t.TaskID))
 	return nil
 }
 
 // UpdateProviderTrace 更新任务的渠道/账号链路追踪。
 func (d *DAO) UpdateProviderTrace(ctx context.Context, taskID string, trace *TaskTrace) error {
+	startedAt := time.Now()
 	_, err := d.db.ExecContext(ctx,
 		`UPDATE image_tasks SET provider_trace = ? WHERE task_id = ?`,
 		nullJSON(EncodeProviderTrace(trace)), taskID)
+	d.logSlowQuery("UpdateProviderTrace", startedAt, zap.String("task_id", taskID))
 	return err
 }
 
 // MarkRunning 标记为运行中(记录起始时间 + account_id)。
 func (d *DAO) MarkRunning(ctx context.Context, taskID string, accountID uint64) error {
+	startedAt := time.Now()
 	_, err := d.db.ExecContext(ctx, `
 UPDATE image_tasks
    SET status='running', account_id=?, started_at=NOW()
  WHERE task_id=? AND status IN ('queued','dispatched')`, accountID, taskID)
+	d.logSlowQuery("MarkRunning", startedAt, zap.String("task_id", taskID), zap.Uint64("account_id", accountID))
 	return err
 }
 
@@ -67,13 +94,16 @@ UPDATE image_tasks
 // 而调度完成后 status 已经是 running,需要一个幂等的小方法。
 // 图片代理端点按 task_id 查账号时依赖这个字段。
 func (d *DAO) SetAccount(ctx context.Context, taskID string, accountID uint64) error {
+	startedAt := time.Now()
 	_, err := d.db.ExecContext(ctx,
 		`UPDATE image_tasks SET account_id = ? WHERE task_id = ?`, accountID, taskID)
+	d.logSlowQuery("SetAccount", startedAt, zap.String("task_id", taskID), zap.Uint64("account_id", accountID))
 	return err
 }
 
 // MarkSuccess 更新成功状态。
 func (d *DAO) MarkSuccess(ctx context.Context, taskID, convID string, fileIDs, resultURLs []string, creditCost int64) error {
+	startedAt := time.Now()
 	fidB, _ := json.Marshal(fileIDs)
 	urlB, _ := json.Marshal(resultURLs)
 	_, err := d.db.ExecContext(ctx, `
@@ -85,13 +115,16 @@ UPDATE image_tasks
        credit_cost=?,
        finished_at=NOW()
  WHERE task_id=?`, convID, fidB, urlB, creditCost, taskID)
+	d.logSlowQuery("MarkSuccess", startedAt, zap.String("task_id", taskID))
 	return err
 }
 
 // UpdateCost 仅更新 credit_cost(Runner 成功后由网关层调用)。
 func (d *DAO) UpdateCost(ctx context.Context, taskID string, cost int64) error {
+	startedAt := time.Now()
 	_, err := d.db.ExecContext(ctx,
 		`UPDATE image_tasks SET credit_cost = ? WHERE task_id = ?`, cost, taskID)
+	d.logSlowQuery("UpdateCost", startedAt, zap.String("task_id", taskID))
 	return err
 }
 
@@ -102,10 +135,12 @@ func (d *DAO) MarkFailed(ctx context.Context, taskID, errorCode string) error {
 
 // MarkFailedDetail 更新失败状态,同时保留原始错误详情方便任务查询排障。
 func (d *DAO) MarkFailedDetail(ctx context.Context, taskID, errorCode, detail string) error {
+	startedAt := time.Now()
 	_, err := d.db.ExecContext(ctx, `
 UPDATE image_tasks
    SET status='failed', error=?, finished_at=NOW()
  WHERE task_id=?`, truncate(FormatTaskError(errorCode, detail), 500), taskID)
+	d.logSlowQuery("MarkFailedDetail", startedAt, zap.String("task_id", taskID), zap.String("error_code", errorCode))
 	return err
 }
 
@@ -113,6 +148,7 @@ UPDATE image_tasks
 // 异步生图任务运行在进程内 goroutine 中；如果服务重启，旧的 queued / dispatched /
 // running 记录已经没有执行者，除非后续引入外部队列，否则它们不可能再自然完成。
 func (d *DAO) MarkInterruptedBefore(ctx context.Context, before time.Time) (int64, error) {
+	startedAt := time.Now()
 	res, err := d.db.ExecContext(ctx, `
 UPDATE image_tasks
    SET status='failed', error=?, finished_at=NOW()
@@ -122,11 +158,13 @@ UPDATE image_tasks
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
+	d.logSlowQuery("MarkInterruptedBefore", startedAt, zap.Time("before", before), zap.Int64("affected", n))
 	return n, nil
 }
 
 // Get 根据对外 task_id 查询。
 func (d *DAO) Get(ctx context.Context, taskID string) (*Task, error) {
+	startedAt := time.Now()
 	var t Task
 	err := d.db.GetContext(ctx, &t, `
 SELECT id, task_id, user_id, key_id, model_id, account_id,
@@ -142,6 +180,7 @@ SELECT id, task_id, user_id, key_id, model_id, account_id,
 	if err != nil {
 		return nil, err
 	}
+	d.logSlowQuery("Get", startedAt, zap.String("task_id", taskID))
 	return &t, nil
 }
 
@@ -150,6 +189,7 @@ func (d *DAO) ListByUser(ctx context.Context, userID uint64, limit, offset int) 
 	if limit <= 0 {
 		limit = 20
 	}
+	startedAt := time.Now()
 	var out []Task
 	err := d.db.SelectContext(ctx, &out, `
 SELECT id, task_id, user_id, key_id, model_id, account_id,
@@ -161,6 +201,7 @@ SELECT id, task_id, user_id, key_id, model_id, account_id,
  WHERE user_id = ?
  ORDER BY id DESC
  LIMIT ? OFFSET ?`, userID, limit, offset)
+	d.logSlowQuery("ListByUser", startedAt, zap.Uint64("user_id", userID), zap.Int("limit", limit), zap.Int("offset", offset))
 	return out, err
 }
 
@@ -186,24 +227,30 @@ func (d *DAO) ListAdmin(ctx context.Context, f AdminTaskFilter, limit, offset in
 
 	var total int64
 	countSQL := `SELECT COUNT(*) FROM image_tasks t LEFT JOIN users u ON u.id=t.user_id WHERE ` + where
+	countStartedAt := time.Now()
 	if err := d.db.GetContext(ctx, &total, countSQL, args...); err != nil {
 		return nil, 0, err
 	}
+	d.logSlowQuery("ListAdmin.count", countStartedAt, zap.String("where", where))
 
 	listSQL := adminTaskListSQL(where)
 	args = append(args, limit, offset)
+	listStartedAt := time.Now()
 	var out []AdminTaskRow
 	err := d.db.SelectContext(ctx, &out, listSQL, args...)
+	d.logSlowQuery("ListAdmin.list", listStartedAt, zap.String("where", where), zap.Int("limit", limit), zap.Int("offset", offset))
 	return out, total, err
 }
 
 func (d *DAO) ListProviderTraceStats(ctx context.Context, since time.Time) ([]ProviderTraceStatRow, error) {
 	rows := make([]ProviderTraceStatRow, 0, 128)
+	startedAt := time.Now()
 	err := d.db.SelectContext(ctx, &rows, `
-SELECT status, provider_trace
+SELECT task_id, status, provider_trace, error, created_at, started_at, finished_at
   FROM image_tasks
  WHERE created_at >= ?
    AND provider_trace IS NOT NULL`, since)
+	d.logSlowQuery("ListProviderTraceStats", startedAt, zap.Time("since", since))
 	return rows, err
 }
 

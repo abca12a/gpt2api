@@ -202,6 +202,7 @@ func parseOpenAINonStream(body io.ReadCloser, ch chan<- ChatChunk) {
 
 // ImageGenerate 调用 /v1/images/generations(DALL·E 3 / gpt-image-1 等)。
 func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string, req *ImageRequest) (*ImageResult, error) {
+	requestStart := time.Now()
 	n := req.N
 	if n <= 0 {
 		n = 1
@@ -293,8 +294,17 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 	if err != nil {
 		return nil, fmt.Errorf("openai: image read: %w", err)
 	}
+	observer := imageGenerateObserverFromContext(ctx)
 	if taskID := parseAPIMartImageTaskID(bodyData); taskID != "" {
-		return a.pollAPIMartImageTask(ctx, taskID)
+		if observer != nil {
+			observer.RecordSubmitDuration(time.Since(requestStart))
+		}
+		pollStart := time.Now()
+		result, err := a.pollAPIMartImageTask(ctx, taskID)
+		if observer != nil {
+			observer.RecordPollDuration(time.Since(pollStart))
+		}
+		return result, err
 	}
 	var obj struct {
 		Data []struct {

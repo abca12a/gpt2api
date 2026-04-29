@@ -3,13 +3,19 @@ package image
 import (
 	"sort"
 	"strings"
+	"time"
 )
 
 const traceStepStatusSkipped = "skipped"
 
 type ProviderTraceStatRow struct {
-	Status        string `db:"status"`
-	ProviderTrace []byte `db:"provider_trace"`
+	TaskID        string     `db:"task_id"`
+	Status        string     `db:"status"`
+	ProviderTrace []byte     `db:"provider_trace"`
+	Error         string     `db:"error"`
+	CreatedAt     time.Time  `db:"created_at"`
+	StartedAt     *time.Time `db:"started_at"`
+	FinishedAt    *time.Time `db:"finished_at"`
 }
 
 type ProviderHitStat struct {
@@ -39,11 +45,72 @@ type ProviderTraceStats struct {
 	FallbackTriggered int                      `json:"fallback_triggered"`
 	Providers         []ProviderHitStat        `json:"providers"`
 	Transitions       []ProviderTransitionStat `json:"transitions"`
+	Slow              SlowTaskStats            `json:"slow"`
+}
+
+type ProviderTraceStatsOptions struct {
+	WindowHours   int
+	SlowThreshold time.Duration
+	SlowLimit     int
+	Now           time.Time
+}
+
+type SlowTaskStats struct {
+	ThresholdMs int64               `json:"threshold_ms"`
+	Total       int                 `json:"total"`
+	Phases      []SlowTaskPhaseStat `json:"phases"`
+	Tasks       []SlowTaskOverview  `json:"tasks"`
+}
+
+type SlowTaskPhaseStat struct {
+	Phase string `json:"phase"`
+	Count int    `json:"count"`
+	AvgMs int64  `json:"avg_ms"`
+	MaxMs int64  `json:"max_ms"`
+}
+
+type SlowTaskOverview struct {
+	TaskID               string `json:"task_id"`
+	Status               string `json:"status"`
+	ErrorCode            string `json:"error_code,omitempty"`
+	ProviderTraceSummary string `json:"provider_trace_summary,omitempty"`
+	TotalMs              int64  `json:"total_ms"`
+	QueueMs              int64  `json:"queue_ms,omitempty"`
+	SubmitMs             int64  `json:"submit_ms,omitempty"`
+	UpstreamWaitMs       int64  `json:"upstream_wait_ms,omitempty"`
+	PollMs               int64  `json:"poll_ms,omitempty"`
+	DownloadMs           int64  `json:"download_ms,omitempty"`
+	DominantPhase        string `json:"dominant_phase,omitempty"`
+	DominantMs           int64  `json:"dominant_ms,omitempty"`
+	CreatedAt            int64  `json:"created_at"`
+	StartedAt            int64  `json:"started_at,omitempty"`
+	FinishedAt           int64  `json:"finished_at,omitempty"`
 }
 
 func BuildProviderTraceStats(rows []ProviderTraceStatRow, windowHours int) ProviderTraceStats {
+	return BuildProviderTraceStatsWithOptions(rows, ProviderTraceStatsOptions{
+		WindowHours:   windowHours,
+		SlowThreshold: DefaultSlowTaskThreshold(),
+		SlowLimit:     10,
+		Now:           time.Now(),
+	})
+}
+
+func BuildProviderTraceStatsWithOptions(rows []ProviderTraceStatRow, opt ProviderTraceStatsOptions) ProviderTraceStats {
+	if opt.WindowHours <= 0 {
+		opt.WindowHours = 24
+	}
+	if opt.SlowThreshold <= 0 {
+		opt.SlowThreshold = DefaultSlowTaskThreshold()
+	}
+	if opt.SlowLimit <= 0 {
+		opt.SlowLimit = 10
+	}
+	if opt.Now.IsZero() {
+		opt.Now = time.Now()
+	}
 	stats := ProviderTraceStats{
-		WindowHours: windowHours,
+		WindowHours: opt.WindowHours,
 	}
 	providerMap := make(map[string]*ProviderHitStat)
 	transitionMap := make(map[string]*ProviderTransitionStat)
@@ -125,7 +192,131 @@ func BuildProviderTraceStats(rows []ProviderTraceStatRow, windowHours int) Provi
 
 	stats.Providers = flattenProviderHitStats(providerMap)
 	stats.Transitions = flattenProviderTransitions(transitionMap)
+	stats.Slow = buildSlowTaskStats(rows, opt)
 	return stats
+}
+
+func buildSlowTaskStats(rows []ProviderTraceStatRow, opt ProviderTraceStatsOptions) SlowTaskStats {
+	stats := SlowTaskStats{
+		ThresholdMs: opt.SlowThreshold.Milliseconds(),
+	}
+	phaseMap := make(map[string]*SlowTaskPhaseStat)
+	tasks := make([]SlowTaskOverview, 0, opt.SlowLimit)
+
+	for _, row := range rows {
+		task := &Task{
+			TaskID:        row.TaskID,
+			Status:        row.Status,
+			ProviderTrace: row.ProviderTrace,
+			Error:         row.Error,
+			CreatedAt:     row.CreatedAt,
+			StartedAt:     row.StartedAt,
+			FinishedAt:    row.FinishedAt,
+		}
+		timing := TaskTimingBreakdownFromTask(task, opt.Now)
+		if timing.TotalMs < opt.SlowThreshold.Milliseconds() {
+			continue
+		}
+		stats.Total++
+		phase := timing.DominantPhase
+		if phase == "" {
+			phase = TaskPhaseUnknown
+		}
+		bucket := phaseMap[phase]
+		if bucket == nil {
+			bucket = &SlowTaskPhaseStat{Phase: phase}
+			phaseMap[phase] = bucket
+		}
+		bucket.Count++
+		bucket.AvgMs += timing.DominantMs
+		if timing.DominantMs > bucket.MaxMs {
+			bucket.MaxMs = timing.DominantMs
+		}
+
+		item := SlowTaskOverview{
+			TaskID:               row.TaskID,
+			Status:               row.Status,
+			ErrorCode:            firstTaskErrorCode(row.Error),
+			ProviderTraceSummary: TaskTraceSummary(task.DecodeProviderTrace()),
+			TotalMs:              timing.TotalMs,
+			QueueMs:              timing.QueueMs,
+			SubmitMs:             timing.SubmitMs,
+			UpstreamWaitMs:       timing.UpstreamWaitMs,
+			PollMs:               timing.PollMs,
+			DownloadMs:           timing.DownloadMs,
+			DominantPhase:        phase,
+			DominantMs:           timing.DominantMs,
+			CreatedAt:            row.CreatedAt.Unix(),
+		}
+		if row.StartedAt != nil && !row.StartedAt.IsZero() {
+			item.StartedAt = row.StartedAt.Unix()
+		}
+		if row.FinishedAt != nil && !row.FinishedAt.IsZero() {
+			item.FinishedAt = row.FinishedAt.Unix()
+		}
+		tasks = append(tasks, item)
+	}
+
+	for _, bucket := range phaseMap {
+		if bucket.Count > 0 {
+			bucket.AvgMs = bucket.AvgMs / int64(bucket.Count)
+		}
+	}
+	stats.Phases = flattenSlowTaskPhases(phaseMap)
+	sort.Slice(tasks, func(i, j int) bool {
+		leftTs := slowTaskSortUnix(tasks[i])
+		rightTs := slowTaskSortUnix(tasks[j])
+		if leftTs != rightTs {
+			return leftTs > rightTs
+		}
+		if tasks[i].TotalMs != tasks[j].TotalMs {
+			return tasks[i].TotalMs > tasks[j].TotalMs
+		}
+		return tasks[i].TaskID < tasks[j].TaskID
+	})
+	if len(tasks) > opt.SlowLimit {
+		tasks = tasks[:opt.SlowLimit]
+	}
+	stats.Tasks = tasks
+	return stats
+}
+
+func flattenSlowTaskPhases(stats map[string]*SlowTaskPhaseStat) []SlowTaskPhaseStat {
+	if len(stats) == 0 {
+		return nil
+	}
+	out := make([]SlowTaskPhaseStat, 0, len(stats))
+	for _, stat := range stats {
+		out = append(out, *stat)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		if out[i].MaxMs != out[j].MaxMs {
+			return out[i].MaxMs > out[j].MaxMs
+		}
+		return out[i].Phase < out[j].Phase
+	})
+	return out
+}
+
+func firstTaskErrorCode(stored string) string {
+	if strings.TrimSpace(stored) == "" {
+		return ""
+	}
+	code, _, _ := TaskErrorFields(stored)
+	return code
+}
+
+func slowTaskSortUnix(task SlowTaskOverview) int64 {
+	if task.FinishedAt > 0 {
+		return task.FinishedAt
+	}
+	if task.StartedAt > 0 {
+		return task.StartedAt
+	}
+	return task.CreatedAt
 }
 
 func ensureProviderHitStat(stats map[string]*ProviderHitStat, provider string) *ProviderHitStat {

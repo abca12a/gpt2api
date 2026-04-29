@@ -600,6 +600,55 @@ func TestBuildImageTaskPayloadIncludesProviderTrace(t *testing.T) {
 	}
 }
 
+func TestBuildImageTaskPayloadIncludesTimingBreakdown(t *testing.T) {
+	traceJSON, err := json.Marshal(&imagepkg.TaskTrace{
+		Timing: &imagepkg.TaskTraceTiming{
+			RequestMs:      320,
+			QueueMs:        1400,
+			SubmitMs:       4200,
+			UpstreamWaitMs: 71000,
+			PollMs:         15000,
+			DownloadMs:     800,
+			TotalMs:        92400,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal trace: %v", err)
+	}
+
+	task := &imagepkg.Task{
+		TaskID:        "img_timing",
+		Status:        imagepkg.StatusSuccess,
+		ProviderTrace: traceJSON,
+		CreatedAt:     time.Unix(1777040000, 0),
+	}
+
+	body, err := json.Marshal(buildImageTaskPayload(task))
+	if err != nil {
+		t.Fatalf("marshal task payload: %v", err)
+	}
+
+	var got struct {
+		Timing struct {
+			RequestMs      int64  `json:"request_ms"`
+			QueueMs        int64  `json:"queue_ms"`
+			SubmitMs       int64  `json:"submit_ms"`
+			UpstreamWaitMs int64  `json:"upstream_wait_ms"`
+			PollMs         int64  `json:"poll_ms"`
+			DownloadMs     int64  `json:"download_ms"`
+			TotalMs        int64  `json:"total_ms"`
+			DominantPhase  string `json:"dominant_phase"`
+			DominantMs     int64  `json:"dominant_ms"`
+		} `json:"timing"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal task payload: %v", err)
+	}
+	if got.Timing.TotalMs != 92400 || got.Timing.DominantPhase != imagepkg.TaskPhaseUpstreamWait || got.Timing.DominantMs != 71000 {
+		t.Fatalf("unexpected timing payload: %#v", got.Timing)
+	}
+}
+
 func TestImageChannelFailureClassifiesContentModeration(t *testing.T) {
 	failure := imageChannelFailureFromErr(errors.New(`upstream 400: {"error":{"code":"content_policy_violation","message":"blocked by policy"}}`))
 	if failure.Code != imagepkg.ErrContentModeration {

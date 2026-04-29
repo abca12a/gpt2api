@@ -51,14 +51,15 @@ func (h *AdminHandler) List(c *gin.Context) {
 	// 把任务图片转成前端可加载的本站签名代理 URL。
 	type rowOut struct {
 		AdminTaskRow
-		ResultURLsParsed     []string   `json:"result_urls_parsed"`
-		ResultCount          int        `json:"result_count"`
-		HasResult            bool       `json:"has_result"`
-		ErrorCode            string     `json:"error_code,omitempty"`
-		ErrorMessage         string     `json:"error_message,omitempty"`
-		ErrorDetail          string     `json:"error_detail,omitempty"`
-		ProviderTrace        *TaskTrace `json:"provider_trace,omitempty"`
-		ProviderTraceSummary string     `json:"provider_trace_summary,omitempty"`
+		ResultURLsParsed     []string             `json:"result_urls_parsed"`
+		ResultCount          int                  `json:"result_count"`
+		HasResult            bool                 `json:"has_result"`
+		Timing               *TaskTimingBreakdown `json:"timing,omitempty"`
+		ErrorCode            string               `json:"error_code,omitempty"`
+		ErrorMessage         string               `json:"error_message,omitempty"`
+		ErrorDetail          string               `json:"error_detail,omitempty"`
+		ProviderTrace        *TaskTrace           `json:"provider_trace,omitempty"`
+		ProviderTraceSummary string               `json:"provider_trace_summary,omitempty"`
 	}
 	out := make([]rowOut, 0, len(rows))
 	for _, r := range rows {
@@ -70,10 +71,14 @@ func (h *AdminHandler) List(c *gin.Context) {
 				resultCount = 1
 			}
 		}
+		timing := TaskTimingBreakdownFromTask(&r.Task, time.Now())
 		row := rowOut{
 			AdminTaskRow: r,
 			ResultCount:  resultCount,
 			HasResult:    len(fileIDs) > 0 || r.Status == StatusSuccess,
+		}
+		if timing.HasData() {
+			row.Timing = &timing
 		}
 		row.ProviderTrace = r.DecodeProviderTrace()
 		row.ProviderTraceSummary = TaskTraceSummary(row.ProviderTrace)
@@ -129,7 +134,7 @@ func (h *AdminHandler) Images(c *gin.Context) {
 }
 
 // Stats GET /api/admin/image-tasks/stats
-// 查询参数:hours,默认 24,最大 720(30 天)
+// 查询参数:hours,默认 24,最大 720(30 天); slow_ms,默认 90000; slow_limit,默认 10,最大 50
 func (h *AdminHandler) Stats(c *gin.Context) {
 	hours, _ := strconv.Atoi(c.DefaultQuery("hours", "24"))
 	if hours <= 0 {
@@ -138,10 +143,26 @@ func (h *AdminHandler) Stats(c *gin.Context) {
 	if hours > 24*30 {
 		hours = 24 * 30
 	}
+	slowMs, _ := strconv.ParseInt(c.DefaultQuery("slow_ms", "90000"), 10, 64)
+	if slowMs <= 0 {
+		slowMs = DefaultSlowTaskThreshold().Milliseconds()
+	}
+	slowLimit, _ := strconv.Atoi(c.DefaultQuery("slow_limit", "10"))
+	if slowLimit <= 0 {
+		slowLimit = 10
+	}
+	if slowLimit > 50 {
+		slowLimit = 50
+	}
 	rows, err := h.dao.ListProviderTraceStats(c.Request.Context(), time.Now().Add(-time.Duration(hours)*time.Hour))
 	if err != nil {
 		resp.Internal(c, err.Error())
 		return
 	}
-	resp.OK(c, BuildProviderTraceStats(rows, hours))
+	resp.OK(c, BuildProviderTraceStatsWithOptions(rows, ProviderTraceStatsOptions{
+		WindowHours:   hours,
+		SlowThreshold: time.Duration(slowMs) * time.Millisecond,
+		SlowLimit:     slowLimit,
+		Now:           time.Now(),
+	}))
 }

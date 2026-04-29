@@ -228,6 +228,7 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 			PerAttemptTimeout: perAttemptTimeout,
 			PollMaxWait:       pollMaxWait,
 			References:        job.References,
+			Trace:             job.ProviderTrace,
 		}
 		res, usedPlan := h.runImageWithFallbackPlans(ctx, runOptions, job.RunnerPlans)
 		rec.AccountID = res.AccountID
@@ -235,6 +236,9 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 			job.ProviderTrace.AddStep(imageTraceStepForRunnerPlan(res, usedPlan, res.Status, res.ErrorCode, res.ErrorMessage))
 			_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, job.ProviderTrace)
 		}
+		image.LogTaskLifecycle(job.TaskID, job.ProviderTrace, res.Status, res.ErrorCode,
+			zap.String("mode", "runner_async"),
+		)
 
 		if res.Status != image.StatusSuccess {
 			rec.Status = usage.StatusFailed
@@ -305,6 +309,12 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	}
 
 	var req ImageGenRequest
+	defer func() {
+		if strings.TrimSpace(req.taskID) == "" {
+			return
+		}
+		h.persistImageRequestTiming(context.Background(), &req, startAt)
+	}()
 	if err := c.ShouldBindJSON(&req); err != nil {
 		openAIError(c, http.StatusBadRequest, "invalid_request_error", "请求参数错误:"+err.Error())
 		return
@@ -411,12 +421,15 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		channelReq := imageRequestForChannel(&req, explicitUpscale)
 		if !waitForResult {
 			if handled, submitted := h.dispatchImageToChannelAsync(c, ak, m, channelReq, rec, ratio, refs); handled {
+				h.persistImageRequestTiming(context.Background(), channelReq, startAt)
+				logImageAsyncAccepted(channelReq.taskID, channelReq.providerTrace, time.Since(startAt), len(refs), waitForResult)
 				if submitted {
 					writeUsageOnReturn = false
 				}
 				return
 			}
 		} else if handled := h.dispatchImageToChannel(c, ak, m, channelReq, rec, ratio, refs); handled {
+			h.persistImageRequestTiming(context.Background(), channelReq, startAt)
 			return
 		}
 		if len(channelReq.runnerFallbackPlans) > 0 {
@@ -497,6 +510,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 			RequireFree:   req.freeFallback,
 			RunnerPlans:   cloneImageRunnerFallbackPlans(req.runnerFallbackPlans),
 		})
+		logImageAsyncAccepted(taskID, trace, time.Since(startAt), len(refs), waitForResult)
 		writeAsyncImageSubmit(c, taskID)
 		return
 	}
@@ -515,11 +529,15 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		PerAttemptTimeout: perAttemptTimeout,
 		PollMaxWait:       pollMaxWait,
 		References:        refs,
+		Trace:             trace,
 	}
 	res, usedPlan := h.runImageWithFallbackPlans(runCtx, runOptions, req.runnerFallbackPlans)
 	rec.AccountID = res.AccountID
 	trace.AddStep(imageTraceStepForRunnerPlan(res, usedPlan, res.Status, res.ErrorCode, res.ErrorMessage))
 	h.persistRequestTrace(c.Request.Context(), &req, trace)
+	image.LogTaskLifecycle(taskID, trace, res.Status, res.ErrorCode,
+		zap.String("mode", "runner"),
+	)
 
 	if res.Status != image.StatusSuccess {
 		refund(ifEmpty(res.ErrorCode, "upstream_error"))
@@ -571,6 +589,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 
 // ImageTask GET /v1/images/tasks/:id。
 func (h *ImagesHandler) ImageTask(c *gin.Context) {
+	startAt := time.Now()
 	ak, ok := apikey.FromCtx(c)
 	if !ok {
 		openAIError(c, http.StatusUnauthorized, "missing_api_key", "缺少 API Key")
@@ -599,6 +618,7 @@ func (h *ImagesHandler) ImageTask(c *gin.Context) {
 		return
 	}
 
+	logImageTaskQueryIfSlow("/v1/images/tasks/:id", t, time.Since(startAt))
 	c.JSON(http.StatusOK, buildImageTaskPayload(t, c))
 }
 
@@ -607,6 +627,7 @@ func (h *ImagesHandler) ImageTask(c *gin.Context) {
 // 这是给下游任务型网关的 OpenAI/Sora 风格兼容响应。保留原
 // /v1/images/tasks/:id 的历史响应不变,避免影响已接入客户端。
 func (h *ImagesHandler) ImageTaskCompat(c *gin.Context) {
+	startAt := time.Now()
 	ak, ok := apikey.FromCtx(c)
 	if !ok {
 		openAIError(c, http.StatusUnauthorized, "missing_api_key", "缺少 API Key")
@@ -635,6 +656,7 @@ func (h *ImagesHandler) ImageTaskCompat(c *gin.Context) {
 		return
 	}
 
+	logImageTaskQueryIfSlow("/v1/tasks/:id", t, time.Since(startAt))
 	c.JSON(http.StatusOK, buildImageTaskCompatPayload(t, c))
 }
 
@@ -660,6 +682,12 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 	}
 	explicitUpscale := requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality)
 	imgReq := normalizeChatImageRequest(prompt, req)
+	defer func() {
+		if strings.TrimSpace(imgReq.taskID) == "" {
+			return
+		}
+		h.persistImageRequestTiming(context.Background(), imgReq, startAt)
+	}()
 	logImageRequestOptions("chat image generation options", imgReq, explicitUpscale)
 
 	refID := uuid.NewString()
@@ -687,6 +715,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 	if h.Channels != nil {
 		channelReq := imageRequestForChannel(imgReq, explicitUpscale)
 		if handled := h.dispatchChatImageToChannel(c, ak, m, channelReq, rec, ratio, startAt); handled {
+			h.persistImageRequestTiming(context.Background(), channelReq, startAt)
 			return
 		}
 		if len(channelReq.runnerFallbackPlans) > 0 {
@@ -753,11 +782,15 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		DispatchTimeout:   dispatchTimeout,
 		PerAttemptTimeout: perAttemptTimeout,
 		PollMaxWait:       pollMaxWait,
+		Trace:             trace,
 	}
 	res, usedPlan := h.runImageWithFallbackPlans(runCtx, runOptions, imgReq.runnerFallbackPlans)
 	rec.AccountID = res.AccountID
 	trace.AddStep(imageTraceStepForRunnerPlan(res, usedPlan, res.Status, res.ErrorCode, res.ErrorMessage))
 	h.persistRequestTrace(c.Request.Context(), imgReq, trace)
+	image.LogTaskLifecycle(taskID, trace, res.Status, res.ErrorCode,
+		zap.String("mode", "chat_image_runner"),
+	)
 
 	if res.Status != image.StatusSuccess {
 		refund(ifEmpty(res.ErrorCode, "upstream_error"))
@@ -1232,6 +1265,9 @@ func attachImageTaskTraceFields(out gin.H, t *image.Task) {
 	}
 	out["provider_trace"] = trace
 	out["provider_trace_summary"] = image.TaskTraceSummary(trace)
+	if timing := image.TaskTimingBreakdownFromTask(t, time.Now()); timing.HasData() {
+		out["timing"] = timing
+	}
 }
 
 func imageTaskData(t *image.Task, contexts ...*gin.Context) []ImageGenData {
@@ -1555,10 +1591,17 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		Upscale:        explicitUpscale,
 		User:           c.Request.FormValue("user"),
 	}
+	defer func() {
+		if strings.TrimSpace(editReq.taskID) == "" {
+			return
+		}
+		h.persistImageRequestTiming(context.Background(), editReq, startAt)
+	}()
 	freeFallback := false
 	if h.Channels != nil {
 		channelReq := imageRequestForChannel(editReq, explicitUpscale)
 		if handled := h.dispatchImageToChannel(c, ak, m, channelReq, rec, ratio, refs); handled {
+			h.persistImageRequestTiming(context.Background(), channelReq, startAt)
 			return
 		}
 		editReq.runnerFallbackPlans = cloneImageRunnerFallbackPlans(channelReq.runnerFallbackPlans)
@@ -1621,11 +1664,15 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		PerAttemptTimeout: perAttemptTimeout,
 		PollMaxWait:       pollMaxWait,
 		References:        refs,
+		Trace:             trace,
 	}
 	res, usedPlan := h.runImageWithFallbackPlans(runCtx, runOptions, editReq.runnerFallbackPlans)
 	rec.AccountID = res.AccountID
 	trace.AddStep(imageTraceStepForRunnerPlan(res, usedPlan, res.Status, res.ErrorCode, res.ErrorMessage))
 	h.persistRequestTrace(c.Request.Context(), editReq, trace)
+	image.LogTaskLifecycle(taskID, trace, res.Status, res.ErrorCode,
+		zap.String("mode", "image_edit_runner"),
+	)
 
 	if res.Status != image.StatusSuccess {
 		refund(ifEmpty(res.ErrorCode, "upstream_error"))

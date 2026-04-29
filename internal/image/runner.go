@@ -68,6 +68,7 @@ type RunOptions struct {
 	References        []ReferenceImage // 图生图/编辑:参考图
 	PreferredPlanType string           // 可选:优先调度指定 plan_type 的账号
 	RequirePlanType   bool             // true 时只调度 PreferredPlanType 账号
+	Trace             *TaskTrace
 }
 
 // RunResult 是单次生图的输出。
@@ -162,6 +163,10 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 		capRunResultImages(result, opt.N)
 	}
 	result.DurationMs = time.Since(start).Milliseconds()
+	if opt.Trace != nil {
+		opt.Trace.FinalizeTiming(result.Status, time.Since(start))
+		r.persistTrace(opt)
+	}
 
 	// 落库
 	if r.dao != nil && opt.TaskID != "" {
@@ -330,6 +335,13 @@ func (r *Runner) callRunOnce(ctx context.Context, opt RunOptions, result *RunRes
 	return r.runOnce(ctx, opt, result)
 }
 
+func (r *Runner) persistTrace(opt RunOptions) {
+	if r == nil || r.dao == nil || opt.TaskID == "" || opt.Trace == nil {
+		return
+	}
+	_ = r.dao.UpdateProviderTrace(context.Background(), opt.TaskID, opt.Trace)
+}
+
 func isRetryableImageStatus(status string) bool {
 	return status == ErrRateLimited || status == ErrNoAccount ||
 		status == ErrAuthRequired || status == ErrNetworkTransient || status == ErrPollTimeout
@@ -338,6 +350,8 @@ func isRetryableImageStatus(status string) bool {
 // runOnce 一次完整的尝试。返回 (ok, errorCode, err)。
 // result 会被就地更新(ConversationID / FileIDs / SignedURLs / AccountID 等)。
 func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult) (bool, string, error) {
+	start := time.Now()
+
 	// 1) 调度账号
 	dispatchCtx, cancelDispatch := context.WithTimeout(ctx, opt.DispatchTimeout)
 	defer cancelDispatch()
@@ -350,7 +364,15 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	}
 	if err != nil {
 		if errors.Is(err, scheduler.ErrNoAvailable) {
+			if opt.Trace != nil {
+				opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+				r.persistTrace(opt)
+			}
 			return false, ErrNoAccount, err
+		}
+		if opt.Trace != nil {
+			opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+			r.persistTrace(opt)
 		}
 		return false, ErrUnknown, err
 	}
@@ -365,6 +387,10 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		_ = r.dao.MarkRunning(ctx, opt.TaskID, lease.Account.ID)
 		_ = r.dao.SetAccount(ctx, opt.TaskID, lease.Account.ID)
 	}
+	if opt.Trace != nil && opt.TaskID != "" {
+		opt.Trace.SetQueueDuration(time.Since(start))
+		r.persistTrace(opt)
+	}
 
 	// 2) 构造上游 client
 	cli, err := chatgpt.New(chatgpt.Options{
@@ -375,13 +401,23 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		Cookies:   lease.Cookies,
 	})
 	if err != nil {
+		if opt.Trace != nil {
+			opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+			r.persistTrace(opt)
+		}
 		return false, ErrUnknown, fmt.Errorf("chatgpt client: %w", err)
 	}
 
 	// 3) ChatRequirements + POW(新两步 sentinel 流程,solver 未配置时内部自动
 	// 回退到单步接口)
+	submitStart := time.Now()
 	cr, err := cli.ChatRequirementsV2(ctx)
 	if err != nil {
+		if opt.Trace != nil {
+			opt.Trace.AddSubmitDuration(time.Since(submitStart))
+			opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+			r.persistTrace(opt)
+		}
 		return false, r.classifyUpstream(err), err
 	}
 	var proofToken string
@@ -393,12 +429,22 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		case <-proofCtx.Done():
 			cancel()
 			r.sched.MarkWarned(context.Background(), lease.Account.ID)
+			if opt.Trace != nil {
+				opt.Trace.AddSubmitDuration(time.Since(submitStart))
+				opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+				r.persistTrace(opt)
+			}
 			return false, ErrPOWTimeout, proofCtx.Err()
 		case proofToken = <-ch:
 			cancel()
 		}
 		if proofToken == "" {
 			r.sched.MarkWarned(context.Background(), lease.Account.ID)
+			if opt.Trace != nil {
+				opt.Trace.AddSubmitDuration(time.Since(submitStart))
+				opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+				r.persistTrace(opt)
+			}
 			return false, ErrPOWFailed, errors.New("pow solver returned empty")
 		}
 	}
@@ -427,9 +473,19 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 					zap.Int("idx", idx), zap.Error(err))
 				if ue, ok := err.(*chatgpt.UpstreamError); ok && ue.IsRateLimited() {
 					r.sched.MarkRateLimited(context.Background(), lease.Account.ID)
+					if opt.Trace != nil {
+						opt.Trace.AddSubmitDuration(time.Since(submitStart))
+						opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+						r.persistTrace(opt)
+					}
 					return false, ErrRateLimited, err
 				}
 				uploadErr := fmt.Errorf("upload reference %d: %w", idx, err)
+				if opt.Trace != nil {
+					opt.Trace.AddSubmitDuration(time.Since(submitStart))
+					opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+					r.persistTrace(opt)
+				}
 				return false, classifyReferenceUploadError(uploadErr), uploadErr
 			}
 			refs = append(refs, up)
@@ -478,6 +534,11 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		convOpt.ConduitToken = ct
 	} else if ue, ok := err.(*chatgpt.UpstreamError); ok && ue.IsRateLimited() {
 		r.sched.MarkRateLimited(context.Background(), lease.Account.ID)
+		if opt.Trace != nil {
+			opt.Trace.AddSubmitDuration(time.Since(submitStart))
+			opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+			r.persistTrace(opt)
+		}
 		return false, ErrRateLimited, err
 	}
 
@@ -488,9 +549,36 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		if code == ErrRateLimited {
 			r.sched.MarkRateLimited(context.Background(), lease.Account.ID)
 		}
+		if opt.Trace != nil {
+			opt.Trace.AddSubmitDuration(time.Since(submitStart))
+			opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+			r.persistTrace(opt)
+		}
 		return false, code, err
 	}
+	if opt.Trace != nil {
+		submitDuration := time.Since(submitStart)
+		opt.Trace.AddSubmitDuration(submitDuration)
+		r.persistTrace(opt)
+		logImageTaskStage(opt.TaskID, TaskPhaseSubmit, submitDuration,
+			zap.Uint64("account_id", lease.Account.ID),
+			zap.String("plan_type", lease.Account.PlanType),
+			zap.Int("reference_count", len(opt.References)),
+		)
+	}
+	sseStart := time.Now()
 	sseResult := chatgpt.ParseImageSSE(stream)
+	if opt.Trace != nil {
+		upstreamWaitDuration := time.Since(sseStart)
+		opt.Trace.AddUpstreamWaitDuration(upstreamWaitDuration)
+		r.persistTrace(opt)
+		logImageTaskStage(opt.TaskID, TaskPhaseUpstreamWait, upstreamWaitDuration,
+			zap.Uint64("account_id", lease.Account.ID),
+			zap.String("plan_type", lease.Account.PlanType),
+			zap.Int("reference_count", len(opt.References)),
+			zap.String("finish_type", sseResult.FinishType),
+		)
+	}
 	if sseResult.ConversationID != "" {
 		convID = sseResult.ConversationID
 		result.ConversationID = convID
@@ -556,7 +644,18 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 				zap.String("conv_id", convID),
 				zap.Duration("poll_max_wait", pollMaxWait))
 		}
+		pollStart := time.Now()
 		pollResult := cli.PollConversationForImagesDetailed(ctx, convID, pollOpt)
+		if opt.Trace != nil {
+			pollDuration := time.Since(pollStart)
+			opt.Trace.AddPollDuration(pollDuration)
+			r.persistTrace(opt)
+			logImageTaskStage(opt.TaskID, TaskPhaseTaskPoll, pollDuration,
+				zap.Uint64("account_id", lease.Account.ID),
+				zap.String("plan_type", lease.Account.PlanType),
+				zap.String("conv_id", convID),
+			)
+		}
 		status, fids, sids := pollResult.Status, pollResult.FileIDs, pollResult.SedimentIDs
 		if pollResult.AssistantText != "" {
 			assistantText = pollResult.AssistantText
@@ -601,21 +700,38 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 				zap.String("task_id", opt.TaskID),
 				zap.Uint64("account_id", lease.Account.ID),
 				zap.String("conv_id", convID))
+			if opt.Trace != nil {
+				opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+				r.persistTrace(opt)
+			}
 			return false, imageFailureCodeFromAssistant(ErrPollTimeout, assistantText), imageFailureError("poll timeout without any image", assistantText, pollResult.LastError)
 		default:
+			if opt.Trace != nil {
+				opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+				r.persistTrace(opt)
+			}
 			return false, imageFailureCodeFromAssistant(ErrUpstream, assistantText), imageFailureError("poll error", assistantText, pollResult.LastError)
 		}
 	}
 
 	if len(fileRefs) == 0 {
+		if opt.Trace != nil {
+			opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+			r.persistTrace(opt)
+		}
 		return false, imageFailureCodeFromAssistant(ErrUpstream, assistantText), imageFailureError("no image ref produced", assistantText, "")
 	}
 	fileRefs = capImageRefs(fileRefs, opt.N)
 	if len(fileRefs) == 0 {
+		if opt.Trace != nil {
+			opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+			r.persistTrace(opt)
+		}
 		return false, imageFailureCodeFromAssistant(ErrUpstream, assistantText), imageFailureError("no generated image ref produced", assistantText, "")
 	}
 
 	// 6) 对每个 ref 取签名 URL
+	downloadStart := time.Now()
 	var signedURLs []string
 	var contentTypes []string
 	for _, ref := range fileRefs {
@@ -629,7 +745,26 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		contentTypes = append(contentTypes, "image/png")
 	}
 	if len(signedURLs) == 0 {
+		if opt.Trace != nil {
+			opt.Trace.AddDownloadDuration(time.Since(downloadStart))
+			opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+			r.persistTrace(opt)
+			logImageTaskStage(opt.TaskID, TaskPhaseDownload, time.Since(downloadStart),
+				zap.Uint64("account_id", lease.Account.ID),
+				zap.String("plan_type", lease.Account.PlanType),
+			)
+		}
 		return false, ErrDownload, errors.New("all download urls failed")
+	}
+	if opt.Trace != nil {
+		downloadDuration := time.Since(downloadStart)
+		opt.Trace.AddDownloadDuration(downloadDuration)
+		r.persistTrace(opt)
+		logImageTaskStage(opt.TaskID, TaskPhaseDownload, downloadDuration,
+			zap.Uint64("account_id", lease.Account.ID),
+			zap.String("plan_type", lease.Account.PlanType),
+			zap.Int("signed_count", len(signedURLs)),
+		)
 	}
 
 	logger.L().Info("image runner result summary",

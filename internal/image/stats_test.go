@@ -2,6 +2,7 @@ package image
 
 import (
 	"testing"
+	"time"
 )
 
 func TestBuildProviderTraceStats(t *testing.T) {
@@ -94,3 +95,66 @@ func findProviderStat(stats []ProviderHitStat, provider string) *ProviderHitStat
 	}
 	return nil
 }
+
+func TestBuildProviderTraceStatsIncludesSlowTaskOverview(t *testing.T) {
+	now := time.Unix(1_777_040_000, 0)
+	rows := []ProviderTraceStatRow{
+		{
+			TaskID:     "img_wait",
+			Status:     StatusSuccess,
+			CreatedAt:  now.Add(-3 * time.Minute),
+			StartedAt:  timePtr(now.Add(-170 * time.Second)),
+			FinishedAt: timePtr(now.Add(-20 * time.Second)),
+			ProviderTrace: EncodeProviderTrace(&TaskTrace{
+				Final: TaskTraceEndpoint{Provider: TraceProviderCodex},
+				Timing: &TaskTraceTiming{
+					QueueMs:        10_000,
+					SubmitMs:       8_000,
+					UpstreamWaitMs: 120_000,
+					TotalMs:        150_000,
+				},
+			}),
+		},
+		{
+			TaskID:     "img_poll",
+			Status:     StatusFailed,
+			Error:      ErrPollTimeout,
+			CreatedAt:  now.Add(-4 * time.Minute),
+			StartedAt:  timePtr(now.Add(-220 * time.Second)),
+			FinishedAt: timePtr(now.Add(-10 * time.Second)),
+			ProviderTrace: EncodeProviderTrace(&TaskTrace{
+				Final: TaskTraceEndpoint{Provider: TraceProviderAPIMart},
+				Timing: &TaskTraceTiming{
+					SubmitMs:       5_000,
+					UpstreamWaitMs: 12_000,
+					PollMs:         160_000,
+					TotalMs:        177_000,
+				},
+			}),
+		},
+	}
+
+	stats := BuildProviderTraceStatsWithOptions(rows, ProviderTraceStatsOptions{
+		WindowHours:   24,
+		SlowThreshold: 60 * time.Second,
+		SlowLimit:     10,
+		Now:           now,
+	})
+	if stats.Slow.Total != 2 {
+		t.Fatalf("slow total = %d, want 2", stats.Slow.Total)
+	}
+	if len(stats.Slow.Tasks) != 2 {
+		t.Fatalf("slow tasks len = %d, want 2", len(stats.Slow.Tasks))
+	}
+	if stats.Slow.Tasks[0].TaskID != "img_poll" || stats.Slow.Tasks[0].DominantPhase != TaskPhaseTaskPoll {
+		t.Fatalf("top slow task = %#v, want poll-dominant img_poll", stats.Slow.Tasks[0])
+	}
+	if stats.Slow.Tasks[1].TaskID != "img_wait" || stats.Slow.Tasks[1].DominantPhase != TaskPhaseUpstreamWait {
+		t.Fatalf("second slow task = %#v, want upstream-wait img_wait", stats.Slow.Tasks[1])
+	}
+	if len(stats.Slow.Phases) != 2 {
+		t.Fatalf("slow phases len = %d, want 2", len(stats.Slow.Phases))
+	}
+}
+
+func timePtr(v time.Time) *time.Time { return &v }

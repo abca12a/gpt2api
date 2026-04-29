@@ -11,6 +11,14 @@ import (
 	"time"
 )
 
+type testImageObserver struct {
+	submit time.Duration
+	poll   time.Duration
+}
+
+func (o *testImageObserver) RecordSubmitDuration(d time.Duration) { o.submit += d }
+func (o *testImageObserver) RecordPollDuration(d time.Duration)   { o.poll += d }
+
 func TestOpenAIImageGeneratePassesGPTImageOutputParameters(t *testing.T) {
 	var got map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -288,6 +296,40 @@ func TestOpenAIImageGeneratePollsAPIMartAsyncTask(t *testing.T) {
 	}
 	if payload["resolution"] != "2k" {
 		t.Fatalf("payload resolution = %#v, want 2k", payload["resolution"])
+	}
+}
+
+func TestOpenAIImageGenerateReportsAPIMartTimingsToObserver(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/apimart.ai/v1/images/generations":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":[{"status":"submitted","task_id":"task_obs_123"}]}`))
+		case "/apimart.ai/v1/tasks/task_obs_123":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":{"status":"completed","result":{"images":[{"url":["https://example.test/apimart-obs.png"]}]}}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	a := NewOpenAI(Params{BaseURL: srv.URL + "/apimart.ai", APIKey: "test-key"})
+	observer := &testImageObserver{}
+	ctx := WithImageGenerateObserver(context.Background(), observer)
+
+	result, err := a.ImageGenerate(ctx, "gpt-image-2", &ImageRequest{Prompt: "draw"})
+	if err != nil {
+		t.Fatalf("ImageGenerate: %v", err)
+	}
+	if result == nil || len(result.URLs) != 1 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if observer.submit <= 0 {
+		t.Fatalf("submit timing = %s, want > 0", observer.submit)
+	}
+	if observer.poll <= 0 {
+		t.Fatalf("poll timing = %s, want > 0", observer.poll)
 	}
 }
 
