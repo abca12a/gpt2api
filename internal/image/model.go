@@ -175,6 +175,7 @@ type Task struct {
 	ConversationID      string     `db:"conversation_id"  json:"conversation_id"`
 	FileIDs             []byte     `db:"file_ids"         json:"-"`
 	ResultURLs          []byte     `db:"result_urls"      json:"-"`
+	ProviderTrace       []byte     `db:"provider_trace"   json:"-"`
 	Error               string     `db:"error"            json:"error"`
 	EstimatedCredit     int64      `db:"estimated_credit" json:"estimated_credit"`
 	CreditCost          int64      `db:"credit_cost"      json:"credit_cost"`

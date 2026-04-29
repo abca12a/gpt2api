@@ -527,6 +527,79 @@ func TestBuildImageTaskPayloadFailureIncludesUserVisibleMessage(t *testing.T) {
 	}
 }
 
+func TestBuildImageTaskPayloadIncludesProviderTrace(t *testing.T) {
+	traceJSON, err := json.Marshal(&imagepkg.TaskTrace{
+		Original: imagepkg.TaskTraceEndpoint{
+			Provider:    imagepkg.TraceProviderCodex,
+			ChannelID:   1,
+			ChannelName: "codex-cli-proxy-image",
+		},
+		Fallback: &imagepkg.TaskTraceFallback{
+			Triggered:    true,
+			ReasonCode:   imagepkg.ErrUpstream,
+			ReasonDetail: "upstream 502: stream disconnected before completion",
+			FromProvider: imagepkg.TraceProviderCodex,
+		},
+		Final: imagepkg.TaskTraceEndpoint{
+			Provider:        imagepkg.TraceProviderFreeRunner,
+			AccountID:       8,
+			AccountPlanType: "free",
+			Status:          imagepkg.StatusSuccess,
+		},
+		Steps: []imagepkg.TaskTraceStep{
+			{Order: 1, Provider: imagepkg.TraceProviderCodex, ChannelName: "codex-cli-proxy-image", Status: imagepkg.StatusFailed},
+			{Order: 2, Provider: imagepkg.TraceProviderFreeRunner, AccountID: 8, AccountPlanType: "free", Status: imagepkg.StatusSuccess},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal trace: %v", err)
+	}
+
+	task := &imagepkg.Task{
+		TaskID:        "img_trace",
+		Status:        imagepkg.StatusSuccess,
+		ProviderTrace: traceJSON,
+		CreatedAt:     time.Unix(1777040000, 0),
+	}
+
+	body, err := json.Marshal(buildImageTaskPayload(task))
+	if err != nil {
+		t.Fatalf("marshal task payload: %v", err)
+	}
+
+	var got struct {
+		ProviderTraceSummary string `json:"provider_trace_summary"`
+		ProviderTrace        struct {
+			Final struct {
+				Provider  string `json:"provider"`
+				AccountID uint64 `json:"account_id"`
+			} `json:"final"`
+			Fallback struct {
+				Triggered  bool   `json:"triggered"`
+				ReasonCode string `json:"reason_code"`
+			} `json:"fallback"`
+			Steps []struct {
+				Provider string `json:"provider"`
+			} `json:"steps"`
+		} `json:"provider_trace"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal task payload: %v", err)
+	}
+	if got.ProviderTrace.Final.Provider != imagepkg.TraceProviderFreeRunner || got.ProviderTrace.Final.AccountID != 8 {
+		t.Fatalf("unexpected final trace: %#v", got.ProviderTrace.Final)
+	}
+	if !got.ProviderTrace.Fallback.Triggered || got.ProviderTrace.Fallback.ReasonCode != imagepkg.ErrUpstream {
+		t.Fatalf("unexpected fallback trace: %#v", got.ProviderTrace.Fallback)
+	}
+	if len(got.ProviderTrace.Steps) != 2 {
+		t.Fatalf("steps len = %d, want 2", len(got.ProviderTrace.Steps))
+	}
+	if !strings.Contains(got.ProviderTraceSummary, "Codex") || !strings.Contains(got.ProviderTraceSummary, "Free Runner(#8/free)") {
+		t.Fatalf("unexpected provider trace summary: %q", got.ProviderTraceSummary)
+	}
+}
+
 func TestImageChannelFailureClassifiesContentModeration(t *testing.T) {
 	failure := imageChannelFailureFromErr(errors.New(`upstream 400: {"error":{"code":"content_policy_violation","message":"blocked by policy"}}`))
 	if failure.Code != imagepkg.ErrContentModeration {

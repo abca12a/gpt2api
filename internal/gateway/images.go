@@ -151,6 +151,8 @@ type ImageGenRequest struct {
 
 	freeFallback       bool
 	freeFallbackDetail string
+	taskID             string
+	providerTrace      *image.TaskTrace
 }
 
 // ImageGenData 单张图响应。
@@ -181,6 +183,8 @@ type imageAsyncJob struct {
 	RefID         string
 	IP            string
 	UA            string
+	ProviderTrace *image.TaskTrace
+	RequireFree   bool
 }
 
 func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
@@ -224,6 +228,10 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 			References:        job.References,
 		})
 		rec.AccountID = res.AccountID
+		if job.ProviderTrace != nil && h.DAO != nil {
+			job.ProviderTrace.AddStep(imageTraceStepForRunner(res, job.RequireFree, res.Status, res.ErrorCode, res.ErrorMessage))
+			_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, job.ProviderTrace)
+		}
 
 		if res.Status != image.StatusSuccess {
 			rec.Status = usage.StatusFailed
@@ -412,6 +420,8 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 			req.freeFallback = true
 			req.freeFallbackDetail = channelReq.freeFallbackDetail
 		}
+		req.taskID = channelReq.taskID
+		req.providerTrace = channelReq.providerTrace
 	}
 	req.Upscale = normalizeImageUpscale(req.Size, explicitUpscale)
 
@@ -441,28 +451,17 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	}
 
 	// 5) 落任务
-	taskID := image.GenerateTaskID()
-	downstreamUser := downstreamUserInfoForTask(c, ak, req.User)
-	task := &image.Task{
-		TaskID:          taskID,
-		UserID:          ak.UserID,
-		KeyID:           ak.ID,
-		ModelID:         m.ID,
-		Prompt:          req.Prompt,
-		N:               req.N,
-		Size:            req.Size,
-		Upscale:         req.Upscale,
-		Status:          image.StatusDispatched,
-		EstimatedCredit: cost,
+	trace := ensureRequestTrace(&req)
+	if trace != nil && trace.Original.Provider == "" {
+		trace.Original = image.TaskTraceEndpoint{Provider: runnerTraceProvider(req.freeFallback)}
 	}
-	downstreamUser.applyToTask(task)
-	if h.DAO != nil {
-		if err := h.DAO.Create(c.Request.Context(), task); err != nil {
-			refund("billing_error")
-			openAIError(c, http.StatusInternalServerError, "internal_error", "创建任务失败:"+err.Error())
-			return
-		}
+	taskID, err := h.ensureTaskRecord(c, ak, m, &req, cost, trace)
+	if err != nil {
+		refund("billing_error")
+		openAIError(c, http.StatusInternalServerError, "internal_error", "创建任务失败:"+err.Error())
+		return
 	}
+	h.persistRequestTrace(c.Request.Context(), &req, trace)
 
 	// 6) 执行(同步阻塞)
 	//
@@ -490,6 +489,8 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 			RefID:         refID,
 			IP:            c.ClientIP(),
 			UA:            c.Request.UserAgent(),
+			ProviderTrace: trace,
+			RequireFree:   req.freeFallback,
 		})
 		writeAsyncImageSubmit(c, taskID)
 		return
@@ -513,6 +514,8 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	applyFreeFallbackPlan(&runOptions, req.freeFallback)
 	res := h.Runner.Run(runCtx, runOptions)
 	rec.AccountID = res.AccountID
+	trace.AddStep(imageTraceStepForRunner(res, req.freeFallback, res.Status, res.ErrorCode, res.ErrorMessage))
+	h.persistRequestTrace(c.Request.Context(), &req, trace)
 
 	if res.Status != image.StatusSuccess {
 		refund(ifEmpty(res.ErrorCode, "upstream_error"))
@@ -686,6 +689,8 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 			imgReq.freeFallback = true
 			imgReq.freeFallbackDetail = channelReq.freeFallbackDetail
 		}
+		imgReq.taskID = channelReq.taskID
+		imgReq.providerTrace = channelReq.providerTrace
 	}
 
 	// 预扣
@@ -715,23 +720,17 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "chat->image refund")
 	}
 
-	taskID := image.GenerateTaskID()
-	if h.DAO != nil {
-		task := &image.Task{
-			TaskID:          taskID,
-			UserID:          ak.UserID,
-			KeyID:           ak.ID,
-			ModelID:         m.ID,
-			Prompt:          imgReq.Prompt,
-			N:               imgReq.N,
-			Size:            imgReq.Size,
-			Upscale:         imgReq.Upscale,
-			Status:          image.StatusDispatched,
-			EstimatedCredit: cost,
-		}
-		downstreamUserInfoForTask(c, ak, imgReq.User).applyToTask(task)
-		_ = h.DAO.Create(c.Request.Context(), task)
+	trace := ensureRequestTrace(imgReq)
+	if trace != nil && trace.Original.Provider == "" {
+		trace.Original = image.TaskTraceEndpoint{Provider: runnerTraceProvider(imgReq.freeFallback)}
 	}
+	taskID, err := h.ensureTaskRecord(c, ak, m, imgReq, cost, trace)
+	if err != nil {
+		refund("billing_error")
+		openAIError(c, http.StatusInternalServerError, "internal_error", "创建任务失败:"+err.Error())
+		return
+	}
+	h.persistRequestTrace(c.Request.Context(), imgReq, trace)
 
 	runCtx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
 	defer cancel()
@@ -753,6 +752,8 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 	applyFreeFallbackPlan(&runOptions, imgReq.freeFallback)
 	res := h.Runner.Run(runCtx, runOptions)
 	rec.AccountID = res.AccountID
+	trace.AddStep(imageTraceStepForRunner(res, imgReq.freeFallback, res.Status, res.ErrorCode, res.ErrorMessage))
+	h.persistRequestTrace(c.Request.Context(), imgReq, trace)
 
 	if res.Status != image.StatusSuccess {
 		refund(ifEmpty(res.ErrorCode, "upstream_error"))
@@ -1157,6 +1158,7 @@ func buildImageTaskPayload(t *image.Task, contexts ...*gin.Context) gin.H {
 		"data":            imageTaskData(t, contexts...),
 	}
 	attachImageTaskErrorFields(out, t.Error, t.Status == image.StatusFailed)
+	attachImageTaskTraceFields(out, t)
 	return out
 }
 
@@ -1179,6 +1181,7 @@ func buildImageTaskCompatPayload(t *image.Task, contexts ...*gin.Context) gin.H 
 			"created": t.CreatedAt.Unix(),
 			"data":    imageTaskData(t, contexts...),
 		}
+		attachImageTaskTraceFields(out, t)
 		return out
 	}
 
@@ -1194,6 +1197,7 @@ func buildImageTaskCompatPayload(t *image.Task, contexts ...*gin.Context) gin.H 
 		out["error"] = errorBody
 		attachImageTaskErrorFields(out, t.Error, true)
 	}
+	attachImageTaskTraceFields(out, t)
 	return out
 }
 
@@ -1212,6 +1216,18 @@ func attachImageTaskErrorFields(out gin.H, stored string, include bool) {
 	if detail != "" {
 		out["error_detail"] = detail
 	}
+}
+
+func attachImageTaskTraceFields(out gin.H, t *image.Task) {
+	if out == nil || t == nil {
+		return
+	}
+	trace := t.DecodeProviderTrace()
+	if trace == nil {
+		return
+	}
+	out["provider_trace"] = trace
+	out["provider_trace_summary"] = image.TaskTraceSummary(trace)
 }
 
 func imageTaskData(t *image.Task, contexts ...*gin.Context) []ImageGenData {
@@ -1519,29 +1535,31 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		}
 	}
 
+	editReq := &ImageGenRequest{
+		Model:          model,
+		Prompt:         prompt,
+		N:              n,
+		Size:           size,
+		Quality:        quality,
+		ResponseFormat: c.Request.FormValue("response_format"),
+		OutputFormat:   c.Request.FormValue("output_format"),
+		Background:     c.Request.FormValue("background"),
+		Moderation:     c.Request.FormValue("moderation"),
+		Resolution:     resolution,
+		ImageSize:      imageSize,
+		Scale:          scale,
+		Upscale:        explicitUpscale,
+		User:           c.Request.FormValue("user"),
+	}
 	freeFallback := false
 	if h.Channels != nil {
-		editReq := &ImageGenRequest{
-			Model:          model,
-			Prompt:         prompt,
-			N:              n,
-			Size:           size,
-			Quality:        quality,
-			ResponseFormat: c.Request.FormValue("response_format"),
-			OutputFormat:   c.Request.FormValue("output_format"),
-			Background:     c.Request.FormValue("background"),
-			Moderation:     c.Request.FormValue("moderation"),
-			Resolution:     resolution,
-			ImageSize:      imageSize,
-			Scale:          scale,
-			Upscale:        explicitUpscale,
-			User:           c.Request.FormValue("user"),
-		}
 		channelReq := imageRequestForChannel(editReq, explicitUpscale)
 		if handled := h.dispatchImageToChannel(c, ak, m, channelReq, rec, ratio, refs); handled {
 			return
 		}
 		freeFallback = channelReq.freeFallback
+		editReq.taskID = channelReq.taskID
+		editReq.providerTrace = channelReq.providerTrace
 	}
 
 	cost := billing.ComputeImageCost(m, n, ratio)
@@ -1568,23 +1586,18 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "image-edit refund")
 	}
 
-	taskID := image.GenerateTaskID()
-	if h.DAO != nil {
-		task := &image.Task{
-			TaskID:          taskID,
-			UserID:          ak.UserID,
-			KeyID:           ak.ID,
-			ModelID:         m.ID,
-			Prompt:          prompt,
-			N:               n,
-			Size:            size,
-			Upscale:         upscale,
-			Status:          image.StatusDispatched,
-			EstimatedCredit: cost,
-		}
-		downstreamUserInfoForTask(c, ak, c.Request.FormValue("user")).applyToTask(task)
-		_ = h.DAO.Create(c.Request.Context(), task)
+	editReq.Upscale = upscale
+	trace := ensureRequestTrace(editReq)
+	if trace != nil && trace.Original.Provider == "" {
+		trace.Original = image.TaskTraceEndpoint{Provider: runnerTraceProvider(freeFallback)}
 	}
+	taskID, err := h.ensureTaskRecord(c, ak, m, editReq, cost, trace)
+	if err != nil {
+		refund("billing_error")
+		openAIError(c, http.StatusInternalServerError, "internal_error", "创建任务失败:"+err.Error())
+		return
+	}
+	h.persistRequestTrace(c.Request.Context(), editReq, trace)
 
 	runCtx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Minute)
 	defer cancel()
@@ -1607,6 +1620,8 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	applyFreeFallbackPlan(&runOptions, freeFallback)
 	res := h.Runner.Run(runCtx, runOptions)
 	rec.AccountID = res.AccountID
+	trace.AddStep(imageTraceStepForRunner(res, freeFallback, res.Status, res.ErrorCode, res.ErrorMessage))
+	h.persistRequestTrace(c.Request.Context(), editReq, trace)
 
 	if res.Status != image.StatusSuccess {
 		refund(ifEmpty(res.ErrorCode, "upstream_error"))

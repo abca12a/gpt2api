@@ -27,14 +27,14 @@ INSERT INTO image_tasks
   (task_id, user_id, key_id, model_id, account_id,
    downstream_user_id, downstream_username, downstream_user_email, downstream_user_label,
    prompt, n, size, upscale, status,
-   conversation_id, file_ids, result_urls, error, estimated_credit, credit_cost,
+   conversation_id, file_ids, result_urls, provider_trace, error, estimated_credit, credit_cost,
    created_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, NOW())`,
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, NOW())`,
 		t.TaskID, t.UserID, t.KeyID, t.ModelID, t.AccountID,
 		t.DownstreamUserID, t.DownstreamUsername, t.DownstreamUserEmail, t.DownstreamUserLabel,
 		t.Prompt, t.N, t.Size, ValidateUpscale(t.Upscale),
 		nullEmpty(t.Status, StatusQueued),
-		t.ConversationID, nullJSON(t.FileIDs), nullJSON(t.ResultURLs),
+		t.ConversationID, nullJSON(t.FileIDs), nullJSON(t.ResultURLs), nullJSON(t.ProviderTrace),
 		t.Error, t.EstimatedCredit, t.CreditCost,
 	)
 	if err != nil {
@@ -43,6 +43,14 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, NOW())`,
 	id, _ := res.LastInsertId()
 	t.ID = uint64(id)
 	return nil
+}
+
+// UpdateProviderTrace 更新任务的渠道/账号链路追踪。
+func (d *DAO) UpdateProviderTrace(ctx context.Context, taskID string, trace *TaskTrace) error {
+	_, err := d.db.ExecContext(ctx,
+		`UPDATE image_tasks SET provider_trace = ? WHERE task_id = ?`,
+		nullJSON(EncodeProviderTrace(trace)), taskID)
+	return err
 }
 
 // MarkRunning 标记为运行中(记录起始时间 + account_id)。
@@ -124,7 +132,7 @@ func (d *DAO) Get(ctx context.Context, taskID string) (*Task, error) {
 SELECT id, task_id, user_id, key_id, model_id, account_id,
        downstream_user_id, downstream_username, downstream_user_email, downstream_user_label,
        prompt, n, size, upscale, status,
-       conversation_id, file_ids, result_urls, error, estimated_credit, credit_cost,
+       conversation_id, file_ids, result_urls, provider_trace, error, estimated_credit, credit_cost,
        created_at, started_at, finished_at
   FROM image_tasks
  WHERE task_id = ?`, taskID)
@@ -147,7 +155,7 @@ func (d *DAO) ListByUser(ctx context.Context, userID uint64, limit, offset int) 
 SELECT id, task_id, user_id, key_id, model_id, account_id,
        downstream_user_id, downstream_username, downstream_user_email, downstream_user_label,
        prompt, n, size, upscale, status,
-       conversation_id, file_ids, result_urls, error, estimated_credit, credit_cost,
+       conversation_id, file_ids, result_urls, provider_trace, error, estimated_credit, credit_cost,
        created_at, started_at, finished_at
   FROM image_tasks
  WHERE user_id = ?
@@ -194,7 +202,7 @@ func adminTaskListSQL(where string) string {
 	SELECT t.id, t.task_id, t.user_id, t.key_id, t.model_id, t.account_id,
 	       t.downstream_user_id, t.downstream_username, t.downstream_user_email, t.downstream_user_label,
 	       t.prompt, t.n, t.size, t.upscale, t.status,
-	       t.conversation_id, t.file_ids, t.error,
+	       t.conversation_id, t.file_ids, t.provider_trace, t.error,
 	       t.estimated_credit, t.credit_cost,
 	       t.created_at, t.started_at, t.finished_at,
 	       COALESCE(u.email, '') AS user_email

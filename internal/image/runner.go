@@ -72,16 +72,17 @@ type RunOptions struct {
 
 // RunResult 是单次生图的输出。
 type RunResult struct {
-	Status         string // success / failed
-	ConversationID string
-	AccountID      uint64
-	FileIDs        []string // chatgpt.com 侧的原始 ref("sed:" 前缀表示 sediment)
-	SignedURLs     []string // 直接可访问的签名 URL(15 分钟有效)
-	ContentTypes   []string
-	ErrorCode      string
-	ErrorMessage   string
-	Attempts       int // 跨账号尝试次数(runOnce 次数)
-	DurationMs     int64
+	Status          string // success / failed
+	ConversationID  string
+	AccountID       uint64
+	AccountPlanType string
+	FileIDs         []string // chatgpt.com 侧的原始 ref("sed:" 前缀表示 sediment)
+	SignedURLs      []string // 直接可访问的签名 URL(15 分钟有效)
+	ContentTypes    []string
+	ErrorCode       string
+	ErrorMessage    string
+	Attempts        int // 跨账号尝试次数(runOnce 次数)
+	DurationMs      int64
 }
 
 // Run 执行生图。会同步阻塞直到完成/失败;调用方自行做超时控制(传 ctx)。
@@ -191,6 +192,7 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 		signedURLs []string
 		convID     string
 		accountID  uint64
+		planType   string
 		errCode    string
 		errMsg     string
 		attempts   int
@@ -258,6 +260,7 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 				signedURLs: sub.SignedURLs,
 				convID:     sub.ConversationID,
 				accountID:  sub.AccountID,
+				planType:   sub.AccountPlanType,
 				errCode:    status,
 				errMsg:     msg,
 				attempts:   attempt,
@@ -287,6 +290,9 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 			}
 			if result.AccountID == 0 {
 				result.AccountID = sr.accountID
+			}
+			if result.AccountPlanType == "" {
+				result.AccountPlanType = sr.planType
 			}
 		} else {
 			lastErrCode = sr.errCode
@@ -352,6 +358,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		_ = lease.Release(context.Background())
 	}()
 	result.AccountID = lease.Account.ID
+	result.AccountPlanType = lease.Account.PlanType
 	// 拿到真实账号后再把任务切到 running,这样前端在等待调度期间仍能看到
 	// dispatched/排队中。重试切换账号时,SetAccount 继续负责覆盖最新 account_id。
 	if r.dao != nil && opt.TaskID != "" {

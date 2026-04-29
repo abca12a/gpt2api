@@ -21,28 +21,30 @@ func NewMeHandler(dao *DAO) *MeHandler { return &MeHandler{dao: dao} }
 
 // taskView 是对外返回的视图结构,解码 JSON 列 + 隐藏内部字段。
 type taskView struct {
-	ID             uint64     `json:"id"`
-	TaskID         string     `json:"task_id"`
-	UserID         uint64     `json:"user_id"`
-	ModelID        uint64     `json:"model_id"`
-	AccountID      uint64     `json:"account_id"`
-	Prompt         string     `json:"prompt"`
-	N              int        `json:"n"`
-	Size           string     `json:"size"`
-	Upscale        string     `json:"upscale,omitempty"`
-	Status         string     `json:"status"`
-	ConversationID string     `json:"conversation_id,omitempty"`
-	Error          string     `json:"error,omitempty"`
-	ErrorCode      string     `json:"error_code,omitempty"`
-	ErrorMessage   string     `json:"error_message,omitempty"`
-	ErrorDetail    string     `json:"error_detail,omitempty"`
-	CreditCost     int64      `json:"credit_cost"`
-	IsPreview      bool       `json:"is_preview,omitempty"`
-	ImageURLs      []string   `json:"image_urls"`
-	FileIDs        []string   `json:"file_ids,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	ID                   uint64     `json:"id"`
+	TaskID               string     `json:"task_id"`
+	UserID               uint64     `json:"user_id"`
+	ModelID              uint64     `json:"model_id"`
+	AccountID            uint64     `json:"account_id"`
+	Prompt               string     `json:"prompt"`
+	N                    int        `json:"n"`
+	Size                 string     `json:"size"`
+	Upscale              string     `json:"upscale,omitempty"`
+	Status               string     `json:"status"`
+	ConversationID       string     `json:"conversation_id,omitempty"`
+	Error                string     `json:"error,omitempty"`
+	ErrorCode            string     `json:"error_code,omitempty"`
+	ErrorMessage         string     `json:"error_message,omitempty"`
+	ErrorDetail          string     `json:"error_detail,omitempty"`
+	ProviderTrace        *TaskTrace `json:"provider_trace,omitempty"`
+	ProviderTraceSummary string     `json:"provider_trace_summary,omitempty"`
+	CreditCost           int64      `json:"credit_cost"`
+	IsPreview            bool       `json:"is_preview,omitempty"`
+	ImageURLs            []string   `json:"image_urls"`
+	FileIDs              []string   `json:"file_ids,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	StartedAt            *time.Time `json:"started_at,omitempty"`
+	FinishedAt           *time.Time `json:"finished_at,omitempty"`
 }
 
 func toView(t *Task) taskView {
@@ -66,6 +68,8 @@ func toView(t *Task) taskView {
 		CreditCost: t.CreditCost, IsPreview: isPreview, ImageURLs: imageURLs, FileIDs: fids,
 		CreatedAt: t.CreatedAt, StartedAt: t.StartedAt, FinishedAt: t.FinishedAt,
 	}
+	view.ProviderTrace = t.DecodeProviderTrace()
+	view.ProviderTraceSummary = TaskTraceSummary(view.ProviderTrace)
 	if t.Status == StatusFailed || t.Error != "" {
 		view.ErrorCode, view.ErrorDetail, view.ErrorMessage = TaskErrorFields(t.Error)
 	}

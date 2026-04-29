@@ -50,12 +50,14 @@ func (h *AdminHandler) List(c *gin.Context) {
 	// 把任务图片转成前端可加载的本站签名代理 URL。
 	type rowOut struct {
 		AdminTaskRow
-		ResultURLsParsed []string `json:"result_urls_parsed"`
-		ResultCount      int      `json:"result_count"`
-		HasResult        bool     `json:"has_result"`
-		ErrorCode        string   `json:"error_code,omitempty"`
-		ErrorMessage     string   `json:"error_message,omitempty"`
-		ErrorDetail      string   `json:"error_detail,omitempty"`
+		ResultURLsParsed     []string   `json:"result_urls_parsed"`
+		ResultCount          int        `json:"result_count"`
+		HasResult            bool       `json:"has_result"`
+		ErrorCode            string     `json:"error_code,omitempty"`
+		ErrorMessage         string     `json:"error_message,omitempty"`
+		ErrorDetail          string     `json:"error_detail,omitempty"`
+		ProviderTrace        *TaskTrace `json:"provider_trace,omitempty"`
+		ProviderTraceSummary string     `json:"provider_trace_summary,omitempty"`
 	}
 	out := make([]rowOut, 0, len(rows))
 	for _, r := range rows {
@@ -72,6 +74,8 @@ func (h *AdminHandler) List(c *gin.Context) {
 			ResultCount:  resultCount,
 			HasResult:    len(fileIDs) > 0 || r.Status == StatusSuccess,
 		}
+		row.ProviderTrace = r.DecodeProviderTrace()
+		row.ProviderTraceSummary = TaskTraceSummary(row.ProviderTrace)
 		if r.Status == StatusFailed || r.Error != "" {
 			row.ErrorCode, row.ErrorDetail, row.ErrorMessage = TaskErrorFields(r.Error)
 		}
@@ -106,11 +110,13 @@ func (h *AdminHandler) Images(c *gin.Context) {
 
 	urls := BuildTaskImageURLs(t, ImageProxyTTL)
 	out := gin.H{
-		"task_id":            t.TaskID,
-		"status":             t.Status,
-		"error":              t.Error,
-		"result_urls_parsed": urls,
-		"result_count":       len(urls),
+		"task_id":                t.TaskID,
+		"status":                 t.Status,
+		"error":                  t.Error,
+		"result_urls_parsed":     urls,
+		"result_count":           len(urls),
+		"provider_trace":         t.DecodeProviderTrace(),
+		"provider_trace_summary": TaskTraceSummary(t.DecodeProviderTrace()),
 	}
 	if t.Status == StatusFailed || t.Error != "" {
 		code, detail, message := TaskErrorFields(t.Error)

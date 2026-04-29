@@ -124,6 +124,37 @@ export function listMyCreditLogs(params: {
 
 // ---------- image tasks ----------
 
+export interface ImageTaskProviderTraceEndpoint {
+  provider?: string
+  channel_id?: number
+  channel_name?: string
+  account_id?: number
+  account_plan_type?: string
+  status?: string
+}
+
+export interface ImageTaskProviderTraceFallback {
+  triggered?: boolean
+  reason_code?: string
+  reason_detail?: string
+  from_provider?: string
+  from_channel_id?: number
+  from_channel_name?: string
+}
+
+export interface ImageTaskProviderTraceStep extends ImageTaskProviderTraceEndpoint {
+  order?: number
+  reason_code?: string
+  reason_detail?: string
+}
+
+export interface ImageTaskProviderTrace {
+  original?: ImageTaskProviderTraceEndpoint
+  fallback?: ImageTaskProviderTraceFallback | null
+  final?: ImageTaskProviderTraceEndpoint
+  steps?: ImageTaskProviderTraceStep[]
+}
+
 export interface ImageTask {
   id: number
   task_id: string
@@ -139,6 +170,8 @@ export interface ImageTask {
   error_code?: string
   error_message?: string
   error_detail?: string
+  provider_trace?: ImageTaskProviderTrace | null
+  provider_trace_summary?: string
   credit_cost: number
   is_preview?: boolean
   image_urls: string[]

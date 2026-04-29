@@ -25,12 +25,45 @@ interface TaskRow {
   error_code?: string
   error_message?: string
   error_detail?: string
+  provider_trace?: ProviderTrace | null
+  provider_trace_summary?: string
   credit_cost: number
   estimated_credit: number
   created_at: string
   started_at?: string | null
   finished_at?: string | null
   detail_loaded?: boolean
+}
+
+interface ProviderTraceEndpoint {
+  provider?: string
+  channel_id?: number
+  channel_name?: string
+  account_id?: number
+  account_plan_type?: string
+  status?: string
+}
+
+interface ProviderTraceFallback {
+  triggered?: boolean
+  reason_code?: string
+  reason_detail?: string
+  from_provider?: string
+  from_channel_id?: number
+  from_channel_name?: string
+}
+
+interface ProviderTraceStep extends ProviderTraceEndpoint {
+  order?: number
+  reason_code?: string
+  reason_detail?: string
+}
+
+interface ProviderTrace {
+  original?: ProviderTraceEndpoint
+  fallback?: ProviderTraceFallback | null
+  final?: ProviderTraceEndpoint
+  steps?: ProviderTraceStep[]
 }
 
 const loading = ref(false)
@@ -90,6 +123,8 @@ async function ensureTaskDetails(row: TaskRow) {
     row.error_code = data.error_code ?? row.error_code
     row.error_message = data.error_message ?? row.error_message
     row.error_detail = data.error_detail ?? row.error_detail
+    row.provider_trace = data.provider_trace ?? row.provider_trace
+    row.provider_trace_summary = data.provider_trace_summary ?? row.provider_trace_summary
     row.detail_loaded = true
   } finally {
     previewLoading.value = false
@@ -143,6 +178,15 @@ const errorTagType: Record<string, 'danger' | 'warning' | 'info'> = {
   interrupted: 'info',
 }
 
+const providerLabel: Record<string, string> = {
+  codex: 'Codex',
+  apimart: 'APIMart',
+  openai: 'OpenAI',
+  gemini: 'Gemini',
+  account_runner: '内置账号池',
+  free_runner: 'Free Runner',
+}
+
 function splitTaskError(error = '') {
   const trimmed = error.trim()
   if (!trimmed) return { code: '', detail: '' }
@@ -190,6 +234,49 @@ function resultActionText(row: TaskRow) {
   if (row.status === 'running') return '查看进度'
   if (row.status === 'queued' || row.status === 'dispatched') return '查看状态'
   return '查看详情'
+}
+
+function providerName(provider = '') {
+  return providerLabel[provider] || provider || '未知渠道'
+}
+
+function traceActorLabel(endpoint?: ProviderTraceEndpoint | null) {
+  if (!endpoint) return '-'
+  const base = providerName(endpoint.provider || '')
+  if (endpoint.provider === 'free_runner' || endpoint.provider === 'account_runner') {
+    if (endpoint.account_id && endpoint.account_plan_type) return `${base} #${endpoint.account_id}/${endpoint.account_plan_type}`
+    if (endpoint.account_id) return `${base} #${endpoint.account_id}`
+    return base
+  }
+  if (endpoint.channel_name) return `${base} / ${endpoint.channel_name}`
+  return base
+}
+
+function traceStatusType(status = ''): 'success' | 'danger' | 'warning' | 'info' {
+  switch (status) {
+    case 'success':
+      return 'success'
+    case 'failed':
+      return 'danger'
+    case 'running':
+      return 'warning'
+    default:
+      return 'info'
+  }
+}
+
+function traceFallbackReason(row: TaskRow) {
+  const fallback = row.provider_trace?.fallback
+  if (!fallback?.triggered) return ''
+  return [fallback.reason_code, fallback.reason_detail].filter(Boolean).join(': ')
+}
+
+function traceSteps(row: TaskRow) {
+  return row.provider_trace?.steps || []
+}
+
+function providerTraceSummary(row: TaskRow) {
+  return row.provider_trace_summary || (row.provider_trace?.final ? `${traceActorLabel(row.provider_trace.original)} -> ${traceActorLabel(row.provider_trace.final)}` : '')
 }
 
 async function copyError(row: TaskRow) {
@@ -268,6 +355,17 @@ onMounted(fetchList)
             <el-tag :type="statusColor[row.status] || 'info'" size="small">{{ row.status }}</el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="渠道链路" min-width="260" show-overflow-tooltip>
+          <template #default="{ row }">
+            <div v-if="providerTraceSummary(row)" class="trace-summary">
+              <div>{{ providerTraceSummary(row) }}</div>
+              <div v-if="traceFallbackReason(row)" class="trace-subtext">
+                兜底原因: {{ traceFallbackReason(row) }}
+              </div>
+            </div>
+            <span v-else style="color:var(--el-text-color-secondary)">-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="结果" width="80">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click="openPreview(row)">
@@ -338,6 +436,34 @@ onMounted(fetchList)
         </div>
         <div v-else-if="!previewLoading" class="empty-preview">
           {{ previewRow.status === 'failed' ? '本次任务没有生成图片' : '暂无可预览图片，任务可能还未完成' }}
+        </div>
+        <div v-if="previewRow.provider_trace" class="task-trace-panel">
+          <div class="task-trace-title">渠道来源链路</div>
+          <div class="task-trace-summary">{{ providerTraceSummary(previewRow) || '-' }}</div>
+          <div class="task-trace-grid">
+            <div class="task-trace-label">原始命中</div>
+            <div>{{ traceActorLabel(previewRow.provider_trace.original) }}</div>
+            <div class="task-trace-label">最终渠道</div>
+            <div>{{ traceActorLabel(previewRow.provider_trace.final) }}</div>
+            <div class="task-trace-label">兜底原因</div>
+            <div>{{ traceFallbackReason(previewRow) || '-' }}</div>
+          </div>
+          <div v-if="traceSteps(previewRow).length" class="task-trace-steps">
+            <div
+              v-for="step in traceSteps(previewRow)"
+              :key="`${step.order}-${step.provider}-${step.channel_name}-${step.account_id}`"
+              class="task-trace-step"
+            >
+              <div class="task-trace-step-head">
+                <span class="task-trace-step-order">#{{ step.order }}</span>
+                <span>{{ traceActorLabel(step) }}</span>
+                <el-tag :type="traceStatusType(step.status)" size="small">{{ step.status || 'unknown' }}</el-tag>
+              </div>
+              <div v-if="step.reason_code || step.reason_detail" class="task-trace-step-detail">
+                {{ [step.reason_code, step.reason_detail].filter(Boolean).join(': ') }}
+              </div>
+            </div>
+          </div>
         </div>
         <div v-if="previewRow.status === 'failed' || previewRow.error || previewRow.error_message" class="task-error-panel">
           <div class="task-error-title">
@@ -458,6 +584,84 @@ onMounted(fetchList)
   border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
   background: var(--el-fill-color-lighter);
+}
+
+.trace-summary {
+  min-width: 0;
+}
+
+.trace-subtext {
+  margin-top: 2px;
+  color: var(--el-text-color-secondary);
+  font-size: 11px;
+}
+
+.task-trace-panel {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.task-trace-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.task-trace-summary {
+  margin-top: 6px;
+  color: var(--el-text-color-regular);
+  word-break: break-all;
+}
+
+.task-trace-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 6px 10px;
+  font-size: 12px;
+}
+
+.task-trace-label {
+  color: var(--el-text-color-secondary);
+}
+
+.task-trace-steps {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-trace-step {
+  padding-top: 8px;
+  border-top: 1px dashed var(--el-border-color);
+}
+
+.task-trace-step:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.task-trace-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.task-trace-step-order {
+  color: var(--el-text-color-secondary);
+}
+
+.task-trace-step-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  word-break: break-all;
 }
 
 .task-error-title {

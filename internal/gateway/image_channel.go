@@ -50,6 +50,14 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	if len(routes) == 0 {
 		return false
 	}
+	trace := ensureRequestTrace(req)
+	if trace != nil && trace.Original.Provider == "" {
+		trace.Original = imagepkg.TaskTraceEndpoint{
+			Provider:    imageProviderForRoute(routes[0]),
+			ChannelID:   routes[0].Channel.ID,
+			ChannelName: routes[0].Channel.Name,
+		}
+	}
 
 	refID := uuid.NewString()
 	rec.RequestID = refID
@@ -79,6 +87,15 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		refunded = true
 		_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "image refund")
 	}
+	if _, err := h.ensureTaskRecord(c, ak, m, req, cost, trace); err != nil {
+		refund("billing_error")
+		openAIError(c, http.StatusInternalServerError, "internal_error", "创建任务失败:"+err.Error())
+		return true
+	}
+	h.persistRequestTrace(c.Request.Context(), req, trace)
+	if h.DAO != nil && req.taskID != "" {
+		_ = h.DAO.MarkRunning(c.Request.Context(), req.taskID, 0)
+	}
 
 	ir := imageAdapterRequest(m, req, refs)
 
@@ -86,12 +103,22 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	defer cancel()
 
 	var lastErr error
+	var lastFailure imageChannelFailure
+	var lastFailedStep imagepkg.TaskTraceStep
 	var result *adapter.ImageResult
 	var selected *channel.Route
 	for _, rt := range routes {
+		step := imageTraceStepForRoute(rt)
 		r, err := imageChannelGenerateWithRetry(ctx, rt, ir, "", 0, nil)
 		if err != nil {
 			lastErr = err
+			lastFailure = imageChannelFailureFromErr(err)
+			step.Status = imagepkg.StatusFailed
+			step.ReasonCode = lastFailure.Code
+			step.ReasonDetail = ifEmpty(lastFailure.Detail, err.Error())
+			lastFailedStep = step
+			trace.AddStep(step)
+			h.persistRequestTrace(c.Request.Context(), req, trace)
 			if adapter.IsContentModerationError(err) {
 				logger.L().Warn("channel image content moderation",
 					zap.Uint64("channel_id", rt.Channel.ID),
@@ -115,11 +142,16 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		}
 		result = r
 		selected = rt
+		step.Status = imagepkg.StatusSuccess
+		trace.AddStep(step)
+		h.persistRequestTrace(c.Request.Context(), req, trace)
 		break
 	}
 
 	if result == nil {
 		if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil && req != nil {
+			trace.MarkFallback(lastFailedStep, lastFailure.Code, lastFailure.Detail)
+			h.persistRequestTrace(c.Request.Context(), req, trace)
 			logger.L().Warn("channel image transient failure, fallback to free account runner",
 				zap.String("model", m.Slug),
 				zap.Error(lastErr))
@@ -129,6 +161,9 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 			return false
 		}
 		failure := imageChannelFailureFromErr(lastErr)
+		if h.DAO != nil && req.taskID != "" {
+			_ = h.DAO.MarkFailedDetail(c.Request.Context(), req.taskID, failure.Code, failure.Detail)
+		}
 		refund(failure.Code)
 		openAIError(c, failure.HTTPStatus, failure.Code, failure.Message)
 		return true
@@ -164,9 +199,14 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	rec.ModelID = m.ID
 	rec.CreditCost = finalCost
 	rec.ImageCount = actualCount(result)
+	if h.DAO != nil && req.taskID != "" {
+		_ = h.DAO.MarkSuccess(c.Request.Context(), req.taskID, "", nil, imageChannelResultURLs(result), finalCost)
+		h.persistRequestTrace(c.Request.Context(), req, trace)
+	}
 
 	c.JSON(http.StatusOK, ImageGenResponse{
 		Created: time.Now().Unix(),
+		TaskID:  req.taskID,
 		Data:    data,
 	})
 	return true
@@ -214,21 +254,16 @@ func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 			return true, false
 		}
 	}
-
-	taskID := imagepkg.GenerateTaskID()
-	task := &imagepkg.Task{
-		TaskID:          taskID,
-		UserID:          ak.UserID,
-		KeyID:           ak.ID,
-		ModelID:         m.ID,
-		Prompt:          req.Prompt,
-		N:               req.N,
-		Size:            req.Size,
-		Status:          imagepkg.StatusDispatched,
-		EstimatedCredit: cost,
+	trace := ensureRequestTrace(req)
+	if trace != nil && trace.Original.Provider == "" {
+		trace.Original = imagepkg.TaskTraceEndpoint{
+			Provider:    imageProviderForRoute(routes[0]),
+			ChannelID:   routes[0].Channel.ID,
+			ChannelName: routes[0].Channel.Name,
+		}
 	}
-	downstreamUserInfoForTask(c, ak, req.User).applyToTask(task)
-	if err := h.DAO.Create(c.Request.Context(), task); err != nil {
+	taskID, err := h.ensureTaskRecord(c, ak, m, req, cost, trace)
+	if err != nil {
 		rec.Status = usage.StatusFailed
 		rec.ErrorCode = "billing_error"
 		if cost > 0 {
@@ -237,40 +272,43 @@ func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 		openAIError(c, http.StatusInternalServerError, "internal_error", "创建任务失败:"+err.Error())
 		return true, false
 	}
+	h.persistRequestTrace(c.Request.Context(), req, trace)
 
 	h.runImageChannelTaskAsync(imageChannelAsyncJob{
-		TaskID:     taskID,
-		UserID:     ak.UserID,
-		KeyID:      ak.ID,
-		ModelID:    m.ID,
-		Model:      m,
-		Ratio:      ratio,
-		Routes:     routes,
-		Request:    imageAdapterRequest(m, req, refs),
-		References: refs,
-		Cost:       cost,
-		RefID:      refID,
-		IP:         c.ClientIP(),
-		UA:         c.Request.UserAgent(),
+		TaskID:        taskID,
+		UserID:        ak.UserID,
+		KeyID:         ak.ID,
+		ModelID:       m.ID,
+		Model:         m,
+		Ratio:         ratio,
+		Routes:        routes,
+		Request:       imageAdapterRequest(m, req, refs),
+		References:    refs,
+		Cost:          cost,
+		RefID:         refID,
+		IP:            c.ClientIP(),
+		UA:            c.Request.UserAgent(),
+		ProviderTrace: trace,
 	})
 	writeAsyncImageSubmit(c, taskID)
 	return true, true
 }
 
 type imageChannelAsyncJob struct {
-	TaskID     string
-	UserID     uint64
-	KeyID      uint64
-	ModelID    uint64
-	Model      *modelpkg.Model
-	Ratio      float64
-	Routes     []*channel.Route
-	Request    *adapter.ImageRequest
-	References []imagepkg.ReferenceImage
-	Cost       int64
-	RefID      string
-	IP         string
-	UA         string
+	TaskID        string
+	UserID        uint64
+	KeyID         uint64
+	ModelID       uint64
+	Model         *modelpkg.Model
+	Ratio         float64
+	Routes        []*channel.Route
+	Request       *adapter.ImageRequest
+	References    []imagepkg.ReferenceImage
+	Cost          int64
+	RefID         string
+	IP            string
+	UA            string
+	ProviderTrace *imagepkg.TaskTrace
 }
 
 func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
@@ -298,6 +336,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		if h.DAO != nil {
 			_ = h.DAO.MarkRunning(context.Background(), job.TaskID, 0)
 		}
+		trace := job.ProviderTrace
 		hasReferences := len(job.References) > 0
 		taskCtx, cancelTask := context.WithTimeout(context.Background(), imageChannelTaskTimeout(hasReferences))
 		defer cancelTask()
@@ -305,11 +344,14 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		defer cancelChannel()
 
 		var lastErr error
+		var lastFailure imageChannelFailure
+		var lastFailedStep imagepkg.TaskTraceStep
 		var result *adapter.ImageResult
 		var selected *channel.Route
 		perAttemptTimeout := imageChannelAsyncPerAttemptTimeout(hasReferences)
 		routeTimeout := imageChannelAsyncRouteTimeout(hasReferences)
 		for _, rt := range job.Routes {
+			step := imageTraceStepForRoute(rt)
 			routeCtx := channelCtx
 			cancelRoute := func() {}
 			if routeTimeout > 0 {
@@ -319,6 +361,15 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 			cancelRoute()
 			if err != nil {
 				lastErr = err
+				lastFailure = imageChannelFailureFromErr(err)
+				step.Status = imagepkg.StatusFailed
+				step.ReasonCode = lastFailure.Code
+				step.ReasonDetail = ifEmpty(lastFailure.Detail, err.Error())
+				lastFailedStep = step
+				if trace != nil {
+					trace.AddStep(step)
+					_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, trace)
+				}
 				if adapter.IsContentModerationError(err) {
 					logger.L().Warn("channel async image content moderation",
 						zap.Uint64("channel_id", rt.Channel.ID),
@@ -345,11 +396,20 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 			}
 			result = r
 			selected = rt
+			step.Status = imagepkg.StatusSuccess
+			if trace != nil {
+				trace.AddStep(step)
+				_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, trace)
+			}
 			break
 		}
 
 		if result == nil {
 			if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil {
+				if trace != nil {
+					trace.MarkFallback(lastFailedStep, lastFailure.Code, lastFailure.Detail)
+					_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, trace)
+				}
 				logger.L().Warn("channel async image transient failure, fallback to free account runner",
 					zap.String("task_id", job.TaskID),
 					zap.Error(lastErr))
@@ -358,6 +418,10 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 				fallback := h.Runner.Run(fallbackCtx, fallbackOpt)
 				cancelFallback()
 				rec.AccountID = fallback.AccountID
+				if trace != nil {
+					trace.AddStep(imageTraceStepForRunner(fallback, true, fallback.Status, fallback.ErrorCode, fallback.ErrorMessage))
+					_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, trace)
+				}
 				if fallback.Status == imagepkg.StatusSuccess {
 					if job.Cost > 0 && h.Billing != nil {
 						if err := h.Billing.Settle(context.Background(), job.UserID, job.KeyID, job.Cost, job.Cost, job.RefID, "image channel async free fallback settle"); err != nil {
@@ -386,6 +450,9 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 			rec.ErrorCode = failure.Code
 			if h.DAO != nil {
 				_ = h.DAO.MarkFailedDetail(context.Background(), job.TaskID, failure.Code, failure.Detail)
+				if trace != nil {
+					_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, trace)
+				}
 			}
 			if job.Cost > 0 && h.Billing != nil {
 				_ = h.Billing.Refund(context.Background(), job.UserID, job.KeyID, job.Cost, job.RefID, "image channel async refund")
@@ -410,6 +477,9 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		}
 		if h.DAO != nil {
 			_ = h.DAO.MarkSuccess(context.Background(), job.TaskID, "", nil, imageChannelResultURLs(result), finalCost)
+			if trace != nil {
+				_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, trace)
+			}
 		}
 		rec.Status = usage.StatusSuccess
 		rec.CreditCost = finalCost
@@ -434,6 +504,14 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	}
 	if len(routes) == 0 {
 		return false
+	}
+	trace := ensureRequestTrace(req)
+	if trace != nil && trace.Original.Provider == "" {
+		trace.Original = imagepkg.TaskTraceEndpoint{
+			Provider:    imageProviderForRoute(routes[0]),
+			ChannelID:   routes[0].Channel.ID,
+			ChannelName: routes[0].Channel.Name,
+		}
 	}
 
 	refID := uuid.NewString()
@@ -464,18 +542,37 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 		refunded = true
 		_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "chat->image channel refund")
 	}
+	if _, err := h.ensureTaskRecord(c, ak, m, req, cost, trace); err != nil {
+		refund("billing_error")
+		openAIError(c, http.StatusInternalServerError, "internal_error", "创建任务失败:"+err.Error())
+		return true
+	}
+	h.persistRequestTrace(c.Request.Context(), req, trace)
+	if h.DAO != nil && req.taskID != "" {
+		_ = h.DAO.MarkRunning(c.Request.Context(), req.taskID, 0)
+	}
 
 	ir := imageAdapterRequest(m, req, nil)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
 	defer cancel()
 
 	var lastErr error
+	var lastFailure imageChannelFailure
+	var lastFailedStep imagepkg.TaskTraceStep
 	var result *adapter.ImageResult
 	var selected *channel.Route
 	for _, rt := range routes {
+		step := imageTraceStepForRoute(rt)
 		r, err := imageChannelGenerateWithRetry(ctx, rt, ir, "", 0, nil)
 		if err != nil {
 			lastErr = err
+			lastFailure = imageChannelFailureFromErr(err)
+			step.Status = imagepkg.StatusFailed
+			step.ReasonCode = lastFailure.Code
+			step.ReasonDetail = ifEmpty(lastFailure.Detail, err.Error())
+			lastFailedStep = step
+			trace.AddStep(step)
+			h.persistRequestTrace(c.Request.Context(), req, trace)
 			if adapter.IsContentModerationError(err) {
 				logger.L().Warn("channel chat image content moderation",
 					zap.Uint64("channel_id", rt.Channel.ID),
@@ -499,11 +596,16 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 		}
 		result = r
 		selected = rt
+		step.Status = imagepkg.StatusSuccess
+		trace.AddStep(step)
+		h.persistRequestTrace(c.Request.Context(), req, trace)
 		break
 	}
 
 	if result == nil {
 		if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil && req != nil {
+			trace.MarkFallback(lastFailedStep, lastFailure.Code, lastFailure.Detail)
+			h.persistRequestTrace(c.Request.Context(), req, trace)
 			logger.L().Warn("channel chat image transient failure, fallback to free account runner",
 				zap.String("model", m.Slug),
 				zap.Error(lastErr))
@@ -513,6 +615,9 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 			return false
 		}
 		failure := imageChannelFailureFromErr(lastErr)
+		if h.DAO != nil && req.taskID != "" {
+			_ = h.DAO.MarkFailedDetail(c.Request.Context(), req.taskID, failure.Code, failure.Detail)
+		}
 		refund(failure.Code)
 		openAIError(c, failure.HTTPStatus, failure.Code, failure.Message)
 		return true
@@ -537,6 +642,10 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	rec.CreditCost = finalCost
 	rec.DurationMs = int(time.Since(startAt).Milliseconds())
 	rec.ImageCount = actualCount(result)
+	if h.DAO != nil && req.taskID != "" {
+		_ = h.DAO.MarkSuccess(c.Request.Context(), req.taskID, "", nil, imageChannelResultURLs(result), finalCost)
+		h.persistRequestTrace(c.Request.Context(), req, trace)
+	}
 
 	c.JSON(http.StatusOK, imageChannelChatResponse(m.Slug, result))
 	return true

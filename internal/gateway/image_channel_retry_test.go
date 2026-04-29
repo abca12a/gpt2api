@@ -284,3 +284,47 @@ func TestImageChannelGenerateWithRetryDoesNotRetryAttemptTimeout(t *testing.T) {
 		t.Fatalf("adapter calls = %d, want 1", stub.calls)
 	}
 }
+
+func TestImageProviderForRouteDistinguishesCodexAndAPIMart(t *testing.T) {
+	cases := []struct {
+		name  string
+		route *channel.Route
+		want  string
+	}{
+		{
+			name: "codex from channel name",
+			route: &channel.Route{Channel: &channel.Channel{
+				Name:    "codex-cli-proxy-image",
+				BaseURL: "http://cli-proxy-api:8317",
+				Type:    channel.TypeOpenAI,
+			}},
+			want: imagepkg.TraceProviderCodex,
+		},
+		{
+			name: "apimart from base url",
+			route: &channel.Route{Channel: &channel.Channel{
+				Name:    "openai-image",
+				BaseURL: "https://api.apimart.ai/v1",
+				Type:    channel.TypeOpenAI,
+			}},
+			want: imagepkg.TraceProviderAPIMart,
+		},
+		{
+			name: "gemini from channel type",
+			route: &channel.Route{Channel: &channel.Channel{
+				Name:    "imagen",
+				BaseURL: "https://generativelanguage.googleapis.com",
+				Type:    channel.TypeGemini,
+			}},
+			want: imagepkg.TraceProviderGemini,
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := imageProviderForRoute(tt.route); got != tt.want {
+				t.Fatalf("imageProviderForRoute() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

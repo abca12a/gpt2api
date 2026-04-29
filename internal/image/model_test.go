@@ -1,6 +1,7 @@
 package image
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -52,5 +53,86 @@ func TestTaskErrorFieldsUsesAssistantDiagnosticForMessage(t *testing.T) {
 	}
 	if !strings.Contains(message, "上游说明:I cannot help create that image") {
 		t.Fatalf("message should expose assistant diagnostic, got %q", message)
+	}
+}
+
+func TestTaskTraceSummaryShowsFallbackOrderAndFinalAccount(t *testing.T) {
+	trace := &TaskTrace{
+		Original: TaskTraceEndpoint{
+			Provider:    TraceProviderCodex,
+			ChannelID:   1,
+			ChannelName: "codex-cli-proxy-image",
+		},
+		Fallback: &TaskTraceFallback{
+			Triggered:    true,
+			ReasonCode:   ErrUpstream,
+			ReasonDetail: "upstream 502: stream disconnected before completion",
+			FromProvider: TraceProviderAPIMart,
+		},
+		Final: TaskTraceEndpoint{
+			Provider:        TraceProviderFreeRunner,
+			AccountID:       42,
+			AccountPlanType: "free",
+			Status:          StatusSuccess,
+		},
+		Steps: []TaskTraceStep{
+			{
+				Order:       1,
+				Provider:    TraceProviderCodex,
+				ChannelID:   1,
+				ChannelName: "codex-cli-proxy-image",
+				Status:      StatusFailed,
+				ReasonCode:  ErrUpstream,
+			},
+			{
+				Order:       2,
+				Provider:    TraceProviderAPIMart,
+				ChannelID:   2,
+				ChannelName: "apimart-image",
+				Status:      StatusFailed,
+				ReasonCode:  ErrUpstream,
+			},
+			{
+				Order:           3,
+				Provider:        TraceProviderFreeRunner,
+				AccountID:       42,
+				AccountPlanType: "free",
+				Status:          StatusSuccess,
+			},
+		},
+	}
+
+	got := TaskTraceSummary(trace)
+	if !strings.Contains(got, "Codex(codex-cli-proxy-image)") {
+		t.Fatalf("summary should include original codex route, got %q", got)
+	}
+	if !strings.Contains(got, "APIMart(apimart-image)") {
+		t.Fatalf("summary should include fallback apimart route, got %q", got)
+	}
+	if !strings.Contains(got, "Free Runner(#42/free)") {
+		t.Fatalf("summary should include final free runner account, got %q", got)
+	}
+}
+
+func TestTaskDecodeProviderTraceHandlesStoredJSON(t *testing.T) {
+	raw, err := json.Marshal(&TaskTrace{
+		Final: TaskTraceEndpoint{
+			Provider:        TraceProviderFreeRunner,
+			AccountID:       7,
+			AccountPlanType: "free",
+			Status:          StatusSuccess,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal trace: %v", err)
+	}
+
+	task := &Task{ProviderTrace: raw}
+	trace := task.DecodeProviderTrace()
+	if trace == nil {
+		t.Fatal("DecodeProviderTrace() returned nil")
+	}
+	if trace.Final.Provider != TraceProviderFreeRunner || trace.Final.AccountID != 7 {
+		t.Fatalf("decoded trace = %#v", trace.Final)
 	}
 }
