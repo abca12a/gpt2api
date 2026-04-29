@@ -68,6 +68,8 @@
 - 下游 `new-api` token 必须命中含 `gpt-image-2` 渠道的分组；错误里出现 `under group default` 时，请求通常还没进入 gpt2api。
 - 下游用量日志中的 `LogTypeConsume / quota=0 / use_time=0 / 操作 textGenerate` 只是异步提交记录，不代表任务成功；最终状态看 `tasks.status/fail_reason`、错误日志和号池 `image_tasks.error`。
 - 下游 `new-api` 的 `Request ID` 不会原样透传成号池 `gpt2api` 的 `request_id`；跨系统排查时，优先用下游公开 `task_id` 在 `tasks.private_data.upstream_task_id` 映射到号池 `img_*` 任务号，或按提交时间窗口对齐两边日志。
+- 2026-04-29 进一步确认：当前下游 `new-api` 中，`channels.id=20 / 自有账号 / https://lmage2.dimilinks.com` 表示请求先进入当前号池；这类任务在下游 `tasks.private_data.upstream_task_id` 中会映射为号池 `img_*` 任务号。若随后在号池日志里看到 `channel_id=2 apimart` 的 `503`，这是号池内部“Codex -> APIMart -> free runner”链路的第二跳报错，不等于“下游后端 APIMart 兜底失败”。
+- 2026-04-29 进一步确认：当前下游 `new-api` 中，`channels.id=18 / 图片上游apimart / https://api.apimart.ai` 表示后端直连 APIMart；这类任务的 `upstream_task_id` 通常仍是 APIMart 自己的 `task_*`。若下游 `tasks.fail_reason` 或后端日志里出现 `all channels failed. Last error: HTTP 400 ... Tool choice 'image_generation' not found in 'tools' parameter.`，应归因为下游后端这条直连 APIMart 链路，而不是号池第二跳。
 - 下游前端 `/console/logs` 已新增状态说明：图片失败日志显示“图像生成失败”和后端错误原因，异步提交日志显示“图像生成已提交”。
 - 2026-04-28 进一步确认：下游 `new-api` 的 `default` 分组里，`gpt-image-2` 当前会优先选 `channels.id=18 / 图片上游apimart / https://api.apimart.ai`，因为它的 ability/channel priority 高于 `channels.id=20 / 自有账号 / https://lmage2.dimilinks.com`。因此登录态 `POST /pg/images/generations?async=true` 若命中 `group=default`，请求会直接走下游 APIMart，不会进入当前号池；若要先经过号池，需在下游调整 `gpt-image-2` 的分组归属或优先级。
 
