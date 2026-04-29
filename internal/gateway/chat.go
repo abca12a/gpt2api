@@ -59,6 +59,11 @@ type Handler struct {
 	Settings interface {
 		GatewayUpstreamTimeoutSec() int
 		GatewaySSEReadTimeoutSec() int
+		ImageChannelFallbackOrder() []string
+		ImageAccountFallbackOrder() []string
+		ImageChannelCooldownSec() int
+		ImageChannelFailThreshold() int
+		ImageSkipCodexToAPIMart() bool
 	}
 }
 

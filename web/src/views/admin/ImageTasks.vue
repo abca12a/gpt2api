@@ -66,15 +66,58 @@ interface ProviderTrace {
   steps?: ProviderTraceStep[]
 }
 
+interface ProviderHitStat {
+  provider: string
+  display_name: string
+  attempted: number
+  skipped: number
+  first_selected: number
+  final_selected: number
+  success: number
+  failed: number
+  fallback_from: number
+}
+
+interface ProviderTransitionStat {
+  from_provider: string
+  to_provider: string
+  display: string
+  count: number
+}
+
+interface ProviderTraceStats {
+  window_hours: number
+  total: number
+  success: number
+  failed: number
+  fallback_triggered: number
+  providers: ProviderHitStat[]
+  transitions: ProviderTransitionStat[]
+}
+
 const loading = ref(false)
 const rows = ref<TaskRow[]>([])
 const total = ref(0)
+const statsLoading = ref(false)
+const statsHours = ref(24)
+const stats = ref<ProviderTraceStats | null>(null)
 const filter = reactive({
   keyword: '',
   status: '',
   page: 1,
   page_size: 20,
 })
+
+async function fetchStats() {
+  statsLoading.value = true
+  try {
+    stats.value = await http.get<any, any>('/api/admin/image-tasks/stats', {
+      params: { hours: statsHours.value },
+    })
+  } finally {
+    statsLoading.value = false
+  }
+}
 
 async function fetchList() {
   loading.value = true
@@ -240,6 +283,27 @@ function providerName(provider = '') {
   return providerLabel[provider] || provider || '未知渠道'
 }
 
+function providerStat(provider = '') {
+  return stats.value?.providers?.find((item) => item.provider === provider)
+}
+
+function providerFirst(provider = '') {
+  return providerStat(provider)?.first_selected || 0
+}
+
+function providerFinal(provider = '') {
+  return providerStat(provider)?.final_selected || 0
+}
+
+function providerFallbackOut(provider = '') {
+  return providerStat(provider)?.fallback_from || 0
+}
+
+function statsSuccessRate() {
+  if (!stats.value?.total) return '0%'
+  return `${((stats.value.success / stats.value.total) * 100).toFixed(1)}%`
+}
+
 function traceActorLabel(endpoint?: ProviderTraceEndpoint | null) {
   if (!endpoint) return '-'
   const base = providerName(endpoint.provider || '')
@@ -301,7 +365,10 @@ async function copyError(row: TaskRow) {
   }
 }
 
-onMounted(fetchList)
+onMounted(() => {
+  fetchStats()
+  fetchList()
+})
 </script>
 
 <template>
@@ -310,6 +377,63 @@ onMounted(fetchList)
       <h2 class="page-title" style="margin:0">生成记录</h2>
       <div style="color:var(--el-text-color-secondary);font-size:13px;margin:4px 0 14px">
         全站图片生成任务历史,含后端顾客、号池用户、提示词、生成结果与耗时。
+      </div>
+
+      <div class="trace-stats-panel" v-loading="statsLoading">
+        <div class="trace-stats-head">
+          <div class="trace-stats-title">渠道命中统计</div>
+          <div class="flex-wrap-gap">
+            <el-select v-model="statsHours" style="width:140px" @change="fetchStats">
+              <el-option label="最近 6 小时" :value="6" />
+              <el-option label="最近 24 小时" :value="24" />
+              <el-option label="最近 72 小时" :value="72" />
+              <el-option label="最近 7 天" :value="168" />
+            </el-select>
+            <el-button link type="primary" @click="fetchStats">刷新统计</el-button>
+          </div>
+        </div>
+        <div v-if="stats" class="trace-stats-grid">
+          <div class="trace-stat-card">
+            <div class="trace-stat-label">总任务</div>
+            <div class="trace-stat-value">{{ stats.total }}</div>
+            <div class="trace-stat-sub">最近 {{ stats.window_hours }} 小时</div>
+          </div>
+          <div class="trace-stat-card">
+            <div class="trace-stat-label">成功率</div>
+            <div class="trace-stat-value">{{ statsSuccessRate() }}</div>
+            <div class="trace-stat-sub">成功 {{ stats.success }} / 失败 {{ stats.failed }}</div>
+          </div>
+          <div class="trace-stat-card">
+            <div class="trace-stat-label">触发兜底</div>
+            <div class="trace-stat-value">{{ stats.fallback_triggered }}</div>
+            <div class="trace-stat-sub">有 fallback trace 的任务数</div>
+          </div>
+          <div class="trace-stat-card">
+            <div class="trace-stat-label">Codex 命中</div>
+            <div class="trace-stat-value">{{ providerFirst('codex') }} / {{ providerFinal('codex') }}</div>
+            <div class="trace-stat-sub">首跳 / 最终命中</div>
+          </div>
+          <div class="trace-stat-card">
+            <div class="trace-stat-label">APIMart 最终命中</div>
+            <div class="trace-stat-value">{{ providerFinal('apimart') }}</div>
+            <div class="trace-stat-sub">Codex 转出 {{ providerFallbackOut('codex') }}</div>
+          </div>
+          <div class="trace-stat-card">
+            <div class="trace-stat-label">Free Runner 最终命中</div>
+            <div class="trace-stat-value">{{ providerFinal('free_runner') }}</div>
+            <div class="trace-stat-sub">用于观察兜底落地频率</div>
+          </div>
+        </div>
+        <div v-if="stats?.transitions?.length" class="trace-transition-row">
+          <el-tag
+            v-for="item in stats.transitions"
+            :key="`${item.from_provider}-${item.to_provider}`"
+            size="small"
+            effect="plain"
+          >
+            {{ item.display }} · {{ item.count }}
+          </el-tag>
+        </div>
       </div>
 
       <el-form inline class="flex-wrap-gap" @submit.prevent="onSearch">
@@ -516,6 +640,67 @@ onMounted(fetchList)
   background: transparent;
   cursor: zoom-in;
   overflow: hidden;
+}
+
+.trace-stats-panel {
+  margin-bottom: 14px;
+  padding: 14px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.02), rgba(13, 148, 136, 0.08));
+  border: 1px solid rgba(15, 23, 42, 0.06);
+}
+
+.trace-stats-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.trace-stats-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.trace-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.trace-stat-card {
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(15, 23, 42, 0.06);
+}
+
+.trace-stat-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.trace-stat-value {
+  margin-top: 6px;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--el-text-color-primary);
+}
+
+.trace-stat-sub {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+}
+
+.trace-transition-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .error-reason {

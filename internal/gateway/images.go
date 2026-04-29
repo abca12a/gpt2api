@@ -149,10 +149,11 @@ type ImageGenRequest struct {
 	Upscale       string `json:"upscale,omitempty"`
 	WaitForResult *bool  `json:"wait_for_result,omitempty"` // false=立即返回 task_id,客户端自行轮询
 
-	freeFallback       bool
-	freeFallbackDetail string
-	taskID             string
-	providerTrace      *image.TaskTrace
+	freeFallback        bool
+	freeFallbackDetail  string
+	runnerFallbackPlans []imageRunnerFallbackPlan
+	taskID              string
+	providerTrace       *image.TaskTrace
 }
 
 // ImageGenData 单张图响应。
@@ -185,6 +186,7 @@ type imageAsyncJob struct {
 	UA            string
 	ProviderTrace *image.TaskTrace
 	RequireFree   bool
+	RunnerPlans   []imageRunnerFallbackPlan
 }
 
 func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
@@ -213,7 +215,7 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 		defer cancel()
 		maxAttempts, perAttemptTimeout, pollMaxWait, dispatchTimeout := asyncImageRunTuning(job.MaxAttempts, len(job.References) > 0)
 
-		res := h.Runner.Run(ctx, image.RunOptions{
+		runOptions := image.RunOptions{
 			TaskID:            job.TaskID,
 			UserID:            job.UserID,
 			KeyID:             job.KeyID,
@@ -226,10 +228,11 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 			PerAttemptTimeout: perAttemptTimeout,
 			PollMaxWait:       pollMaxWait,
 			References:        job.References,
-		})
+		}
+		res, usedPlan := h.runImageWithFallbackPlans(ctx, runOptions, job.RunnerPlans)
 		rec.AccountID = res.AccountID
 		if job.ProviderTrace != nil && h.DAO != nil {
-			job.ProviderTrace.AddStep(imageTraceStepForRunner(res, job.RequireFree, res.Status, res.ErrorCode, res.ErrorMessage))
+			job.ProviderTrace.AddStep(imageTraceStepForRunnerPlan(res, usedPlan, res.Status, res.ErrorCode, res.ErrorMessage))
 			_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, job.ProviderTrace)
 		}
 
@@ -416,8 +419,9 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		} else if handled := h.dispatchImageToChannel(c, ak, m, channelReq, rec, ratio, refs); handled {
 			return
 		}
-		if channelReq.freeFallback {
-			req.freeFallback = true
+		if len(channelReq.runnerFallbackPlans) > 0 {
+			req.runnerFallbackPlans = cloneImageRunnerFallbackPlans(channelReq.runnerFallbackPlans)
+			req.freeFallback = isFreeRunnerPlan(firstImageRunnerFallbackPlan(req.runnerFallbackPlans))
 			req.freeFallbackDetail = channelReq.freeFallbackDetail
 		}
 		req.taskID = channelReq.taskID
@@ -491,6 +495,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 			UA:            c.Request.UserAgent(),
 			ProviderTrace: trace,
 			RequireFree:   req.freeFallback,
+			RunnerPlans:   cloneImageRunnerFallbackPlans(req.runnerFallbackPlans),
 		})
 		writeAsyncImageSubmit(c, taskID)
 		return
@@ -511,10 +516,9 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		PollMaxWait:       pollMaxWait,
 		References:        refs,
 	}
-	applyFreeFallbackPlan(&runOptions, req.freeFallback)
-	res := h.Runner.Run(runCtx, runOptions)
+	res, usedPlan := h.runImageWithFallbackPlans(runCtx, runOptions, req.runnerFallbackPlans)
 	rec.AccountID = res.AccountID
-	trace.AddStep(imageTraceStepForRunner(res, req.freeFallback, res.Status, res.ErrorCode, res.ErrorMessage))
+	trace.AddStep(imageTraceStepForRunnerPlan(res, usedPlan, res.Status, res.ErrorCode, res.ErrorMessage))
 	h.persistRequestTrace(c.Request.Context(), &req, trace)
 
 	if res.Status != image.StatusSuccess {
@@ -685,8 +689,9 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		if handled := h.dispatchChatImageToChannel(c, ak, m, channelReq, rec, ratio, startAt); handled {
 			return
 		}
-		if channelReq.freeFallback {
-			imgReq.freeFallback = true
+		if len(channelReq.runnerFallbackPlans) > 0 {
+			imgReq.runnerFallbackPlans = cloneImageRunnerFallbackPlans(channelReq.runnerFallbackPlans)
+			imgReq.freeFallback = isFreeRunnerPlan(firstImageRunnerFallbackPlan(imgReq.runnerFallbackPlans))
 			imgReq.freeFallbackDetail = channelReq.freeFallbackDetail
 		}
 		imgReq.taskID = channelReq.taskID
@@ -749,10 +754,9 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		PerAttemptTimeout: perAttemptTimeout,
 		PollMaxWait:       pollMaxWait,
 	}
-	applyFreeFallbackPlan(&runOptions, imgReq.freeFallback)
-	res := h.Runner.Run(runCtx, runOptions)
+	res, usedPlan := h.runImageWithFallbackPlans(runCtx, runOptions, imgReq.runnerFallbackPlans)
 	rec.AccountID = res.AccountID
-	trace.AddStep(imageTraceStepForRunner(res, imgReq.freeFallback, res.Status, res.ErrorCode, res.ErrorMessage))
+	trace.AddStep(imageTraceStepForRunnerPlan(res, usedPlan, res.Status, res.ErrorCode, res.ErrorMessage))
 	h.persistRequestTrace(c.Request.Context(), imgReq, trace)
 
 	if res.Status != image.StatusSuccess {
@@ -1557,7 +1561,8 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		if handled := h.dispatchImageToChannel(c, ak, m, channelReq, rec, ratio, refs); handled {
 			return
 		}
-		freeFallback = channelReq.freeFallback
+		editReq.runnerFallbackPlans = cloneImageRunnerFallbackPlans(channelReq.runnerFallbackPlans)
+		freeFallback = isFreeRunnerPlan(firstImageRunnerFallbackPlan(editReq.runnerFallbackPlans))
 		editReq.taskID = channelReq.taskID
 		editReq.providerTrace = channelReq.providerTrace
 	}
@@ -1617,10 +1622,9 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		PollMaxWait:       pollMaxWait,
 		References:        refs,
 	}
-	applyFreeFallbackPlan(&runOptions, freeFallback)
-	res := h.Runner.Run(runCtx, runOptions)
+	res, usedPlan := h.runImageWithFallbackPlans(runCtx, runOptions, editReq.runnerFallbackPlans)
 	rec.AccountID = res.AccountID
-	trace.AddStep(imageTraceStepForRunner(res, freeFallback, res.Status, res.ErrorCode, res.ErrorMessage))
+	trace.AddStep(imageTraceStepForRunnerPlan(res, usedPlan, res.Status, res.ErrorCode, res.ErrorMessage))
 	h.persistRequestTrace(c.Request.Context(), editReq, trace)
 
 	if res.Status != image.StatusSuccess {

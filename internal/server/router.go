@@ -258,6 +258,7 @@ func New(d *Deps) *gin.Engine {
 			// 生成记录(管理员全局视图)
 			if d.AdminImageH != nil {
 				admin.GET("/image-tasks", middleware.RequirePerm(rbac.PermUsageReadAll), d.AdminImageH.List)
+				admin.GET("/image-tasks/stats", middleware.RequirePerm(rbac.PermUsageReadAll), d.AdminImageH.Stats)
 				admin.GET("/image-tasks/:id/images", middleware.RequirePerm(rbac.PermUsageReadAll), d.AdminImageH.Images)
 			}
 

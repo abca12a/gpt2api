@@ -50,8 +50,15 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	if len(routes) == 0 {
 		return false
 	}
+	policy := h.imageFallbackPolicy()
+	routes, skippedSteps := prepareImageRoutes(routes, policy)
 	trace := ensureRequestTrace(req)
-	if trace != nil && trace.Original.Provider == "" {
+	if trace != nil {
+		for _, step := range skippedSteps {
+			trace.AddStep(step)
+		}
+	}
+	if trace != nil && trace.Original.Provider == "" && len(routes) > 0 {
 		trace.Original = imagepkg.TaskTraceEndpoint{
 			Provider:    imageProviderForRoute(routes[0]),
 			ChannelID:   routes[0].Channel.ID,
@@ -149,15 +156,36 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	}
 
 	if result == nil {
-		if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil && req != nil {
-			trace.MarkFallback(lastFailedStep, lastFailure.Code, lastFailure.Detail)
+		fallbackStep := lastFailedStep
+		fallbackCode := lastFailure.Code
+		fallbackDetail := lastFailure.Detail
+		if fallbackStep.Provider == "" && len(skippedSteps) > 0 {
+			fallbackStep = skippedSteps[len(skippedSteps)-1]
+		}
+		if fallbackCode == "" {
+			fallbackCode = fallbackStep.ReasonCode
+		}
+		if fallbackDetail == "" {
+			fallbackDetail = fallbackStep.ReasonDetail
+		}
+		if (len(routes) == 0 || shouldFallbackImageChannelToFree(lastErr)) && h.Runner != nil && req != nil && len(policy.RunnerPlans) > 0 {
+			trace.MarkFallback(fallbackStep, fallbackCode, fallbackDetail)
 			h.persistRequestTrace(c.Request.Context(), req, trace)
-			logger.L().Warn("channel image transient failure, fallback to free account runner",
-				zap.String("model", m.Slug),
-				zap.Error(lastErr))
+			logFields := []zap.Field{zap.String("model", m.Slug)}
+			if lastErr != nil {
+				logFields = append(logFields, zap.Error(lastErr))
+			} else {
+				logFields = append(logFields, zap.String("reason", fallbackDetail))
+			}
+			logger.L().Warn("channel image fallback to account runner", logFields...)
 			refund(imagepkg.ErrUpstream)
-			req.freeFallback = true
-			req.freeFallbackDetail = lastErr.Error()
+			req.runnerFallbackPlans = cloneImageRunnerFallbackPlans(policy.RunnerPlans)
+			req.freeFallback = isFreeRunnerPlan(firstImageRunnerFallbackPlan(req.runnerFallbackPlans))
+			if lastErr != nil {
+				req.freeFallbackDetail = lastErr.Error()
+			} else {
+				req.freeFallbackDetail = fallbackDetail
+			}
 			return false
 		}
 		failure := imageChannelFailureFromErr(lastErr)
@@ -230,6 +258,8 @@ func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 	if len(routes) == 0 {
 		return false, false
 	}
+	policy := h.imageFallbackPolicy()
+	routes, skippedSteps := prepareImageRoutes(routes, policy)
 	if h.DAO == nil {
 		rec.Status = usage.StatusFailed
 		rec.ErrorCode = "not_configured"
@@ -255,7 +285,12 @@ func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 		}
 	}
 	trace := ensureRequestTrace(req)
-	if trace != nil && trace.Original.Provider == "" {
+	if trace != nil {
+		for _, step := range skippedSteps {
+			trace.AddStep(step)
+		}
+	}
+	if trace != nil && trace.Original.Provider == "" && len(routes) > 0 {
 		trace.Original = imagepkg.TaskTraceEndpoint{
 			Provider:    imageProviderForRoute(routes[0]),
 			ChannelID:   routes[0].Channel.ID,
@@ -289,6 +324,7 @@ func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 		IP:            c.ClientIP(),
 		UA:            c.Request.UserAgent(),
 		ProviderTrace: trace,
+		RunnerPlans:   cloneImageRunnerFallbackPlans(policy.RunnerPlans),
 	})
 	writeAsyncImageSubmit(c, taskID)
 	return true, true
@@ -309,6 +345,7 @@ type imageChannelAsyncJob struct {
 	IP            string
 	UA            string
 	ProviderTrace *imagepkg.TaskTrace
+	RunnerPlans   []imageRunnerFallbackPlan
 }
 
 func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
@@ -405,27 +442,46 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		}
 
 		if result == nil {
-			if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil {
+			fallbackStep := lastFailedStep
+			fallbackCode := lastFailure.Code
+			fallbackDetail := lastFailure.Detail
+			if fallbackStep.Provider == "" && trace != nil && len(trace.Steps) > 0 {
+				lastStep := trace.Steps[len(trace.Steps)-1]
+				if lastStep.Status == imageFallbackStatusSkipped {
+					fallbackStep = lastStep
+				}
+			}
+			if fallbackCode == "" {
+				fallbackCode = fallbackStep.ReasonCode
+			}
+			if fallbackDetail == "" {
+				fallbackDetail = fallbackStep.ReasonDetail
+			}
+			if (len(job.Routes) == 0 || shouldFallbackImageChannelToFree(lastErr)) && h.Runner != nil && len(job.RunnerPlans) > 0 {
 				if trace != nil {
-					trace.MarkFallback(lastFailedStep, lastFailure.Code, lastFailure.Detail)
+					trace.MarkFallback(fallbackStep, fallbackCode, fallbackDetail)
 					_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, trace)
 				}
-				logger.L().Warn("channel async image transient failure, fallback to free account runner",
-					zap.String("task_id", job.TaskID),
-					zap.Error(lastErr))
-				fallbackOpt := imageChannelFreeFallbackRunOptions(job)
+				logFields := []zap.Field{zap.String("task_id", job.TaskID)}
+				if lastErr != nil {
+					logFields = append(logFields, zap.Error(lastErr))
+				} else {
+					logFields = append(logFields, zap.String("reason", fallbackDetail))
+				}
+				logger.L().Warn("channel async image fallback to account runner", logFields...)
+				fallbackOpt := imageChannelFallbackRunOptions(job)
 				fallbackCtx, cancelFallback := withImageChannelFallbackContext(taskCtx, fallbackOpt.MaxAttempts, hasReferences)
-				fallback := h.Runner.Run(fallbackCtx, fallbackOpt)
+				fallback, usedPlan := h.runImageWithFallbackPlans(fallbackCtx, fallbackOpt, job.RunnerPlans)
 				cancelFallback()
 				rec.AccountID = fallback.AccountID
 				if trace != nil {
-					trace.AddStep(imageTraceStepForRunner(fallback, true, fallback.Status, fallback.ErrorCode, fallback.ErrorMessage))
+					trace.AddStep(imageTraceStepForRunnerPlan(fallback, usedPlan, fallback.Status, fallback.ErrorCode, fallback.ErrorMessage))
 					_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, trace)
 				}
 				if fallback.Status == imagepkg.StatusSuccess {
 					if job.Cost > 0 && h.Billing != nil {
-						if err := h.Billing.Settle(context.Background(), job.UserID, job.KeyID, job.Cost, job.Cost, job.RefID, "image channel async free fallback settle"); err != nil {
-							logger.L().Error("billing settle async free fallback image", zap.Error(err), zap.String("ref", job.RefID))
+						if err := h.Billing.Settle(context.Background(), job.UserID, job.KeyID, job.Cost, job.Cost, job.RefID, "image channel async runner fallback settle"); err != nil {
+							logger.L().Error("billing settle async runner fallback image", zap.Error(err), zap.String("ref", job.RefID))
 						}
 					}
 					if h.Keys != nil && h.Keys.DAO() != nil {
@@ -441,7 +497,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 				rec.Status = usage.StatusFailed
 				rec.ErrorCode = ifEmpty(fallback.ErrorCode, imagepkg.ErrUpstream)
 				if job.Cost > 0 && h.Billing != nil {
-					_ = h.Billing.Refund(context.Background(), job.UserID, job.KeyID, job.Cost, job.RefID, "image channel async free fallback refund")
+					_ = h.Billing.Refund(context.Background(), job.UserID, job.KeyID, job.Cost, job.RefID, "image channel async runner fallback refund")
 				}
 				return
 			}
@@ -505,8 +561,15 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	if len(routes) == 0 {
 		return false
 	}
+	policy := h.imageFallbackPolicy()
+	routes, skippedSteps := prepareImageRoutes(routes, policy)
 	trace := ensureRequestTrace(req)
-	if trace != nil && trace.Original.Provider == "" {
+	if trace != nil {
+		for _, step := range skippedSteps {
+			trace.AddStep(step)
+		}
+	}
+	if trace != nil && trace.Original.Provider == "" && len(routes) > 0 {
 		trace.Original = imagepkg.TaskTraceEndpoint{
 			Provider:    imageProviderForRoute(routes[0]),
 			ChannelID:   routes[0].Channel.ID,
@@ -603,15 +666,36 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	}
 
 	if result == nil {
-		if shouldFallbackImageChannelToFree(lastErr) && h.Runner != nil && req != nil {
-			trace.MarkFallback(lastFailedStep, lastFailure.Code, lastFailure.Detail)
+		fallbackStep := lastFailedStep
+		fallbackCode := lastFailure.Code
+		fallbackDetail := lastFailure.Detail
+		if fallbackStep.Provider == "" && len(skippedSteps) > 0 {
+			fallbackStep = skippedSteps[len(skippedSteps)-1]
+		}
+		if fallbackCode == "" {
+			fallbackCode = fallbackStep.ReasonCode
+		}
+		if fallbackDetail == "" {
+			fallbackDetail = fallbackStep.ReasonDetail
+		}
+		if (len(routes) == 0 || shouldFallbackImageChannelToFree(lastErr)) && h.Runner != nil && req != nil && len(policy.RunnerPlans) > 0 {
+			trace.MarkFallback(fallbackStep, fallbackCode, fallbackDetail)
 			h.persistRequestTrace(c.Request.Context(), req, trace)
-			logger.L().Warn("channel chat image transient failure, fallback to free account runner",
-				zap.String("model", m.Slug),
-				zap.Error(lastErr))
+			logFields := []zap.Field{zap.String("model", m.Slug)}
+			if lastErr != nil {
+				logFields = append(logFields, zap.Error(lastErr))
+			} else {
+				logFields = append(logFields, zap.String("reason", fallbackDetail))
+			}
+			logger.L().Warn("channel chat image fallback to account runner", logFields...)
 			refund(imagepkg.ErrUpstream)
-			req.freeFallback = true
-			req.freeFallbackDetail = lastErr.Error()
+			req.runnerFallbackPlans = cloneImageRunnerFallbackPlans(policy.RunnerPlans)
+			req.freeFallback = isFreeRunnerPlan(firstImageRunnerFallbackPlan(req.runnerFallbackPlans))
+			if lastErr != nil {
+				req.freeFallbackDetail = lastErr.Error()
+			} else {
+				req.freeFallbackDetail = fallbackDetail
+			}
 			return false
 		}
 		failure := imageChannelFailureFromErr(lastErr)
@@ -844,7 +928,7 @@ func applyFreeFallbackPlan(opt *imagepkg.RunOptions, enabled bool) {
 	opt.RequirePlanType = true
 }
 
-func imageChannelFreeFallbackRunOptions(job imageChannelAsyncJob) imagepkg.RunOptions {
+func imageChannelFallbackRunOptions(job imageChannelAsyncJob) imagepkg.RunOptions {
 	upstreamModel := ""
 	if job.Model != nil {
 		upstreamModel = job.Model.UpstreamModelSlug
@@ -871,6 +955,11 @@ func imageChannelFreeFallbackRunOptions(job imageChannelAsyncJob) imagepkg.RunOp
 		PollMaxWait:       pollMaxWait,
 		References:        job.References,
 	}
+	return opt
+}
+
+func imageChannelFreeFallbackRunOptions(job imageChannelAsyncJob) imagepkg.RunOptions {
+	opt := imageChannelFallbackRunOptions(job)
 	applyFreeFallbackPlan(&opt, true)
 	return opt
 }

@@ -3,6 +3,7 @@ package image
 import (
 	"errors"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -125,4 +126,22 @@ func (h *AdminHandler) Images(c *gin.Context) {
 		out["error_message"] = message
 	}
 	resp.OK(c, out)
+}
+
+// Stats GET /api/admin/image-tasks/stats
+// 查询参数:hours,默认 24,最大 720(30 天)
+func (h *AdminHandler) Stats(c *gin.Context) {
+	hours, _ := strconv.Atoi(c.DefaultQuery("hours", "24"))
+	if hours <= 0 {
+		hours = 24
+	}
+	if hours > 24*30 {
+		hours = 24 * 30
+	}
+	rows, err := h.dao.ListProviderTraceStats(c.Request.Context(), time.Now().Add(-time.Duration(hours)*time.Hour))
+	if err != nil {
+		resp.Internal(c, err.Error())
+		return
+	}
+	resp.OK(c, BuildProviderTraceStats(rows, hours))
 }

@@ -197,6 +197,16 @@ func (d *DAO) ListAdmin(ctx context.Context, f AdminTaskFilter, limit, offset in
 	return out, total, err
 }
 
+func (d *DAO) ListProviderTraceStats(ctx context.Context, since time.Time) ([]ProviderTraceStatRow, error) {
+	rows := make([]ProviderTraceStatRow, 0, 128)
+	err := d.db.SelectContext(ctx, &rows, `
+SELECT status, provider_trace
+  FROM image_tasks
+ WHERE created_at >= ?
+   AND provider_trace IS NOT NULL`, since)
+	return rows, err
+}
+
 func adminTaskListSQL(where string) string {
 	return `
 	SELECT t.id, t.task_id, t.user_id, t.key_id, t.model_id, t.account_id,
