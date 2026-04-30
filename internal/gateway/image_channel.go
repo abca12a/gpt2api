@@ -117,6 +117,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	var result *adapter.ImageResult
 	var selected *channel.Route
 	for _, rt := range routes {
+		logImageChannelSelection(req.taskID, rt)
 		step := imageTraceStepForRoute(rt)
 		observer := &imageChannelGenerateObserver{}
 		routeStart := time.Now()
@@ -471,6 +472,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		var result *adapter.ImageResult
 		var selected *channel.Route
 		for _, rt := range job.Routes {
+			logImageChannelSelection(job.TaskID, rt)
 			step := imageTraceStepForRoute(rt)
 			routeCtx := channelCtx
 			cancelRoute := func() {}
@@ -653,6 +655,25 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 	}()
 }
 
+func logImageChannelSelection(taskID string, rt *channel.Route) {
+	if rt == nil || rt.Channel == nil {
+		return
+	}
+	logger.L().Info("image channel selected",
+		zap.String("task_id", taskID),
+		zap.Uint64("channel_id", rt.Channel.ID),
+		zap.String("channel_name", rt.Channel.Name),
+		zap.String("provider", imageProviderForRoute(rt)),
+		zap.String("status", rt.Channel.Status),
+		zap.Int("fail_count", rt.Channel.FailCount),
+		zap.Bool("enabled", rt.Channel.Enabled),
+		zap.Int("priority", rt.Channel.Priority),
+		zap.Int("weight", rt.Channel.Weight),
+		zap.Int("timeout_s", rt.Channel.TimeoutS),
+		zap.String("upstream_model", rt.UpstreamModel),
+	)
+}
+
 func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	ak *apikey.APIKey, m *modelpkg.Model, req *ImageGenRequest,
 	rec *usage.Log, ratio float64, startAt time.Time,
@@ -735,6 +756,7 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	var result *adapter.ImageResult
 	var selected *channel.Route
 	for _, rt := range routes {
+		logImageChannelSelection(req.taskID, rt)
 		step := imageTraceStepForRoute(rt)
 		observer := &imageChannelGenerateObserver{}
 		routeStart := time.Now()

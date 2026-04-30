@@ -157,4 +157,78 @@ func TestBuildProviderTraceStatsIncludesSlowTaskOverview(t *testing.T) {
 	}
 }
 
+func TestBuildProviderTraceStatsIncludesAccountRealtimeStats(t *testing.T) {
+	now := time.Unix(1_777_050_000, 0)
+	cooldown := now.Add(3 * time.Minute)
+	rows := []ProviderTraceStatRow{
+		{
+			TaskID:               "img_latest_fail",
+			Status:               StatusFailed,
+			Error:                ErrPollTimeout,
+			AccountID:            42,
+			AccountEmail:         "codex-a@example.com",
+			AccountPlanType:      "plus",
+			AccountStatus:        "throttled",
+			AccountCooldownUntil: &cooldown,
+			CreatedAt:            now.Add(-1 * time.Minute),
+			FinishedAt:           timePtr(now.Add(-30 * time.Second)),
+			ProviderTrace: EncodeProviderTrace(&TaskTrace{
+				Final:  TaskTraceEndpoint{Provider: TraceProviderFreeRunner, AccountID: 42, AccountPlanType: "plus"},
+				Steps:  []TaskTraceStep{{Order: 1, Provider: TraceProviderFreeRunner, AccountID: 42, AccountPlanType: "plus", Status: StatusFailed, ReasonCode: ErrPollTimeout}},
+				Timing: &TaskTraceTiming{SubmitMs: 1_500, TotalMs: 90_000},
+			}),
+		},
+		{
+			TaskID:          "img_previous_fail",
+			Status:          StatusFailed,
+			Error:           ErrUpstream,
+			AccountID:       42,
+			AccountEmail:    "codex-a@example.com",
+			AccountPlanType: "plus",
+			AccountStatus:   "throttled",
+			CreatedAt:       now.Add(-5 * time.Minute),
+			FinishedAt:      timePtr(now.Add(-4 * time.Minute)),
+			ProviderTrace: EncodeProviderTrace(&TaskTrace{
+				Final:  TaskTraceEndpoint{Provider: TraceProviderFreeRunner, AccountID: 42, AccountPlanType: "plus"},
+				Timing: &TaskTraceTiming{SubmitMs: 2_500, TotalMs: 110_000},
+			}),
+		},
+		{
+			TaskID:          "img_success",
+			Status:          StatusSuccess,
+			AccountID:       42,
+			AccountEmail:    "codex-a@example.com",
+			AccountPlanType: "plus",
+			AccountStatus:   "throttled",
+			CreatedAt:       now.Add(-10 * time.Minute),
+			FinishedAt:      timePtr(now.Add(-9 * time.Minute)),
+			ProviderTrace: EncodeProviderTrace(&TaskTrace{
+				Final:  TaskTraceEndpoint{Provider: TraceProviderFreeRunner, AccountID: 42, AccountPlanType: "plus"},
+				Timing: &TaskTraceTiming{SubmitMs: 3_000, TotalMs: 60_000},
+			}),
+		},
+	}
+
+	stats := BuildProviderTraceStatsWithOptions(rows, ProviderTraceStatsOptions{WindowHours: 1, Now: now})
+	if len(stats.Accounts) != 1 {
+		t.Fatalf("account stats len = %d, want 1", len(stats.Accounts))
+	}
+	account := stats.Accounts[0]
+	if account.AccountID != 42 || account.RecentTotal != 3 || account.Success != 1 || account.Failed != 2 {
+		t.Fatalf("unexpected account totals: %#v", account)
+	}
+	if account.SuccessRate != 33.33 {
+		t.Fatalf("success_rate = %.2f, want 33.33", account.SuccessRate)
+	}
+	if account.AvgFirstPacketMs != 2333 || account.AvgCompletionMs != 86666 {
+		t.Fatalf("avg timings = %d/%d, want 2333/86666", account.AvgFirstPacketMs, account.AvgCompletionMs)
+	}
+	if account.ConsecutiveFailures != 2 || account.LastErrorType != ErrPollTimeout {
+		t.Fatalf("failure summary = %d/%q, want 2/%q", account.ConsecutiveFailures, account.LastErrorType, ErrPollTimeout)
+	}
+	if !account.InCooldown || !account.CircuitOpen || account.CooldownRemainingMs <= 0 {
+		t.Fatalf("cooldown/circuit = %#v, want active", account)
+	}
+}
+
 func timePtr(v time.Time) *time.Time { return &v }

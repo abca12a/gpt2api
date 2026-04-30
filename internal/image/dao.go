@@ -246,12 +246,49 @@ func (d *DAO) ListProviderTraceStats(ctx context.Context, since time.Time) ([]Pr
 	rows := make([]ProviderTraceStatRow, 0, 128)
 	startedAt := time.Now()
 	err := d.db.SelectContext(ctx, &rows, `
-SELECT task_id, status, provider_trace, error, created_at, started_at, finished_at
-  FROM image_tasks
- WHERE created_at >= ?
-   AND provider_trace IS NOT NULL`, since)
+SELECT t.task_id, t.status, t.provider_trace, t.error, t.created_at, t.started_at, t.finished_at,
+       t.account_id,
+       COALESCE(a.email, '') AS account_email,
+       COALESCE(a.plan_type, '') AS account_plan_type,
+       COALESCE(a.status, '') AS account_status,
+       a.cooldown_until AS account_cooldown_until
+  FROM image_tasks t
+  LEFT JOIN oai_accounts a ON a.id = t.account_id
+ WHERE t.created_at >= ?
+   AND t.provider_trace IS NOT NULL`, since)
 	d.logSlowQuery("ListProviderTraceStats", startedAt, zap.Time("since", since))
 	return rows, err
+}
+
+func (d *DAO) GetAccountRealtimeStat(ctx context.Context, accountID uint64, since time.Time) (*AccountRealtimeStat, error) {
+	if accountID == 0 {
+		return nil, nil
+	}
+	rows := make([]ProviderTraceStatRow, 0, 32)
+	startedAt := time.Now()
+	err := d.db.SelectContext(ctx, &rows, `
+SELECT t.task_id, t.status, t.provider_trace, t.error, t.created_at, t.started_at, t.finished_at,
+       t.account_id,
+       COALESCE(a.email, '') AS account_email,
+       COALESCE(a.plan_type, '') AS account_plan_type,
+       COALESCE(a.status, '') AS account_status,
+       a.cooldown_until AS account_cooldown_until
+  FROM image_tasks t
+  LEFT JOIN oai_accounts a ON a.id = t.account_id
+ WHERE t.created_at >= ?
+   AND t.account_id = ?
+   AND t.provider_trace IS NOT NULL
+ ORDER BY t.id DESC
+ LIMIT 200`, since, accountID)
+	d.logSlowQuery("GetAccountRealtimeStat", startedAt, zap.Uint64("account_id", accountID), zap.Time("since", since))
+	if err != nil {
+		return nil, err
+	}
+	stats := buildAccountRealtimeStats(rows, time.Now())
+	if len(stats) == 0 {
+		return nil, nil
+	}
+	return &stats[0], nil
 }
 
 func adminTaskListSQL(where string) string {

@@ -105,6 +105,29 @@ interface ProviderTraceStats {
   fallback_triggered: number
   providers: ProviderHitStat[]
   transitions: ProviderTransitionStat[]
+  accounts: AccountRealtimeStat[]
+}
+
+interface AccountRealtimeStat {
+  account_id: number
+  email?: string
+  plan_type?: string
+  status?: string
+  recent_total: number
+  success: number
+  failed: number
+  success_rate: number
+  avg_first_packet_ms?: number
+  avg_completion_ms?: number
+  consecutive_failures: number
+  last_error_type?: string
+  last_task_id?: string
+  last_status?: string
+  last_finished_at?: number
+  cooldown_until?: number
+  cooldown_remaining_ms?: number
+  in_cooldown: boolean
+  circuit_open: boolean
 }
 
 const loading = ref(false)
@@ -351,6 +374,24 @@ function statsSuccessRate() {
   return `${((stats.value.success / stats.value.total) * 100).toFixed(1)}%`
 }
 
+function formatMs(ms?: number) {
+  if (!ms) return '-'
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
+  return `${ms}ms`
+}
+
+function accountStatusType(row: AccountRealtimeStat): 'success' | 'danger' | 'warning' | 'info' {
+  if (row.circuit_open || row.in_cooldown) return 'danger'
+  if (row.consecutive_failures > 0 || row.failed > 0) return 'warning'
+  return 'success'
+}
+
+function cooldownLabel(row: AccountRealtimeStat) {
+  if (!row.in_cooldown && !row.circuit_open) return '正常'
+  const ms = row.cooldown_remaining_ms || 0
+  return ms > 0 ? `冷却中 ${formatMs(ms)}` : '熔断/冷却'
+}
+
 function traceActorLabel(endpoint?: ProviderTraceEndpoint | null) {
   if (!endpoint) return '-'
   const base = providerName(endpoint.provider || '')
@@ -480,6 +521,42 @@ onMounted(() => {
           >
             {{ item.display }} · {{ item.count }}
           </el-tag>
+        </div>
+        <div v-if="stats?.accounts?.length" class="account-realtime-panel">
+          <div class="trace-stats-title">账号级实时统计（最近 {{ stats.window_hours }} 小时）</div>
+          <el-table :data="stats.accounts" size="small" border style="margin-top:8px">
+            <el-table-column label="账号" min-width="210">
+              <template #default="{ row }">
+                <div>#{{ row.account_id }} · {{ row.email || '-' }}</div>
+                <div class="trace-subtext">{{ row.plan_type || '-' }} / {{ row.status || '-' }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="成功率" width="115">
+              <template #default="{ row }">
+                <div>{{ row.success_rate?.toFixed ? row.success_rate.toFixed(2) : row.success_rate }}%</div>
+                <div class="trace-subtext">{{ row.success }} / {{ row.recent_total }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="首包/完成" width="145">
+              <template #default="{ row }">
+                <div>{{ formatMs(row.avg_first_packet_ms) }}</div>
+                <div class="trace-subtext">完成 {{ formatMs(row.avg_completion_ms) }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="连续失败" width="110">
+              <template #default="{ row }">
+                <el-tag :type="row.consecutive_failures ? 'danger' : 'success'" size="small">
+                  {{ row.consecutive_failures }}
+                </el-tag>
+                <div class="trace-subtext">{{ row.last_error_type || '-' }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="冷却/熔断" width="135">
+              <template #default="{ row }">
+                <el-tag :type="accountStatusType(row)" size="small">{{ cooldownLabel(row) }}</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
         </div>
       </div>
 
@@ -770,6 +847,10 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+
+.account-realtime-panel {
+  margin-top: 14px;
 }
 
 .error-reason {

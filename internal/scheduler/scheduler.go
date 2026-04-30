@@ -250,6 +250,18 @@ func (s *Scheduler) tryDispatchOnce(ctx context.Context, modelType string, opt d
 		}
 		lease, err := s.tryLock(ctx, acc)
 		if err == nil {
+			logger.L().Info("image account selected",
+				zap.Uint64("account_id", acc.ID),
+				zap.String("email", acc.Email),
+				zap.String("plan_type", acc.PlanType),
+				zap.String("status", acc.Status),
+				zap.Bool("in_cooldown", acc.CooldownUntil.Valid && acc.CooldownUntil.Time.After(now)),
+				zap.Time("cooldown_until", acc.CooldownUntil.Time),
+				zap.Int("today_used_count", acc.TodayUsedCount),
+				zap.Int("daily_image_quota", acc.DailyImageQuota),
+				zap.String("preferred_plan_type", opt.PreferredPlanType),
+				zap.Bool("require_plan_type", opt.RequirePlanType),
+			)
 			return lease, nil
 		}
 		if errors.Is(err, lock.ErrNotAcquired) {
@@ -384,12 +396,24 @@ func (s *Scheduler) tryLock(ctx context.Context, acc *account.Account) (*Lease, 
 func (s *Scheduler) MarkRateLimited(ctx context.Context, accountID uint64) {
 	cooldown := time.Now().Add(s.cooldown429())
 	_ = s.accSvc.DAO().SetStatus(ctx, accountID, account.StatusThrottled, &cooldown)
+	logger.L().Warn("image account circuit opened",
+		zap.Uint64("account_id", accountID),
+		zap.String("reason", "rate_limited"),
+		zap.String("status", account.StatusThrottled),
+		zap.Time("cooldown_until", cooldown),
+	)
 }
 
 // MarkWarned 上游返回 suspicious 横幅时降级。
 func (s *Scheduler) MarkWarned(ctx context.Context, accountID uint64) {
 	pause := time.Now().Add(s.warnedPause())
 	_ = s.accSvc.DAO().SetStatus(ctx, accountID, account.StatusWarned, &pause)
+	logger.L().Warn("image account circuit opened",
+		zap.Uint64("account_id", accountID),
+		zap.String("reason", "warned"),
+		zap.String("status", account.StatusWarned),
+		zap.Time("cooldown_until", pause),
+	)
 }
 
 // MarkDead 账号彻底不可用(403/token 失效)。

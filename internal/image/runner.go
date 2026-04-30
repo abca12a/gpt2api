@@ -391,6 +391,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		opt.Trace.SetQueueDuration(time.Since(start))
 		r.persistTrace(opt)
 	}
+	r.logSelectedAccountRealtimeStats(ctx, opt.TaskID, lease.Account.ID)
 
 	// 2) 构造上游 client
 	cli, err := chatgpt.New(chatgpt.Options{
@@ -780,6 +781,47 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	result.SignedURLs = signedURLs
 	result.ContentTypes = contentTypes
 	return true, "", nil
+}
+
+func (r *Runner) logSelectedAccountRealtimeStats(ctx context.Context, taskID string, accountID uint64) {
+	if r == nil || r.dao == nil || accountID == 0 {
+		return
+	}
+	stat, err := r.dao.GetAccountRealtimeStat(ctx, accountID, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		logger.L().Warn("image account realtime stats lookup failed",
+			zap.String("task_id", taskID),
+			zap.Uint64("account_id", accountID),
+			zap.Error(err),
+		)
+		return
+	}
+	if stat == nil {
+		logger.L().Info("image account realtime stats",
+			zap.String("task_id", taskID),
+			zap.Uint64("account_id", accountID),
+			zap.Int("recent_total", 0),
+		)
+		return
+	}
+	logger.L().Info("image account realtime stats",
+		zap.String("task_id", taskID),
+		zap.Uint64("account_id", stat.AccountID),
+		zap.String("email", stat.Email),
+		zap.String("plan_type", stat.PlanType),
+		zap.String("account_status", stat.Status),
+		zap.Int("recent_total", stat.RecentTotal),
+		zap.Int("success", stat.Success),
+		zap.Int("failed", stat.Failed),
+		zap.Float64("success_rate", stat.SuccessRate),
+		zap.Int64("avg_first_packet_ms", stat.AvgFirstPacketMs),
+		zap.Int64("avg_completion_ms", stat.AvgCompletionMs),
+		zap.Int("consecutive_failures", stat.ConsecutiveFailures),
+		zap.String("last_error_type", stat.LastErrorType),
+		zap.Bool("in_cooldown", stat.InCooldown),
+		zap.Bool("circuit_open", stat.CircuitOpen),
+		zap.Int64("cooldown_remaining_ms", stat.CooldownRemainingMs),
+	)
 }
 
 func capImageRefs(refs []string, requested int) []string {
