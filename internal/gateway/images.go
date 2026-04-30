@@ -140,6 +140,7 @@ type ImageGenRequest struct {
 	Image             stringList `json:"image,omitempty"`
 	ImageURL          stringList `json:"image_url,omitempty"`
 	ImageURLs         stringList `json:"image_urls,omitempty"`
+	MaskURL           string     `json:"mask_url,omitempty"`
 	InputImage        stringList `json:"input_image,omitempty"`
 	InputImages       stringList `json:"input_images,omitempty"`
 	// Upscale 非标准扩展:控制"本服务对原图做本地超分"的目标档位。

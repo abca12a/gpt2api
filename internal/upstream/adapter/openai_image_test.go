@@ -299,6 +299,78 @@ func TestOpenAIImageGeneratePollsAPIMartAsyncTask(t *testing.T) {
 	}
 }
 
+func TestOpenAIImageGenerateSupportsAPIMartOfficialGPTImage2Shape(t *testing.T) {
+	var taskPolls int
+	var payload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer test-key" {
+			t.Fatalf("authorization = %q", auth)
+		}
+		switch r.URL.Path {
+		case "/apimart.ai/v1/images/generations":
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":{"id":"task_doc_123","status":"submitted","progress":0}}`))
+		case "/apimart.ai/v1/tasks/task_doc_123":
+			taskPolls++
+			w.Header().Set("Content-Type", "application/json")
+			if taskPolls == 1 {
+				_, _ = w.Write([]byte(`{"code":200,"data":{"id":"task_doc_123","status":"in_progress","progress":60}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":200,"data":{"id":"task_doc_123","status":"completed","progress":100,"result":{"images":[{"url":["https://example.test/apimart-doc.png"],"expires_at":1776928569}]}}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	compression := 85
+	a := NewOpenAI(Params{BaseURL: srv.URL + "/apimart.ai", APIKey: "test-key"})
+	result, err := a.ImageGenerate(context.Background(), "gpt-image-2", &ImageRequest{
+		Prompt:            "wide cinematic shot",
+		N:                 4,
+		Size:              "2048x1152",
+		AspectRatio:       "16:9",
+		Resolution:        "2k",
+		Quality:           "high",
+		OutputFormat:      "webp",
+		OutputCompression: &compression,
+		MaskURL:           "https://example.test/mask.png",
+		Background:        "transparent",
+		Moderation:        "low",
+	})
+	if err != nil {
+		t.Fatalf("ImageGenerate: %v", err)
+	}
+	if result == nil || len(result.URLs) != 1 || result.URLs[0] != "https://example.test/apimart-doc.png" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if taskPolls != 2 {
+		t.Fatalf("task polls = %d, want 2", taskPolls)
+	}
+	if payload["model"] != "gpt-image-2-official" {
+		t.Fatalf("payload model = %#v, want gpt-image-2-official", payload["model"])
+	}
+	if payload["size"] != "16:9" || payload["resolution"] != "2k" {
+		t.Fatalf("unexpected size/resolution: %#v", payload)
+	}
+	if payload["n"] != float64(4) || payload["quality"] != "high" || payload["output_format"] != "webp" || payload["output_compression"] != float64(85) {
+		t.Fatalf("unexpected generation options: %#v", payload)
+	}
+	if payload["mask_url"] != "https://example.test/mask.png" {
+		t.Fatalf("mask_url = %#v, want APIMart mask URL passthrough", payload["mask_url"])
+	}
+	if payload["background"] != "auto" {
+		t.Fatalf("transparent background should be downgraded for APIMart gpt-image-2-official, got %#v", payload["background"])
+	}
+	if payload["moderation"] != "low" {
+		t.Fatalf("moderation = %#v, want low", payload["moderation"])
+	}
+}
+
 func TestOpenAIImageGenerateSendsAPIMart4KPixelSizeInsteadOfUnsupportedRatio(t *testing.T) {
 	var payload map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -58,6 +58,7 @@ type ImageRequest struct {
 	AspectRatio       string   `json:"aspect_ratio,omitempty"`
 	Resolution        string   `json:"resolution,omitempty"`
 	Images            []string `json:"images,omitempty"`
+	MaskURL           string   `json:"mask_url,omitempty"`
 	Quality           string   `json:"quality,omitempty"`
 	Style             string   `json:"style,omitempty"`
 	Format            string   `json:"format,omitempty"` // legacy response_format: url / b64_json

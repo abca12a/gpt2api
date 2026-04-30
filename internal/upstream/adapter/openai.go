@@ -220,6 +220,7 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 	}
 	isAPIMart := isAPIMartImageEndpoint(a.baseURL)
 	if isAPIMart {
+		payload["model"] = apimartImageModel(upstreamModel)
 		if ratio := strings.TrimSpace(req.AspectRatio); ratio != "" && !isAPIMart4KPixelSize(req.Resolution, size) {
 			payload["size"] = ratio
 		}
@@ -253,6 +254,9 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 			payload["images"] = images
 		}
 	}
+	if isAPIMart && strings.TrimSpace(req.MaskURL) != "" {
+		payload["mask_url"] = strings.TrimSpace(req.MaskURL)
+	}
 	if req.Quality != "" {
 		payload["quality"] = req.Quality
 	}
@@ -270,6 +274,9 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 	}
 	if req.Background != "" {
 		payload["background"] = req.Background
+		if isAPIMart && strings.EqualFold(strings.TrimSpace(req.Background), "transparent") {
+			payload["background"] = "auto"
+		}
 	}
 	if req.Moderation != "" {
 		payload["moderation"] = req.Moderation
@@ -335,6 +342,13 @@ func isAPIMartImageEndpoint(baseURL string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(baseURL)), "apimart.ai")
 }
 
+func apimartImageModel(model string) string {
+	if strings.EqualFold(strings.TrimSpace(model), "gpt-image-2") {
+		return "gpt-image-2-official"
+	}
+	return model
+}
+
 func normalizeAPIMartResolution(value string) string {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	normalized = strings.ReplaceAll(normalized, " ", "")
@@ -370,25 +384,44 @@ func parseImagePixelSize(size string) (int, int, bool) {
 }
 
 func parseAPIMartImageTaskID(body []byte) string {
-	var payload struct {
+	var arrayPayload struct {
 		Code any `json:"code"`
 		Data []struct {
 			Status string `json:"status"`
 			TaskID string `json:"task_id"`
+			ID     string `json:"id"`
 		} `json:"data"`
 	}
-	if json.Unmarshal(body, &payload) != nil || len(payload.Data) == 0 {
+	if json.Unmarshal(body, &arrayPayload) == nil && len(arrayPayload.Data) > 0 && valueString(arrayPayload.Code) == "200" {
+		first := arrayPayload.Data[0]
+		if id := apimartSubmittedTaskID(first.Status, first.TaskID, first.ID); id != "" {
+			return id
+		}
+	}
+	var objectPayload struct {
+		Code any `json:"code"`
+		Data struct {
+			Status string `json:"status"`
+			TaskID string `json:"task_id"`
+			ID     string `json:"id"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(body, &objectPayload) != nil || valueString(objectPayload.Code) != "200" {
 		return ""
 	}
-	if valueString(payload.Code) != "200" {
+	return apimartSubmittedTaskID(objectPayload.Data.Status, objectPayload.Data.TaskID, objectPayload.Data.ID)
+}
+
+func apimartSubmittedTaskID(status, taskID, id string) string {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		taskID = strings.TrimSpace(id)
+	}
+	status = strings.ToLower(strings.TrimSpace(status))
+	if taskID == "" || (status != "" && status != "submitted") {
 		return ""
 	}
-	first := payload.Data[0]
-	status := strings.ToLower(strings.TrimSpace(first.Status))
-	if first.TaskID == "" || (status != "" && status != "submitted") {
-		return ""
-	}
-	return first.TaskID
+	return taskID
 }
 
 func (a *openaiAdapter) pollAPIMartImageTask(ctx context.Context, taskID string) (*ImageResult, error) {
@@ -477,7 +510,7 @@ func (a *openaiAdapter) fetchAPIMartImageTask(ctx context.Context, taskID string
 	}
 	status := strings.ToLower(strings.TrimSpace(payload.Data.Status))
 	switch status {
-	case "pending", "processing", "":
+	case "pending", "processing", "submitted", "in_progress", "":
 		return nil, false, nil
 	case "completed":
 		result := &ImageResult{}
