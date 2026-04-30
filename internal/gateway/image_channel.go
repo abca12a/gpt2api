@@ -1137,7 +1137,7 @@ func imageChannelGenerateWithRetry(ctx context.Context, rt *channel.Route, req *
 		if perAttemptTimeout > 0 {
 			attemptCtx, cancel = context.WithTimeout(ctx, perAttemptTimeout)
 		}
-		result, err := rt.Adapter.ImageGenerate(attemptCtx, rt.UpstreamModel, req)
+		result, err := imageChannelGenerateAttempt(attemptCtx, rt, req)
 		cancel()
 		if err == nil {
 			return result, nil
@@ -1157,6 +1157,24 @@ func imageChannelGenerateWithRetry(ctx context.Context, rt *channel.Route, req *
 		}
 	}
 	return nil, lastErr
+}
+
+func imageChannelGenerateAttempt(ctx context.Context, rt *channel.Route, req *adapter.ImageRequest) (*adapter.ImageResult, error) {
+	type attemptResult struct {
+		result *adapter.ImageResult
+		err    error
+	}
+	done := make(chan attemptResult, 1)
+	go func() {
+		r, err := rt.Adapter.ImageGenerate(ctx, rt.UpstreamModel, req)
+		done <- attemptResult{result: r, err: err}
+	}()
+	select {
+	case r := <-done:
+		return r.result, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func isRetryableImageChannelError(err error) bool {

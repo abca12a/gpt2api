@@ -45,6 +45,11 @@ type blockingImageChannelAdapter struct {
 	calls int
 }
 
+type contextIgnoringImageChannelAdapter struct {
+	calls   int
+	release chan struct{}
+}
+
 func (s *blockingImageChannelAdapter) Type() string { return "blocking" }
 
 func (s *blockingImageChannelAdapter) Chat(context.Context, string, *adapter.ChatRequest) (adapter.ChatStream, error) {
@@ -63,6 +68,20 @@ func (s *blockingImageChannelAdapter) ImageGenerate(ctx context.Context, _ strin
 func (s *blockingImageChannelAdapter) Ping(context.Context) error { return nil }
 
 func (s *stubImageChannelAdapter) Ping(context.Context) error { return nil }
+
+func (s *contextIgnoringImageChannelAdapter) Type() string { return "context-ignoring" }
+
+func (s *contextIgnoringImageChannelAdapter) Chat(context.Context, string, *adapter.ChatRequest) (adapter.ChatStream, error) {
+	return nil, nil
+}
+
+func (s *contextIgnoringImageChannelAdapter) ImageGenerate(context.Context, string, *adapter.ImageRequest) (*adapter.ImageResult, error) {
+	s.calls++
+	<-s.release
+	return &adapter.ImageResult{B64s: []string{"late"}}, nil
+}
+
+func (s *contextIgnoringImageChannelAdapter) Ping(context.Context) error { return nil }
 
 func TestImageChannelGenerateWithRetryRetriesTransientUpstreamDisconnect(t *testing.T) {
 	rt := &channel.Route{
@@ -303,6 +322,33 @@ func TestImageChannelGenerateWithRetryDoesNotRetryAttemptTimeout(t *testing.T) {
 		t.Fatalf("unexpected result: %#v", got)
 	}
 	if stub := rt.Adapter.(*blockingImageChannelAdapter); stub.calls != 1 {
+		t.Fatalf("adapter calls = %d, want 1", stub.calls)
+	}
+}
+
+func TestImageChannelGenerateWithRetryReturnsWhenAdapterIgnoresContext(t *testing.T) {
+	stub := &contextIgnoringImageChannelAdapter{release: make(chan struct{})}
+	defer close(stub.release)
+	rt := &channel.Route{
+		Channel:       &channel.Channel{ID: 1, Name: "codex-cli-proxy-image"},
+		UpstreamModel: "gpt-image-2",
+		Adapter:       stub,
+	}
+
+	started := time.Now()
+	got, err := imageChannelGenerateWithRetry(context.Background(), rt, &adapter.ImageRequest{Prompt: "draw"}, "img_context_ignored", 50*time.Millisecond, func(context.Context, time.Duration) error {
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("imageChannelGenerateWithRetry() error = %v, want deadline exceeded", err)
+	}
+	if got != nil {
+		t.Fatalf("unexpected result: %#v", got)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("adapter context watchdog returned too slowly: %s", elapsed)
+	}
+	if stub.calls != 1 {
 		t.Fatalf("adapter calls = %d, want 1", stub.calls)
 	}
 }
