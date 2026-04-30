@@ -136,3 +136,7 @@
 - 已删除 2026-04-25 至 2026-04-27 的大部分单次任务 ID、smoke 任务耗时、账号导入文件路径、临时容器/临时 token 细节和一次性数据库快照。
 - 账号导入、SSE 超时、参考图解析、外置渠道接入、下游日志展示等历史流水已折叠到“当前事实”“排查入口”和 `Corrections.md`。
 - 机器拓扑与连接方式已收敛到 `AGENTS.md`；后续不要在本文件复制 SSH 详情，避免形成两套来源。
+
+## 最近变更
+
+- 2026-04-30 10:00（Asia/Shanghai）：复查“免费兜底很多”的原因时确认，`provider_trace` 完整部署后的窗口（自 `2026-04-29 19:51:33` 起）共 81 个图片任务，其中 50 个最终命中 `free_runner`、31 个命中 `apimart`、0 个命中 `codex`。根因不是免费兜底策略误触发，而是外置链路连续失败后按既定策略兜底：Codex 渠道 `codex-cli-proxy-image` 仍按默认顺序排第一，但当前 `fail_count=56/status=unhealthy`，常见失败为 `unknown provider for model gpt-image-2`；APIMart 作为第二跳的主要失败为 `context deadline exceeded`，其次是 4K 比例不支持（例如 `4K file does not support ratio=4:3/1:1/3:4`）。线上尚未写入 `gateway.image_*` 热更项，因此当前使用代码默认 `image_channel_fallback_order=codex,apimart`、`image_account_fallback_order=free`、`cooldown=300s`、`fail_threshold=3`、`skip_codex_to_apimart=false`。
