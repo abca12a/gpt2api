@@ -299,6 +299,43 @@ func TestOpenAIImageGeneratePollsAPIMartAsyncTask(t *testing.T) {
 	}
 }
 
+func TestOpenAIImageGenerateSendsAPIMart4KPixelSizeInsteadOfUnsupportedRatio(t *testing.T) {
+	var payload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/apimart.ai/v1/images/generations":
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":[{"status":"submitted","task_id":"task_4k_123"}]}`))
+		case "/apimart.ai/v1/tasks/task_4k_123":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":{"status":"completed","result":{"images":[{"url":["https://example.test/apimart-4k.png"]}]}}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	a := NewOpenAI(Params{BaseURL: srv.URL + "/apimart.ai", APIKey: "test-key"})
+	_, err := a.ImageGenerate(context.Background(), "gpt-image-2", &ImageRequest{
+		Prompt:      "draw",
+		Size:        "2880x2880",
+		AspectRatio: "1:1",
+		Resolution:  "4k",
+	})
+	if err != nil {
+		t.Fatalf("ImageGenerate: %v", err)
+	}
+	if payload["size"] != "2880x2880" {
+		t.Fatalf("payload size = %#v, want pixel size for 4k", payload["size"])
+	}
+	if payload["resolution"] != "4k" {
+		t.Fatalf("payload resolution = %#v, want 4k", payload["resolution"])
+	}
+}
+
 func TestOpenAIImageGenerateReportsAPIMartTimingsToObserver(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

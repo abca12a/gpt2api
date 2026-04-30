@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -219,7 +220,7 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 	}
 	isAPIMart := isAPIMartImageEndpoint(a.baseURL)
 	if isAPIMart {
-		if ratio := strings.TrimSpace(req.AspectRatio); ratio != "" {
+		if ratio := strings.TrimSpace(req.AspectRatio); ratio != "" && !isAPIMart4KPixelSize(req.Resolution, size) {
 			payload["size"] = ratio
 		}
 		if resolution := normalizeAPIMartResolution(req.Resolution); resolution != "" {
@@ -345,6 +346,27 @@ func normalizeAPIMartResolution(value string) string {
 	default:
 		return ""
 	}
+}
+
+func isAPIMart4KPixelSize(resolution, size string) bool {
+	if normalizeAPIMartResolution(resolution) != "4k" {
+		return false
+	}
+	width, height, ok := parseImagePixelSize(size)
+	return ok && width > 0 && height > 0
+}
+
+func parseImagePixelSize(size string) (int, int, bool) {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(size)), "x")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	width, errW := strconv.Atoi(strings.TrimSpace(parts[0]))
+	height, errH := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errW != nil || errH != nil || width <= 0 || height <= 0 {
+		return 0, 0, false
+	}
+	return width, height, true
 }
 
 func parseAPIMartImageTaskID(body []byte) string {

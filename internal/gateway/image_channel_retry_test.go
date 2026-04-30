@@ -215,6 +215,28 @@ func TestImageChannelAsyncTimeoutCapsExternalChannelBeforeFallback(t *testing.T)
 	}
 }
 
+func TestImageChannelRouteTimeoutRespectsChannelConfig(t *testing.T) {
+	if got := imageChannelRouteTimeout(&channel.Route{Channel: &channel.Channel{TimeoutS: 120}}, false); got != 120*time.Second {
+		t.Fatalf("route timeout = %s, want configured 120s", got)
+	}
+	if got := imageChannelRouteTimeout(&channel.Route{Channel: &channel.Channel{TimeoutS: 30}}, false); got != 90*time.Second {
+		t.Fatalf("route timeout = %s, want async floor 90s", got)
+	}
+	if got := imageChannelRouteTimeout(&channel.Route{Channel: &channel.Channel{TimeoutS: 180}}, true); got != 180*time.Second {
+		t.Fatalf("reference route timeout = %s, want configured 180s", got)
+	}
+	routes := []*channel.Route{
+		{Channel: &channel.Channel{TimeoutS: 120}},
+		{Channel: &channel.Channel{TimeoutS: 120}},
+	}
+	if got := imageChannelRoutesTimeout(routes, false); got != 4*time.Minute+30*time.Second {
+		t.Fatalf("routes timeout = %s, want two configured routes plus reserve", got)
+	}
+	if got := imageChannelTaskTimeoutForRoutes(routes, false); got != 12*time.Minute+30*time.Second {
+		t.Fatalf("task timeout = %s, want channel window plus fallback reserve", got)
+	}
+}
+
 func TestImageChannelFallbackContextDoesNotExtendPastParentDeadline(t *testing.T) {
 	parent, cancelParent := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelParent()

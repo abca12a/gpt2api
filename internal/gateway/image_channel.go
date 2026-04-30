@@ -434,9 +434,9 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		}
 		trace := job.ProviderTrace
 		hasReferences := len(job.References) > 0
-		taskCtx, cancelTask := context.WithTimeout(context.Background(), imageChannelTaskTimeout(hasReferences))
+		taskCtx, cancelTask := context.WithTimeout(context.Background(), imageChannelTaskTimeoutForRoutes(job.Routes, hasReferences))
 		defer cancelTask()
-		channelCtx, cancelChannel := context.WithTimeout(taskCtx, imageChannelAsyncTimeout(len(job.Routes), hasReferences))
+		channelCtx, cancelChannel := context.WithTimeout(taskCtx, imageChannelRoutesTimeout(job.Routes, hasReferences))
 		defer cancelChannel()
 
 		var lastErr error
@@ -444,17 +444,21 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		var lastFailedStep imagepkg.TaskTraceStep
 		var result *adapter.ImageResult
 		var selected *channel.Route
-		perAttemptTimeout := imageChannelAsyncPerAttemptTimeout(hasReferences)
-		routeTimeout := imageChannelAsyncRouteTimeout(hasReferences)
+		defaultPerAttemptTimeout := imageChannelAsyncPerAttemptTimeout(hasReferences)
 		for _, rt := range job.Routes {
 			step := imageTraceStepForRoute(rt)
 			routeCtx := channelCtx
 			cancelRoute := func() {}
+			routeTimeout := imageChannelRouteTimeout(rt, hasReferences)
 			if routeTimeout > 0 {
 				routeCtx, cancelRoute = context.WithTimeout(channelCtx, routeTimeout)
 			}
 			observer := &imageChannelGenerateObserver{}
 			routeStart := time.Now()
+			perAttemptTimeout := routeTimeout
+			if perAttemptTimeout <= 0 {
+				perAttemptTimeout = defaultPerAttemptTimeout
+			}
 			r, err := imageChannelGenerateWithRetry(adapter.WithImageGenerateObserver(routeCtx, observer), rt, job.Request, job.TaskID, perAttemptTimeout, nil)
 			cancelRoute()
 			recordImageChannelRouteTiming(trace, job.TaskID, time.Since(routeStart), observer,
@@ -1065,6 +1069,18 @@ func imageChannelAsyncRouteTimeout(hasReferences bool) time.Duration {
 	return imageChannelAsyncPerAttemptTimeout(hasReferences)
 }
 
+func imageChannelRouteTimeout(rt *channel.Route, hasReferences bool) time.Duration {
+	timeout := imageChannelAsyncRouteTimeout(hasReferences)
+	if rt == nil || rt.Channel == nil || rt.Channel.TimeoutS <= 0 {
+		return timeout
+	}
+	configured := time.Duration(rt.Channel.TimeoutS) * time.Second
+	if configured > timeout {
+		return configured
+	}
+	return timeout
+}
+
 func imageChannelAsyncTimeout(routeCount int, hasReferences bool) time.Duration {
 	if routeCount <= 0 {
 		routeCount = 1
@@ -1072,8 +1088,26 @@ func imageChannelAsyncTimeout(routeCount int, hasReferences bool) time.Duration 
 	return time.Duration(routeCount)*imageChannelAsyncRouteTimeout(hasReferences) + 30*time.Second
 }
 
+func imageChannelRoutesTimeout(routes []*channel.Route, hasReferences bool) time.Duration {
+	if len(routes) == 0 {
+		return imageChannelAsyncTimeout(1, hasReferences)
+	}
+	total := 30 * time.Second
+	for _, rt := range routes {
+		total += imageChannelRouteTimeout(rt, hasReferences)
+	}
+	return total
+}
+
 func imageChannelTaskTimeout(hasReferences bool) time.Duration {
 	return asyncImageTaskTimeout(0, hasReferences)
+}
+
+func imageChannelTaskTimeoutForRoutes(routes []*channel.Route, hasReferences bool) time.Duration {
+	if len(routes) == 0 {
+		return imageChannelTaskTimeout(hasReferences)
+	}
+	return imageChannelRoutesTimeout(routes, hasReferences) + imageChannelTaskTimeout(hasReferences)
 }
 
 func withImageChannelFallbackContext(parent context.Context, maxAttempts int, hasReferences bool) (context.Context, context.CancelFunc) {
