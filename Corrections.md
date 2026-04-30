@@ -47,3 +47,9 @@
 - 机器拓扑：当前 Codex 是号池，不是下游后端；涉及 IP、用户、项目目录、构建机职责时先看 `AGENTS.md`，不要沿用旧对话里的过期结论。
 - SSH 判断：han 给出已记录 IP 并问能否访问/进去时，优先理解为 SSH 登录和项目目录可达性，不要只做 ping/curl；默认 SSH 身份失败不等于远端无可用公钥。
 - 号池数据库：不能把 `deploy/docker-compose.yml` 示例口令当线上 MySQL 口令；查库优先从运行中容器环境读取真实连接信息，对外回复不暴露真实口令或 DSN。
+
+## 2026-05-01：gpt-image-2 后台模型配置误解
+
+- 错误：把 han 要求的“按照请求体参数配置”理解成继续保留 `gpt-image-2:1k/2k/4k` 分档键和 `/api/pricing.resolution_options`，导致后台仍像多个档位模型。
+- 纠正：han 当前明确要求后台只留一个模型/价格项 `gpt-image-2`；不要在 `ModelPrice` 暴露 `gpt-image-2:1k/2k/4k`，也不要让 `/api/pricing` 自动展开 `resolution_options`。
+- 影响：下游后端已在提交 `52e8fc433` 移除分档展示/计费特判；生产已热替换，`/api/pricing` 只返回 `gpt-image-2` 单项。
