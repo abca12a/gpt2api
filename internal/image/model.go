@@ -42,6 +42,12 @@ const (
 	ErrDownload          = "download_failed"
 	ErrInvalidResponse   = "invalid_response"
 	ErrContentModeration = "content_moderation"
+	ErrChannelResolve    = "channel_resolve_failed"
+	ErrChannelConnect    = "channel_connect_failed"
+	ErrReferenceTimeout  = "reference_image_timeout"
+	ErrReferenceTooLarge = "reference_image_too_large"
+	ErrUpstream4xx       = "upstream_4xx"
+	ErrUpstream5xx       = "upstream_5xx"
 )
 
 // FormatTaskError 把稳定错误码和原始错误详情合并进 image_tasks.error。
@@ -105,6 +111,18 @@ func LocalizeTaskError(code, raw string) string {
 		zh = "图片生成超时,上游长时间没有返回图片"
 	case ErrUpstream:
 		zh = "上游返回错误"
+	case ErrChannelResolve:
+		zh = "图片渠道解析失败"
+	case ErrChannelConnect:
+		zh = "图片渠道连接失败"
+	case ErrReferenceTimeout:
+		zh = "参考图下载超时"
+	case ErrReferenceTooLarge:
+		zh = "参考图体积超过限制"
+	case ErrUpstream4xx:
+		zh = "上游拒绝了本次图片请求"
+	case ErrUpstream5xx:
+		zh = "上游服务异常"
 	default:
 		zh = "图片生成失败(" + code + ")"
 	}

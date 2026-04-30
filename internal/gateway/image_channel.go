@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -150,9 +151,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 			}
 			_ = h.Channels.Svc().MarkHealth(context.Background(), rt.Channel, false, err.Error())
 			logger.L().Warn("channel image fail, try next",
-				zap.Uint64("channel_id", rt.Channel.ID),
-				zap.String("channel_name", rt.Channel.Name),
-				zap.Error(err))
+				imageChannelFailureLogFields(rt, req.taskID, lastFailure, err)...)
 			continue
 		}
 		result = r
@@ -521,10 +520,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 				}
 				_ = h.Channels.Svc().MarkHealth(context.Background(), rt.Channel, false, err.Error())
 				logger.L().Warn("channel async image fail, try next",
-					zap.Uint64("channel_id", rt.Channel.ID),
-					zap.String("channel_name", rt.Channel.Name),
-					zap.String("task_id", job.TaskID),
-					zap.Error(err))
+					imageChannelFailureLogFields(rt, job.TaskID, lastFailure, err)...)
 				continue
 			}
 			result = r
@@ -773,9 +769,7 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 			}
 			_ = h.Channels.Svc().MarkHealth(context.Background(), rt.Channel, false, err.Error())
 			logger.L().Warn("channel chat image fail, try next",
-				zap.Uint64("channel_id", rt.Channel.ID),
-				zap.String("channel_name", rt.Channel.Name),
-				zap.Error(err))
+				imageChannelFailureLogFields(rt, req.taskID, lastFailure, err)...)
 			continue
 		}
 		result = r
@@ -1051,6 +1045,55 @@ func shouldFallbackImageChannelToFree(err error) bool {
 		strings.Contains(msg, "broken pipe")
 }
 
+func imageChannelInfrastructureErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "server misbehaving") ||
+		strings.Contains(msg, "dns") ||
+		strings.Contains(msg, "lookup cli-proxy-api") ||
+		strings.Contains(msg, "lookup ") {
+		return imagepkg.ErrChannelResolve
+	}
+	if strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connect: connection") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(msg, "cannot assign requested address") {
+		return imagepkg.ErrChannelConnect
+	}
+	return ""
+}
+
+func imageChannelFailureLogFields(rt *channel.Route, taskID string, failure imageChannelFailure, err error) []zap.Field {
+	fields := []zap.Field{
+		zap.String("task_id", taskID),
+		zap.String("error_code", failure.Code),
+		zap.Int("http_status", failure.HTTPStatus),
+	}
+	if rt != nil && rt.Channel != nil {
+		fields = append(fields,
+			zap.Uint64("channel_id", rt.Channel.ID),
+			zap.String("channel_name", rt.Channel.Name),
+			zap.String("channel_base_url", rt.Channel.BaseURL),
+		)
+	}
+	var upstream *adapter.UpstreamHTTPError
+	if errors.As(err, &upstream) {
+		fields = append(fields,
+			zap.Int("upstream_status", upstream.Status),
+			zap.String("upstream_code", upstream.Code),
+			zap.String("upstream_type", upstream.Type),
+		)
+	}
+	if err != nil {
+		fields = append(fields, zap.Error(err))
+	}
+	return fields
+}
+
 func applyFreeFallbackPlan(opt *imagepkg.RunOptions, enabled bool) {
 	if opt == nil || !enabled {
 		return
@@ -1236,6 +1279,9 @@ func imageChannelGenerateWithRetry(ctx context.Context, rt *channel.Route, req *
 		sleep = sleepWithContext
 	}
 	const maxAttempts = 2
+	if err := imageChannelPreflight(ctx, rt); err != nil {
+		return nil, err
+	}
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -1264,6 +1310,30 @@ func imageChannelGenerateWithRetry(ctx context.Context, rt *channel.Route, req *
 		}
 	}
 	return nil, lastErr
+}
+
+func imageChannelPreflight(ctx context.Context, rt *channel.Route) error {
+	if rt == nil || rt.Adapter == nil {
+		return errors.New("image channel unavailable")
+	}
+	if rt.Channel == nil || !isCLIProxyImageChannel(rt.Channel) {
+		return nil
+	}
+	preflightCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := rt.Adapter.Ping(preflightCtx); err != nil {
+		return fmt.Errorf("image channel preflight: %w", err)
+	}
+	return nil
+}
+
+func isCLIProxyImageChannel(ch *channel.Channel) bool {
+	if ch == nil {
+		return false
+	}
+	name := strings.ToLower(strings.TrimSpace(ch.Name))
+	baseURL := strings.ToLower(strings.TrimSpace(ch.BaseURL))
+	return strings.Contains(name, "cli-proxy-api") || strings.Contains(baseURL, "cli-proxy-api")
 }
 
 func imageChannelGenerateAttempt(ctx context.Context, rt *channel.Route, req *adapter.ImageRequest) (*adapter.ImageResult, error) {
@@ -1371,6 +1441,33 @@ func imageChannelFailureFromErr(err error) imageChannelFailure {
 			HTTPStatus: http.StatusBadRequest,
 			Message:    msg,
 			Detail:     detail,
+		}
+	}
+	if code := imageChannelInfrastructureErrorCode(err); code != "" {
+		return imageChannelFailure{
+			Code:       code,
+			HTTPStatus: http.StatusBadGateway,
+			Message:    localizeImageErr(code, detail),
+			Detail:     detail,
+		}
+	}
+	var upstream *adapter.UpstreamHTTPError
+	if errors.As(err, &upstream) {
+		switch {
+		case upstream.Status >= 400 && upstream.Status < 500:
+			return imageChannelFailure{
+				Code:       imagepkg.ErrUpstream4xx,
+				HTTPStatus: upstream.Status,
+				Message:    localizeImageErr(imagepkg.ErrUpstream4xx, detail),
+				Detail:     detail,
+			}
+		case upstream.Status >= 500:
+			return imageChannelFailure{
+				Code:       imagepkg.ErrUpstream5xx,
+				HTTPStatus: upstream.Status,
+				Message:    localizeImageErr(imagepkg.ErrUpstream5xx, detail),
+				Detail:     detail,
+			}
 		}
 	}
 	msg := "所有上游渠道均不可用"

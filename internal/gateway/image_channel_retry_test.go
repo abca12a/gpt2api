@@ -14,8 +14,9 @@ import (
 )
 
 type stubImageChannelAdapter struct {
-	calls int
-	steps []stubImageChannelStep
+	calls   int
+	pingErr error
+	steps   []stubImageChannelStep
 }
 
 type stubImageChannelStep struct {
@@ -67,7 +68,7 @@ func (s *blockingImageChannelAdapter) ImageGenerate(ctx context.Context, _ strin
 
 func (s *blockingImageChannelAdapter) Ping(context.Context) error { return nil }
 
-func (s *stubImageChannelAdapter) Ping(context.Context) error { return nil }
+func (s *stubImageChannelAdapter) Ping(context.Context) error { return s.pingErr }
 
 func (s *contextIgnoringImageChannelAdapter) Type() string { return "context-ignoring" }
 
@@ -128,6 +129,32 @@ func TestImageChannelGenerateWithRetryDoesNotRetryClientError(t *testing.T) {
 	}
 }
 
+func TestImageChannelGenerateWithRetryFailsFastOnPreflight(t *testing.T) {
+	rt := &channel.Route{
+		Channel:       &channel.Channel{ID: 1, Name: "codex-cli-proxy-image", BaseURL: "http://cli-proxy-api:8317"},
+		UpstreamModel: "gpt-image-2",
+		Adapter: &stubImageChannelAdapter{
+			pingErr: errors.New(`Get "http://cli-proxy-api:8317/v1/models": dial tcp: lookup cli-proxy-api: no such host`),
+			steps: []stubImageChannelStep{
+				{result: &adapter.ImageResult{B64s: []string{"should-not-call"}}},
+			},
+		},
+	}
+
+	_, err := imageChannelGenerateWithRetry(context.Background(), rt, &adapter.ImageRequest{Prompt: "draw"}, "img_preflight", 0, nil)
+	if err == nil {
+		t.Fatal("imageChannelGenerateWithRetry() error = nil, want preflight error")
+	}
+	stub := rt.Adapter.(*stubImageChannelAdapter)
+	if stub.calls != 0 {
+		t.Fatalf("adapter calls = %d, want 0 after failed preflight", stub.calls)
+	}
+	failure := imageChannelFailureFromErr(err)
+	if failure.Code != imagepkg.ErrChannelResolve {
+		t.Fatalf("failure code = %q, want %q", failure.Code, imagepkg.ErrChannelResolve)
+	}
+}
+
 func TestIsRetryableImageChannelError(t *testing.T) {
 	if !isRetryableImageChannelError(&adapter.UpstreamHTTPError{Status: http.StatusBadGateway, Code: "internal_server_error", Type: "server_error", Message: "stream disconnected before completion"}) {
 		t.Fatal("502 stream disconnect should be retryable")
@@ -173,6 +200,25 @@ func TestShouldFallbackImageChannelToFreeOn502(t *testing.T) {
 	}
 	if shouldFallbackImageChannelToFree(&adapter.UpstreamHTTPError{Status: http.StatusBadRequest, Code: "content_policy_violation", Message: "blocked"}) {
 		t.Fatal("content moderation should not trigger Free fallback")
+	}
+}
+
+func TestImageChannelFailureClassifiesConnectionAndUpstreamStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "connect", err: errors.New(`openai: image request: Post "http://cli-proxy-api:8317/v1/images/edits": dial tcp 172.18.0.9:8317: connect: connection refused`), want: imagepkg.ErrChannelConnect},
+		{name: "upstream 4xx", err: &adapter.UpstreamHTTPError{Status: http.StatusUnauthorized, Code: "invalid_api_key", Message: "bad key"}, want: imagepkg.ErrUpstream4xx},
+		{name: "upstream 5xx", err: &adapter.UpstreamHTTPError{Status: http.StatusBadGateway, Code: "bad_gateway", Message: "stream disconnected before completion"}, want: imagepkg.ErrUpstream5xx},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := imageChannelFailureFromErr(tt.err); got.Code != tt.want {
+				t.Fatalf("code = %q, want %q", got.Code, tt.want)
+			}
+		})
 	}
 }
 

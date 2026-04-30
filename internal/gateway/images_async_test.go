@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -45,6 +46,18 @@ func TestShouldWaitForImageResultAsyncCompatibility(t *testing.T) {
 				t.Fatalf("shouldWaitForImageResult() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestReferenceInputErrorCodeClassifiesTimeoutAndTooLarge(t *testing.T) {
+	if got := referenceInputErrorCode(context.DeadlineExceeded); got != imagepkg.ErrReferenceTimeout {
+		t.Fatalf("deadline code = %q, want %q", got, imagepkg.ErrReferenceTimeout)
+	}
+	if got := referenceInputErrorCode(referenceFetchTooLargeError{LimitBytes: maxReferenceImageBytes}); got != imagepkg.ErrReferenceTooLarge {
+		t.Fatalf("too large code = %q, want %q", got, imagepkg.ErrReferenceTooLarge)
+	}
+	if got := referenceInputErrorCode(errors.New("bad base64")); got != "invalid_reference_image" {
+		t.Fatalf("generic code = %q, want invalid_reference_image", got)
 	}
 }
 

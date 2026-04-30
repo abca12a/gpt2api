@@ -415,8 +415,10 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	referenceInputs := req.referenceInputs()
 	refs, err := decodeReferenceInputs(c.Request.Context(), referenceInputs)
 	if err != nil {
-		fail("invalid_request_error")
-		openAIError(c, http.StatusBadRequest, "invalid_reference_image", "参考图解析失败:"+err.Error())
+		code := referenceInputErrorCode(err)
+		fail(code)
+		logReferenceInputError("/v1/images/generations", len(referenceInputs), err)
+		openAIError(c, http.StatusBadRequest, code, "参考图解析失败:"+err.Error())
 		return
 	}
 
@@ -1512,7 +1514,9 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	for _, fh := range files {
 		data, err := readMultipart(fh)
 		if err != nil {
-			openAIError(c, http.StatusBadRequest, "invalid_reference_image",
+			code := referenceInputErrorCode(err)
+			logReferenceInputError("/v1/images/edits", len(files), err)
+			openAIError(c, http.StatusBadRequest, code,
 				fmt.Sprintf("读取 %q 失败:%s", fh.Filename, err.Error()))
 			return
 		}
@@ -1522,7 +1526,10 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 			return
 		}
 		if len(data) > maxReferenceImageBytes {
-			openAIError(c, http.StatusBadRequest, "invalid_reference_image",
+			err := referenceFetchTooLargeError{LimitBytes: maxReferenceImageBytes}
+			code := referenceInputErrorCode(err)
+			logReferenceInputError("/v1/images/edits", len(files), err)
+			openAIError(c, http.StatusBadRequest, code,
 				fmt.Sprintf("参考图 %q 超过 %dMB 上限", fh.Filename, maxReferenceImageBytes/1024/1024))
 			return
 		}
@@ -1856,6 +1863,47 @@ func (e referenceFetchHTTPStatusError) Error() string {
 	return fmt.Sprintf("下载失败 HTTP %d", e.StatusCode)
 }
 
+type referenceFetchTooLargeError struct {
+	LimitBytes int
+}
+
+func (e referenceFetchTooLargeError) Error() string {
+	return fmt.Sprintf("下载内容超过 %dMB 上限", e.LimitBytes/1024/1024)
+}
+
+func referenceInputErrorCode(err error) string {
+	if err == nil {
+		return "invalid_reference_image"
+	}
+	var tooLarge referenceFetchTooLargeError
+	if errors.As(err, &tooLarge) {
+		return image.ErrReferenceTooLarge
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return image.ErrReferenceTimeout
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return image.ErrReferenceTimeout
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded") {
+		return image.ErrReferenceTimeout
+	}
+	if strings.Contains(msg, "超过") && strings.Contains(msg, "上限") {
+		return image.ErrReferenceTooLarge
+	}
+	return "invalid_reference_image"
+}
+
+func logReferenceInputError(endpoint string, count int, err error) {
+	logger.L().Warn("image reference input rejected",
+		zap.String("endpoint", endpoint),
+		zap.String("error_code", referenceInputErrorCode(err)),
+		zap.Int("reference_count", count),
+		zap.Error(err))
+}
+
 func fetchReferenceHTTPBytes(ctx context.Context, rawURL string) ([]byte, string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1899,6 +1947,9 @@ func fetchReferenceHTTPBytesOnce(ctx context.Context, rawURL string) ([]byte, st
 	body, err := io.ReadAll(io.LimitReader(res.Body, int64(maxReferenceImageBytes)+1))
 	if err != nil {
 		return nil, "", err
+	}
+	if len(body) > maxReferenceImageBytes {
+		return nil, "", referenceFetchTooLargeError{LimitBytes: maxReferenceImageBytes}
 	}
 	name := filepath.Base(req.URL.Path)
 	return body, name, nil
