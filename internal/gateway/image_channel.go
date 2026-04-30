@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -434,9 +435,9 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		}
 		trace := job.ProviderTrace
 		hasReferences := len(job.References) > 0
-		taskCtx, cancelTask := context.WithTimeout(context.Background(), imageChannelTaskTimeoutForRoutes(job.Routes, hasReferences))
+		taskCtx, cancelTask := context.WithTimeout(context.Background(), imageChannelTaskTimeoutForRequest(job.Routes, job.Request))
 		defer cancelTask()
-		channelCtx, cancelChannel := context.WithTimeout(taskCtx, imageChannelRoutesTimeout(job.Routes, hasReferences))
+		channelCtx, cancelChannel := context.WithTimeout(taskCtx, imageChannelRoutesTimeoutForRequest(job.Routes, job.Request))
 		defer cancelChannel()
 
 		var lastErr error
@@ -444,12 +445,11 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 		var lastFailedStep imagepkg.TaskTraceStep
 		var result *adapter.ImageResult
 		var selected *channel.Route
-		defaultPerAttemptTimeout := imageChannelAsyncPerAttemptTimeout(hasReferences)
 		for _, rt := range job.Routes {
 			step := imageTraceStepForRoute(rt)
 			routeCtx := channelCtx
 			cancelRoute := func() {}
-			routeTimeout := imageChannelRouteTimeout(rt, hasReferences)
+			routeTimeout := imageChannelRouteTimeoutForRequest(rt, job.Request)
 			if routeTimeout > 0 {
 				routeCtx, cancelRoute = context.WithTimeout(channelCtx, routeTimeout)
 			}
@@ -457,7 +457,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 			routeStart := time.Now()
 			perAttemptTimeout := routeTimeout
 			if perAttemptTimeout <= 0 {
-				perAttemptTimeout = defaultPerAttemptTimeout
+				perAttemptTimeout = imageChannelAsyncPerAttemptTimeoutForRequest(job.Request)
 			}
 			r, err := imageChannelGenerateWithRetry(adapter.WithImageGenerateObserver(routeCtx, observer), rt, job.Request, job.TaskID, perAttemptTimeout, nil)
 			cancelRoute()
@@ -1066,6 +1066,13 @@ func imageChannelAsyncPerAttemptTimeout(hasReferences bool) time.Duration {
 	return 90 * time.Second
 }
 
+func imageChannelAsyncPerAttemptTimeoutForRequest(req *adapter.ImageRequest) time.Duration {
+	if isHeavyReferenceImageRequest(req) {
+		return 6 * time.Minute
+	}
+	return imageChannelAsyncPerAttemptTimeout(req != nil && len(req.Images) > 0)
+}
+
 func imageChannelAsyncRouteTimeout(hasReferences bool) time.Duration {
 	return imageChannelAsyncPerAttemptTimeout(hasReferences)
 }
@@ -1080,6 +1087,53 @@ func imageChannelRouteTimeout(rt *channel.Route, hasReferences bool) time.Durati
 		return configured
 	}
 	return timeout
+}
+
+func imageChannelRouteTimeoutForRequest(rt *channel.Route, req *adapter.ImageRequest) time.Duration {
+	timeout := imageChannelAsyncPerAttemptTimeoutForRequest(req)
+	if rt == nil || rt.Channel == nil || rt.Channel.TimeoutS <= 0 {
+		return timeout
+	}
+	configured := time.Duration(rt.Channel.TimeoutS) * time.Second
+	if configured > timeout {
+		return configured
+	}
+	return timeout
+}
+
+func isHeavyReferenceImageRequest(req *adapter.ImageRequest) bool {
+	if req == nil || len(req.Images) < 3 {
+		return false
+	}
+	if normalizeImageResolutionToken(req.Resolution) == imagepkg.Upscale4K {
+		return true
+	}
+	width, height, ok := parseImageChannelPixelSize(req.Size)
+	if !ok {
+		return false
+	}
+	return width >= 3000 || height >= 3000
+}
+
+func parseImageChannelPixelSize(size string) (int, int, bool) {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(size)), "x")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	width, errW := strconv.Atoi(strings.TrimSpace(parts[0]))
+	height, errH := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errW != nil || errH != nil || width <= 0 || height <= 0 {
+		return 0, 0, false
+	}
+	return width, height, true
+}
+
+func normalizeImageResolutionToken(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.ReplaceAll(normalized, " ", "")
+	normalized = strings.ReplaceAll(normalized, "_", "")
+	normalized = strings.ReplaceAll(normalized, "-", "")
+	return normalized
 }
 
 func imageChannelAsyncTimeout(routeCount int, hasReferences bool) time.Duration {
@@ -1100,6 +1154,17 @@ func imageChannelRoutesTimeout(routes []*channel.Route, hasReferences bool) time
 	return total
 }
 
+func imageChannelRoutesTimeoutForRequest(routes []*channel.Route, req *adapter.ImageRequest) time.Duration {
+	if len(routes) == 0 {
+		return imageChannelAsyncPerAttemptTimeoutForRequest(req) + 30*time.Second
+	}
+	total := 30 * time.Second
+	for _, rt := range routes {
+		total += imageChannelRouteTimeoutForRequest(rt, req)
+	}
+	return total
+}
+
 func imageChannelTaskTimeout(hasReferences bool) time.Duration {
 	return asyncImageTaskTimeout(0, hasReferences)
 }
@@ -1109,6 +1174,10 @@ func imageChannelTaskTimeoutForRoutes(routes []*channel.Route, hasReferences boo
 		return imageChannelTaskTimeout(hasReferences)
 	}
 	return imageChannelRoutesTimeout(routes, hasReferences) + imageChannelTaskTimeout(hasReferences)
+}
+
+func imageChannelTaskTimeoutForRequest(routes []*channel.Route, req *adapter.ImageRequest) time.Duration {
+	return imageChannelRoutesTimeoutForRequest(routes, req) + imageChannelTaskTimeout(req != nil && len(req.Images) > 0)
 }
 
 func withImageChannelFallbackContext(parent context.Context, maxAttempts int, hasReferences bool) (context.Context, context.CancelFunc) {

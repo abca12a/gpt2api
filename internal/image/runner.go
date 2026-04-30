@@ -605,8 +605,8 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		fileRefs = append(fileRefs, "sed:"+s)
 	}
 	assistantText := sseResult.AssistantText
+	referenceSet := referenceUploadFileIDSet(refs)
 	if len(refs) > 0 {
-		referenceSet := referenceUploadFileIDSet(refs)
 		if len(referenceSet) > 0 {
 			beforeCount := len(fileRefs)
 			fileRefs = filterOutReferenceFileIDs(fileRefs, referenceSet)
@@ -620,7 +620,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	}
 
 	// SSE 已经把期望数量的图带回来了 → 直接下载,跳过 Poll,省时间
-	if len(fileRefs) >= opt.N {
+	if shouldSkipImagePoll(fileRefs, referenceSet, opt.N) {
 		logger.L().Info("image runner enough refs from SSE, skip polling",
 			zap.String("task_id", opt.TaskID),
 			zap.Uint64("account_id", lease.Account.ID),
@@ -813,11 +813,8 @@ func filterOutReferenceFileIDs(fileRefs []string, referenceSet map[string]struct
 	}
 	filteredRefs := make([]string, 0, len(fileRefs))
 	for _, fileRef := range fileRefs {
-		if strings.HasPrefix(fileRef, "sed:") {
-			filteredRefs = append(filteredRefs, fileRef)
-			continue
-		}
-		if _, isReference := referenceSet[fileRef]; isReference {
+		lookupRef := strings.TrimPrefix(fileRef, "sed:")
+		if _, isReference := referenceSet[lookupRef]; isReference {
 			continue
 		}
 		filteredRefs = append(filteredRefs, fileRef)
@@ -825,13 +822,15 @@ func filterOutReferenceFileIDs(fileRefs []string, referenceSet map[string]struct
 	return filteredRefs
 }
 
+func shouldSkipImagePoll(fileRefs []string, referenceSet map[string]struct{}, requested int) bool {
+	return len(filterOutReferenceFileIDs(fileRefs, referenceSet)) >= normalizeRequestedImageCount(requested)
+}
+
 func capRunResultImages(result *RunResult, requested int) {
 	if result == nil {
 		return
 	}
-	if requested <= 0 {
-		requested = 1
-	}
+	requested = normalizeRequestedImageCount(requested)
 	if len(result.FileIDs) > requested {
 		result.FileIDs = result.FileIDs[:requested]
 	}
@@ -841,6 +840,13 @@ func capRunResultImages(result *RunResult, requested int) {
 	if len(result.ContentTypes) > requested {
 		result.ContentTypes = result.ContentTypes[:requested]
 	}
+}
+
+func normalizeRequestedImageCount(requested int) int {
+	if requested <= 0 {
+		return 1
+	}
+	return requested
 }
 
 func imagePollMaxWait(sseResult chatgpt.ImageSSEResult, fileRefs []string, maxWait time.Duration) time.Duration {

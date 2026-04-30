@@ -141,9 +141,25 @@ func TestFilterOutReferenceFileIDsKeepsGeneratedImages(t *testing.T) {
 		"file_generated",
 		"sed:file_reference",
 		"legacy_reference",
+		"sed:file_generated",
 	}, referenceSet)
-	want := []string{"file_generated", "sed:file_reference"}
+	want := []string{"file_generated", "sed:file_generated"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("filtered refs = %#v, want %#v", got, want)
+	}
+}
+
+func TestShouldSkipPollRequiresGeneratedRefsNotUploadedReferences(t *testing.T) {
+	referenceSet := referenceUploadFileIDSet([]*chatgpt.UploadedFile{
+		{FileID: "file_ref_1"},
+		{FileID: "file_ref_2"},
+		{FileID: "file_ref_3"},
+	})
+
+	if shouldSkipImagePoll([]string{"file_ref_1", "sed:file_ref_2", "file_ref_3"}, referenceSet, 1) {
+		t.Fatal("uploaded reference file IDs must not satisfy generated image count")
+	}
+	if !shouldSkipImagePoll([]string{"file_generated"}, referenceSet, 1) {
+		t.Fatal("one generated image should satisfy n=1")
 	}
 }

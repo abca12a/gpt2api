@@ -220,6 +220,9 @@ func TestImageChannelAsyncTimeoutCapsExternalChannelBeforeFallback(t *testing.T)
 	if got := imageChannelAsyncRouteTimeout(true); got != 2*time.Minute {
 		t.Fatalf("reference async route timeout = %s, want 2m", got)
 	}
+	if got := imageChannelAsyncPerAttemptTimeoutForRequest(&adapter.ImageRequest{Resolution: "4k", Images: []string{"a", "b", "c"}}); got != 6*time.Minute {
+		t.Fatalf("heavy reference async per-attempt timeout = %s, want 6m", got)
+	}
 	if got := imageChannelAsyncTimeout(2, true); got != 4*time.Minute+30*time.Second {
 		t.Fatalf("reference async timeout = %s, want 4m30s", got)
 	}
@@ -243,6 +246,17 @@ func TestImageChannelRouteTimeoutRespectsChannelConfig(t *testing.T) {
 	}
 	if got := imageChannelRouteTimeout(&channel.Route{Channel: &channel.Channel{TimeoutS: 180}}, true); got != 180*time.Second {
 		t.Fatalf("reference route timeout = %s, want configured 180s", got)
+	}
+	if got := imageChannelRouteTimeoutForRequest(&channel.Route{Channel: &channel.Channel{TimeoutS: 120}}, &adapter.ImageRequest{Resolution: "4k", Images: []string{"a", "b", "c"}}); got != 6*time.Minute {
+		t.Fatalf("heavy reference route timeout = %s, want 6m floor", got)
+	}
+	heavyRoutes := []*channel.Route{
+		{Channel: &channel.Channel{TimeoutS: 120}},
+		{Channel: &channel.Channel{TimeoutS: 120}},
+	}
+	heavyReq := &adapter.ImageRequest{Resolution: "4k", Images: []string{"a", "b", "c"}}
+	if got := imageChannelRoutesTimeoutForRequest(heavyRoutes, heavyReq); got != 12*time.Minute+30*time.Second {
+		t.Fatalf("heavy routes timeout = %s, want two heavy routes plus reserve", got)
 	}
 	routes := []*channel.Route{
 		{Channel: &channel.Channel{TimeoutS: 120}},
