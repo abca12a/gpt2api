@@ -58,6 +58,11 @@ func TestTaskErrorFieldsUsesAssistantDiagnosticForMessage(t *testing.T) {
 
 func TestTaskTraceSummaryShowsFallbackOrderAndFinalAccount(t *testing.T) {
 	trace := &TaskTrace{
+		RequestID:         "req-123",
+		TaskID:            "img_123",
+		ErrorLayer:        ErrorLayerDownstreamAPIMart,
+		ErrorLayerLabel:   ErrorLayerLabel(ErrorLayerDownstreamAPIMart),
+		UpstreamRequestID: "apimart-task-123",
 		Original: TaskTraceEndpoint{
 			Provider:    TraceProviderCodex,
 			ChannelID:   1,
@@ -111,6 +116,50 @@ func TestTaskTraceSummaryShowsFallbackOrderAndFinalAccount(t *testing.T) {
 	}
 	if !strings.Contains(got, "Free Runner(#42/free)") {
 		t.Fatalf("summary should include final free runner account, got %q", got)
+	}
+}
+
+func TestTaskTraceDiagnosticsNormalizeErrorLayer(t *testing.T) {
+	trace := &TaskTrace{}
+	trace.SetRequestIDs("req-abc", "img_abc")
+	trace.SetUpstreamRequestID(" upstream-1 ")
+	trace.SetErrorLayer(ErrorLayerPolling)
+
+	decoded := DecodeProviderTrace(EncodeProviderTrace(trace))
+	if decoded == nil {
+		t.Fatal("decoded trace is nil")
+	}
+	if decoded.RequestID != "req-abc" || decoded.TaskID != "img_abc" {
+		t.Fatalf("request/task ids = (%q,%q)", decoded.RequestID, decoded.TaskID)
+	}
+	if decoded.UpstreamRequestID != "upstream-1" {
+		t.Fatalf("upstream request id = %q", decoded.UpstreamRequestID)
+	}
+	if decoded.ErrorLayer != ErrorLayerPolling || decoded.ErrorLayerLabel != "轮询" {
+		t.Fatalf("error layer = (%q,%q)", decoded.ErrorLayer, decoded.ErrorLayerLabel)
+	}
+}
+
+func TestInferErrorLayerFromTrace(t *testing.T) {
+	tests := []struct {
+		name  string
+		trace *TaskTrace
+		code  string
+		want  string
+	}{
+		{name: "queued", trace: nil, code: ErrInterrupted, want: ErrorLayerTaskQueue},
+		{name: "poll timeout", trace: &TaskTrace{}, code: ErrPollTimeout, want: ErrorLayerPolling},
+		{name: "apimart", trace: &TaskTrace{Final: TaskTraceEndpoint{Provider: TraceProviderAPIMart}}, code: ErrUpstream, want: ErrorLayerDownstreamAPIMart},
+		{name: "fallback", trace: &TaskTrace{Final: TaskTraceEndpoint{Provider: TraceProviderFreeRunner}}, code: ErrUpstream, want: ErrorLayerGatewayFallback},
+		{name: "downstream", trace: &TaskTrace{Final: TaskTraceEndpoint{Provider: TraceProviderCodex}}, code: ErrUpstream, want: ErrorLayerDownstreamBackend},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := InferErrorLayer(tt.trace, tt.code); got != tt.want {
+				t.Fatalf("InferErrorLayer() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

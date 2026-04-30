@@ -130,6 +130,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 			step.Status = imagepkg.StatusFailed
 			step.ReasonCode = lastFailure.Code
 			step.ReasonDetail = ifEmpty(lastFailure.Detail, err.Error())
+			enrichImageTraceStep(&step, observer, lastFailure)
 			lastFailedStep = step
 			trace.AddStep(step)
 			h.persistRequestTrace(c.Request.Context(), req, trace)
@@ -157,6 +158,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 		result = r
 		selected = rt
 		step.Status = imagepkg.StatusSuccess
+		enrichImageTraceStep(&step, observer, imageChannelFailure{})
 		trace.AddStep(step)
 		h.persistRequestTrace(c.Request.Context(), req, trace)
 		break
@@ -196,8 +198,10 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 			return false
 		}
 		failure := imageChannelFailureFromErr(lastErr)
+		markImageTraceFailureLayer(trace, failure.Code)
 		if h.DAO != nil && req.taskID != "" {
 			_ = h.DAO.MarkFailedDetail(c.Request.Context(), req.taskID, failure.Code, failure.Detail)
+			h.persistRequestTrace(c.Request.Context(), req, trace)
 		}
 		imagepkg.LogTaskLifecycle(req.taskID, trace, imagepkg.StatusFailed, failure.Code,
 			zap.String("mode", "channel"),
@@ -362,8 +366,10 @@ type imageChannelAsyncJob struct {
 }
 
 type imageChannelGenerateObserver struct {
-	submit time.Duration
-	poll   time.Duration
+	submit            time.Duration
+	poll              time.Duration
+	upstreamRequestID string
+	downstreamStatus  string
 }
 
 func (o *imageChannelGenerateObserver) RecordSubmitDuration(d time.Duration) {
@@ -378,6 +384,26 @@ func (o *imageChannelGenerateObserver) RecordPollDuration(d time.Duration) {
 		return
 	}
 	o.poll += d
+}
+
+func (o *imageChannelGenerateObserver) RecordUpstreamRequestID(id string) {
+	if o == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id != "" {
+		o.upstreamRequestID = id
+	}
+}
+
+func (o *imageChannelGenerateObserver) RecordDownstreamStatus(status string) {
+	if o == nil {
+		return
+	}
+	status = strings.TrimSpace(status)
+	if status != "" {
+		o.downstreamStatus = status
+	}
 }
 
 func recordImageChannelRouteTiming(trace *imagepkg.TaskTrace, taskID string, total time.Duration, observer *imageChannelGenerateObserver, fields ...zap.Field) {
@@ -471,6 +497,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 				step.Status = imagepkg.StatusFailed
 				step.ReasonCode = lastFailure.Code
 				step.ReasonDetail = ifEmpty(lastFailure.Detail, err.Error())
+				enrichImageTraceStep(&step, observer, lastFailure)
 				lastFailedStep = step
 				if trace != nil {
 					trace.AddStep(step)
@@ -503,6 +530,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 			result = r
 			selected = rt
 			step.Status = imagepkg.StatusSuccess
+			enrichImageTraceStep(&step, observer, imageChannelFailure{})
 			if trace != nil {
 				trace.AddStep(step)
 				_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, trace)
@@ -568,6 +596,10 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 				}
 				rec.Status = usage.StatusFailed
 				rec.ErrorCode = ifEmpty(fallback.ErrorCode, imagepkg.ErrUpstream)
+				markImageTraceFailureLayer(trace, rec.ErrorCode)
+				if h.DAO != nil && trace != nil {
+					_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, trace)
+				}
 				if job.Cost > 0 && h.Billing != nil {
 					_ = h.Billing.Refund(context.Background(), job.UserID, job.KeyID, job.Cost, job.RefID, "image channel async runner fallback refund")
 				}
@@ -579,6 +611,7 @@ func (h *ImagesHandler) runImageChannelTaskAsync(job imageChannelAsyncJob) {
 			failure := imageChannelFailureFromErr(lastErr)
 			rec.Status = usage.StatusFailed
 			rec.ErrorCode = failure.Code
+			markImageTraceFailureLayer(trace, failure.Code)
 			if h.DAO != nil {
 				_ = h.DAO.MarkFailedDetail(context.Background(), job.TaskID, failure.Code, failure.Detail)
 				if trace != nil {
@@ -720,6 +753,7 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 			step.Status = imagepkg.StatusFailed
 			step.ReasonCode = lastFailure.Code
 			step.ReasonDetail = ifEmpty(lastFailure.Detail, err.Error())
+			enrichImageTraceStep(&step, observer, lastFailure)
 			lastFailedStep = step
 			trace.AddStep(step)
 			h.persistRequestTrace(c.Request.Context(), req, trace)
@@ -747,6 +781,7 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 		result = r
 		selected = rt
 		step.Status = imagepkg.StatusSuccess
+		enrichImageTraceStep(&step, observer, imageChannelFailure{})
 		trace.AddStep(step)
 		h.persistRequestTrace(c.Request.Context(), req, trace)
 		break
@@ -786,8 +821,10 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 			return false
 		}
 		failure := imageChannelFailureFromErr(lastErr)
+		markImageTraceFailureLayer(trace, failure.Code)
 		if h.DAO != nil && req.taskID != "" {
 			_ = h.DAO.MarkFailedDetail(c.Request.Context(), req.taskID, failure.Code, failure.Detail)
+			h.persistRequestTrace(c.Request.Context(), req, trace)
 		}
 		imagepkg.LogTaskLifecycle(req.taskID, trace, imagepkg.StatusFailed, failure.Code,
 			zap.String("mode", "chat_image_channel"),

@@ -144,11 +144,21 @@ export interface ImageTaskProviderTraceFallback {
 
 export interface ImageTaskProviderTraceStep extends ImageTaskProviderTraceEndpoint {
   order?: number
+  upstream_request_id?: string
+  downstream_status?: string
+  error_layer?: string
+  error_layer_label?: string
   reason_code?: string
   reason_detail?: string
 }
 
 export interface ImageTaskProviderTrace {
+  request_id?: string
+  task_id?: string
+  upstream_request_id?: string
+  downstream_status?: string
+  error_layer?: string
+  error_layer_label?: string
   original?: ImageTaskProviderTraceEndpoint
   fallback?: ImageTaskProviderTraceFallback | null
   final?: ImageTaskProviderTraceEndpoint
@@ -170,6 +180,8 @@ export interface ImageTask {
   error_code?: string
   error_message?: string
   error_detail?: string
+  error_layer?: string
+  error_layer_label?: string
   provider_trace?: ImageTaskProviderTrace | null
   provider_trace_summary?: string
   credit_cost: number

@@ -58,6 +58,8 @@ func (h *AdminHandler) List(c *gin.Context) {
 		ErrorCode            string               `json:"error_code,omitempty"`
 		ErrorMessage         string               `json:"error_message,omitempty"`
 		ErrorDetail          string               `json:"error_detail,omitempty"`
+		ErrorLayer           string               `json:"error_layer,omitempty"`
+		ErrorLayerLabel      string               `json:"error_layer_label,omitempty"`
 		ProviderTrace        *TaskTrace           `json:"provider_trace,omitempty"`
 		ProviderTraceSummary string               `json:"provider_trace_summary,omitempty"`
 	}
@@ -84,6 +86,8 @@ func (h *AdminHandler) List(c *gin.Context) {
 		row.ProviderTraceSummary = TaskTraceSummary(row.ProviderTrace)
 		if r.Status == StatusFailed || r.Error != "" {
 			row.ErrorCode, row.ErrorDetail, row.ErrorMessage = TaskErrorFields(r.Error)
+			row.ErrorLayer = InferErrorLayer(row.ProviderTrace, row.ErrorCode)
+			row.ErrorLayerLabel = ErrorLayerLabel(row.ErrorLayer)
 		}
 		out = append(out, row)
 	}
@@ -129,6 +133,9 @@ func (h *AdminHandler) Images(c *gin.Context) {
 		out["error_code"] = code
 		out["error_detail"] = detail
 		out["error_message"] = message
+		layer := InferErrorLayer(t.DecodeProviderTrace(), code)
+		out["error_layer"] = layer
+		out["error_layer_label"] = ErrorLayerLabel(layer)
 	}
 	resp.OK(c, out)
 }

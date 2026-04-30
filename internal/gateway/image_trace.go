@@ -50,6 +50,28 @@ func imageTraceStepForRoute(rt *channel.Route) imagepkg.TaskTraceStep {
 	return step
 }
 
+func enrichImageTraceStep(step *imagepkg.TaskTraceStep, observer *imageChannelGenerateObserver, failure imageChannelFailure) {
+	if step == nil {
+		return
+	}
+	if observer != nil {
+		step.UpstreamRequestID = observer.upstreamRequestID
+		step.DownstreamStatus = observer.downstreamStatus
+	}
+	if step.Status != imagepkg.StatusFailed {
+		return
+	}
+	if step.Provider == imagepkg.TraceProviderAPIMart {
+		step.ErrorLayer = imagepkg.ErrorLayerDownstreamAPIMart
+	} else {
+		step.ErrorLayer = imagepkg.ErrorLayerDownstreamBackend
+	}
+	if failure.Code == imagepkg.ErrPollTimeout || strings.Contains(strings.ToLower(failure.Detail), "task poll") {
+		step.ErrorLayer = imagepkg.ErrorLayerPolling
+	}
+	step.ErrorLayerLabel = imagepkg.ErrorLayerLabel(step.ErrorLayer)
+}
+
 func imageTraceStepForRunner(result *imagepkg.RunResult, requireFree bool, status, reasonCode, reasonDetail string) imagepkg.TaskTraceStep {
 	step := imagepkg.TaskTraceStep{
 		Provider:     runnerTraceProvider(requireFree),
@@ -57,11 +79,22 @@ func imageTraceStepForRunner(result *imagepkg.RunResult, requireFree bool, statu
 		ReasonCode:   strings.TrimSpace(reasonCode),
 		ReasonDetail: strings.TrimSpace(reasonDetail),
 	}
+	if status == imagepkg.StatusFailed {
+		step.ErrorLayer = imagepkg.ErrorLayerGatewayFallback
+		step.ErrorLayerLabel = imagepkg.ErrorLayerLabel(step.ErrorLayer)
+	}
 	if result != nil {
 		step.AccountID = result.AccountID
 		step.AccountPlanType = result.AccountPlanType
 	}
 	return step
+}
+
+func markImageTraceFailureLayer(trace *imagepkg.TaskTrace, errorCode string) {
+	if trace == nil {
+		return
+	}
+	trace.SetErrorLayer(imagepkg.InferErrorLayer(trace, errorCode))
 }
 
 func ensureRequestTrace(req *ImageGenRequest) *imagepkg.TaskTrace {
@@ -98,9 +131,15 @@ func (h *ImagesHandler) ensureTaskRecord(
 	}
 	req.providerTrace = trace
 	if req.taskID != "" || h == nil || h.DAO == nil {
+		if trace != nil && req.taskID != "" {
+			trace.SetRequestIDs(c.GetString("request_id"), req.taskID)
+		}
 		return req.taskID, nil
 	}
 	taskID := imagepkg.GenerateTaskID()
+	if trace != nil {
+		trace.SetRequestIDs(c.GetString("request_id"), taskID)
+	}
 	task := &imagepkg.Task{
 		TaskID:          taskID,
 		UserID:          ak.UserID,

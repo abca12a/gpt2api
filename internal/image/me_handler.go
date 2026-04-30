@@ -38,6 +38,8 @@ type taskView struct {
 	ErrorDetail          string               `json:"error_detail,omitempty"`
 	ProviderTrace        *TaskTrace           `json:"provider_trace,omitempty"`
 	ProviderTraceSummary string               `json:"provider_trace_summary,omitempty"`
+	ErrorLayer           string               `json:"error_layer,omitempty"`
+	ErrorLayerLabel      string               `json:"error_layer_label,omitempty"`
 	Timing               *TaskTimingBreakdown `json:"timing,omitempty"`
 	CreditCost           int64                `json:"credit_cost"`
 	IsPreview            bool                 `json:"is_preview,omitempty"`
@@ -77,6 +79,8 @@ func toView(t *Task) taskView {
 	view.ProviderTraceSummary = TaskTraceSummary(view.ProviderTrace)
 	if t.Status == StatusFailed || t.Error != "" {
 		view.ErrorCode, view.ErrorDetail, view.ErrorMessage = TaskErrorFields(t.Error)
+		view.ErrorLayer = InferErrorLayer(view.ProviderTrace, view.ErrorCode)
+		view.ErrorLayerLabel = ErrorLayerLabel(view.ErrorLayer)
 	}
 	return view
 }

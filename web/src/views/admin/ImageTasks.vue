@@ -25,6 +25,8 @@ interface TaskRow {
   error_code?: string
   error_message?: string
   error_detail?: string
+  error_layer?: string
+  error_layer_label?: string
   provider_trace?: ProviderTrace | null
   provider_trace_summary?: string
   credit_cost: number
@@ -55,11 +57,21 @@ interface ProviderTraceFallback {
 
 interface ProviderTraceStep extends ProviderTraceEndpoint {
   order?: number
+  upstream_request_id?: string
+  downstream_status?: string
+  error_layer?: string
+  error_layer_label?: string
   reason_code?: string
   reason_detail?: string
 }
 
 interface ProviderTrace {
+  request_id?: string
+  task_id?: string
+  upstream_request_id?: string
+  downstream_status?: string
+  error_layer?: string
+  error_layer_label?: string
   original?: ProviderTraceEndpoint
   fallback?: ProviderTraceFallback | null
   final?: ProviderTraceEndpoint
@@ -213,6 +225,15 @@ const errorCodeLabel: Record<string, string> = {
   interrupted: '部署/重启中断',
 }
 
+const errorLayerLabel: Record<string, string> = {
+  gateway_entry: '号池入口',
+  task_queue: '任务队列',
+  polling: '轮询',
+  gateway_fallback: '号池兜底',
+  downstream_backend: '下游后端',
+  downstream_apimart: '下游 apimart',
+}
+
 const errorTagType: Record<string, 'danger' | 'warning' | 'info'> = {
   content_moderation: 'danger',
   invalid_request_error: 'warning',
@@ -250,6 +271,24 @@ function errorReason(row: TaskRow) {
   return errorCodeLabel[code] || code || (row.status === 'failed' ? '失败详情' : '-')
 }
 
+function traceErrorLayer(row: TaskRow) {
+  const layer = row.error_layer || row.provider_trace?.error_layer || ''
+  const label = row.error_layer_label || row.provider_trace?.error_layer_label || errorLayerLabel[layer]
+  return label || layer || ''
+}
+
+function traceRequestID(row: TaskRow) {
+  return row.provider_trace?.request_id || ''
+}
+
+function traceUpstreamID(row: TaskRow) {
+  return row.provider_trace?.upstream_request_id || ''
+}
+
+function traceDownstreamStatus(row: TaskRow) {
+  return row.provider_trace?.downstream_status || ''
+}
+
 function errorDetail(row: TaskRow) {
   const parsed = splitTaskError(row.error)
   return row.error_message || row.error_detail || parsed.detail || row.error || (row.status === 'failed' ? '点击查看加载失败详情' : '')
@@ -261,7 +300,15 @@ function errorType(row: TaskRow) {
 }
 
 function errorCopyText(row: TaskRow) {
-  return [row.error_message, row.error_detail || row.error]
+  return [
+    traceErrorLayer(row) ? `错误层级:${traceErrorLayer(row)}` : '',
+    traceRequestID(row) ? `request_id:${traceRequestID(row)}` : '',
+    row.task_id ? `task_id:${row.task_id}` : '',
+    traceUpstreamID(row) ? `upstream_request_id:${traceUpstreamID(row)}` : '',
+    traceDownstreamStatus(row) ? `downstream_status:${traceDownstreamStatus(row)}` : '',
+    row.error_message,
+    row.error_detail || row.error,
+  ]
     .filter((v, idx, arr) => v && arr.indexOf(v) === idx)
     .join('\n')
 }
@@ -483,6 +530,9 @@ onMounted(() => {
           <template #default="{ row }">
             <div v-if="providerTraceSummary(row)" class="trace-summary">
               <div>{{ providerTraceSummary(row) }}</div>
+              <div v-if="traceErrorLayer(row)" class="trace-subtext trace-layer">
+                错误层级: {{ traceErrorLayer(row) }}
+              </div>
               <div v-if="traceFallbackReason(row)" class="trace-subtext">
                 兜底原因: {{ traceFallbackReason(row) }}
               </div>
@@ -501,6 +551,7 @@ onMounted(() => {
           <template #default="{ row }">
             <div v-if="row.error || row.error_message || row.status === 'failed'" class="error-reason">
               <el-tag :type="errorType(row)" size="small">{{ errorReason(row) }}</el-tag>
+              <el-tag v-if="traceErrorLayer(row)" type="info" size="small">{{ traceErrorLayer(row) }}</el-tag>
               <button type="button" class="error-detail-btn" :title="row.error_detail || row.error" @click="openPreview(row)">
                 {{ errorDetail(row) }}
               </button>
@@ -569,6 +620,16 @@ onMounted(() => {
             <div>{{ traceActorLabel(previewRow.provider_trace.original) }}</div>
             <div class="task-trace-label">最终渠道</div>
             <div>{{ traceActorLabel(previewRow.provider_trace.final) }}</div>
+            <div class="task-trace-label">request_id</div>
+            <div class="trace-id-text">{{ traceRequestID(previewRow) || '-' }}</div>
+            <div class="task-trace-label">task_id</div>
+            <div class="trace-id-text">{{ previewRow.task_id || previewRow.provider_trace.task_id || '-' }}</div>
+            <div class="task-trace-label">上游请求</div>
+            <div class="trace-id-text">{{ traceUpstreamID(previewRow) || '-' }}</div>
+            <div class="task-trace-label">转发状态</div>
+            <div>{{ traceDownstreamStatus(previewRow) || '-' }}</div>
+            <div class="task-trace-label">错误层级</div>
+            <div>{{ traceErrorLayer(previewRow) || '-' }}</div>
             <div class="task-trace-label">兜底原因</div>
             <div>{{ traceFallbackReason(previewRow) || '-' }}</div>
           </div>
@@ -586,12 +647,20 @@ onMounted(() => {
               <div v-if="step.reason_code || step.reason_detail" class="task-trace-step-detail">
                 {{ [step.reason_code, step.reason_detail].filter(Boolean).join(': ') }}
               </div>
+              <div v-if="step.upstream_request_id || step.downstream_status || step.error_layer_label" class="task-trace-step-detail">
+                {{ [
+                  step.upstream_request_id ? `上游:${step.upstream_request_id}` : '',
+                  step.downstream_status ? `状态:${step.downstream_status}` : '',
+                  step.error_layer_label ? `层级:${step.error_layer_label}` : '',
+                ].filter(Boolean).join(' · ') }}
+              </div>
             </div>
           </div>
         </div>
         <div v-if="previewRow.status === 'failed' || previewRow.error || previewRow.error_message" class="task-error-panel">
           <div class="task-error-title">
             <el-tag :type="errorType(previewRow)" size="small">{{ errorReason(previewRow) }}</el-tag>
+            <el-tag v-if="traceErrorLayer(previewRow)" type="info" size="small">{{ traceErrorLayer(previewRow) }}</el-tag>
             <el-button type="primary" link size="small" @click="copyError(previewRow)">复制失败原因</el-button>
           </div>
           <div class="task-error-message">{{ errorDetail(previewRow) || '暂无失败详情' }}</div>
@@ -779,6 +848,15 @@ onMounted(() => {
   margin-top: 2px;
   color: var(--el-text-color-secondary);
   font-size: 11px;
+}
+
+.trace-layer {
+  color: var(--el-color-warning);
+}
+
+.trace-id-text {
+  word-break: break-all;
+  font-family: var(--el-font-family);
 }
 
 .task-trace-panel {

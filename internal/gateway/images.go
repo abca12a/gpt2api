@@ -244,6 +244,10 @@ func (h *ImagesHandler) runImageTaskAsync(job imageAsyncJob) {
 		if res.Status != image.StatusSuccess {
 			rec.Status = usage.StatusFailed
 			rec.ErrorCode = ifEmpty(res.ErrorCode, "upstream_error")
+			markImageTraceFailureLayer(job.ProviderTrace, rec.ErrorCode)
+			if job.ProviderTrace != nil && h.DAO != nil {
+				_ = h.DAO.UpdateProviderTrace(context.Background(), job.TaskID, job.ProviderTrace)
+			}
 			if job.Cost > 0 && h.Billing != nil {
 				_ = h.Billing.Refund(context.Background(), job.UserID, job.KeyID, job.Cost, job.RefID, "image async refund")
 			}
@@ -541,6 +545,8 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	)
 
 	if res.Status != image.StatusSuccess {
+		markImageTraceFailureLayer(trace, ifEmpty(res.ErrorCode, "upstream_error"))
+		h.persistRequestTrace(c.Request.Context(), &req, trace)
 		refund(ifEmpty(res.ErrorCode, "upstream_error"))
 		httpStatus := http.StatusBadGateway
 		if res.ErrorCode == image.ErrNoAccount {
@@ -794,6 +800,8 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 	)
 
 	if res.Status != image.StatusSuccess {
+		markImageTraceFailureLayer(trace, ifEmpty(res.ErrorCode, "upstream_error"))
+		h.persistRequestTrace(c.Request.Context(), imgReq, trace)
 		refund(ifEmpty(res.ErrorCode, "upstream_error"))
 		httpStatus := http.StatusBadGateway
 		if res.ErrorCode == image.ErrNoAccount || res.ErrorCode == image.ErrRateLimited {
@@ -1266,6 +1274,12 @@ func attachImageTaskTraceFields(out gin.H, t *image.Task) {
 	}
 	out["provider_trace"] = trace
 	out["provider_trace_summary"] = image.TaskTraceSummary(trace)
+	if t.Status == image.StatusFailed || t.Error != "" {
+		code, _, _ := image.TaskErrorFields(t.Error)
+		layer := image.InferErrorLayer(trace, code)
+		out["error_layer"] = layer
+		out["error_layer_label"] = image.ErrorLayerLabel(layer)
+	}
 	if timing := image.TaskTimingBreakdownFromTask(t, time.Now()); timing.HasData() {
 		out["timing"] = timing
 	}
@@ -1676,6 +1690,8 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	)
 
 	if res.Status != image.StatusSuccess {
+		markImageTraceFailureLayer(trace, ifEmpty(res.ErrorCode, "upstream_error"))
+		h.persistRequestTrace(c.Request.Context(), editReq, trace)
 		refund(ifEmpty(res.ErrorCode, "upstream_error"))
 		httpStatus := http.StatusBadGateway
 		if res.ErrorCode == image.ErrNoAccount || res.ErrorCode == image.ErrRateLimited {

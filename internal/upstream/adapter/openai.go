@@ -305,6 +305,10 @@ func (a *openaiAdapter) ImageGenerate(ctx context.Context, upstreamModel string,
 	observer := imageGenerateObserverFromContext(ctx)
 	if taskID := parseAPIMartImageTaskID(bodyData); taskID != "" {
 		if observer != nil {
+			observer.RecordUpstreamRequestID(taskID)
+			observer.RecordDownstreamStatus("submitted")
+		}
+		if observer != nil {
 			observer.RecordSubmitDuration(time.Since(requestStart))
 		}
 		pollStart := time.Now()
@@ -509,6 +513,9 @@ func (a *openaiAdapter) fetchAPIMartImageTask(ctx context.Context, taskID string
 		return nil, false, fmt.Errorf("openai: task poll decode: %w", err)
 	}
 	status := strings.ToLower(strings.TrimSpace(payload.Data.Status))
+	if observer := imageGenerateObserverFromContext(ctx); observer != nil {
+		observer.RecordDownstreamStatus(status)
+	}
 	switch status {
 	case "pending", "processing", "submitted", "in_progress", "":
 		return nil, false, nil

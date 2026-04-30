@@ -8,6 +8,8 @@ import (
 type ImageGenerateObserver interface {
 	RecordSubmitDuration(time.Duration)
 	RecordPollDuration(time.Duration)
+	RecordUpstreamRequestID(string)
+	RecordDownstreamStatus(string)
 }
 
 type imageGenerateObserverKey struct{}

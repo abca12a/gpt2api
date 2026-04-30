@@ -12,12 +12,16 @@ import (
 )
 
 type testImageObserver struct {
-	submit time.Duration
-	poll   time.Duration
+	submit            time.Duration
+	poll              time.Duration
+	upstreamRequestID string
+	downstreamStatus  string
 }
 
 func (o *testImageObserver) RecordSubmitDuration(d time.Duration) { o.submit += d }
 func (o *testImageObserver) RecordPollDuration(d time.Duration)   { o.poll += d }
+func (o *testImageObserver) RecordUpstreamRequestID(id string)    { o.upstreamRequestID = id }
+func (o *testImageObserver) RecordDownstreamStatus(status string) { o.downstreamStatus = status }
 
 func TestOpenAIImageGeneratePassesGPTImageOutputParameters(t *testing.T) {
 	var got map[string]any

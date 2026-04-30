@@ -46,6 +46,23 @@ func LogTaskLifecycle(taskID string, trace *TaskTrace, status, errorCode string,
 	if summary := TaskTraceSummary(trace); summary != "" {
 		baseFields = append(baseFields, zap.String("provider_trace", summary))
 	}
+	if trace != nil {
+		if trace.RequestID != "" {
+			baseFields = append(baseFields, zap.String("request_id", trace.RequestID))
+		}
+		if trace.UpstreamRequestID != "" {
+			baseFields = append(baseFields, zap.String("upstream_request_id", trace.UpstreamRequestID))
+		}
+		if trace.DownstreamStatus != "" {
+			baseFields = append(baseFields, zap.String("downstream_status", trace.DownstreamStatus))
+		}
+		if trace.ErrorLayer != "" {
+			baseFields = append(baseFields,
+				zap.String("error_layer", trace.ErrorLayer),
+				zap.String("error_layer_label", trace.ErrorLayerLabel),
+			)
+		}
+	}
 	if errorCode != "" {
 		baseFields = append(baseFields, zap.String("error_code", errorCode))
 	}
