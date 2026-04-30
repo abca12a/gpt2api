@@ -104,6 +104,9 @@ func ensureRequestTrace(req *ImageGenRequest) *imagepkg.TaskTrace {
 	if req.providerTrace == nil {
 		req.providerTrace = &imagepkg.TaskTrace{}
 	}
+	if req.providerTrace.Resolution == "" {
+		req.providerTrace.Resolution = normalizeRequestedImageResolution(req)
+	}
 	return req.providerTrace
 }
 

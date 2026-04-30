@@ -28,6 +28,7 @@ const (
 type TaskTrace struct {
 	RequestID         string             `json:"request_id,omitempty"`
 	TaskID            string             `json:"task_id,omitempty"`
+	Resolution        string             `json:"resolution,omitempty"`
 	UpstreamRequestID string             `json:"upstream_request_id,omitempty"`
 	DownstreamStatus  string             `json:"downstream_status,omitempty"`
 	ErrorLayer        string             `json:"error_layer,omitempty"`
@@ -341,11 +342,12 @@ func normalizeTaskTrace(trace *TaskTrace) *TaskTrace {
 	}
 	trace.RequestID = strings.TrimSpace(trace.RequestID)
 	trace.TaskID = strings.TrimSpace(trace.TaskID)
+	trace.Resolution = strings.ToLower(strings.TrimSpace(trace.Resolution))
 	trace.UpstreamRequestID = strings.TrimSpace(trace.UpstreamRequestID)
 	trace.DownstreamStatus = strings.TrimSpace(trace.DownstreamStatus)
 	trace.ErrorLayer = normalizeErrorLayer(trace.ErrorLayer)
 	trace.ErrorLayerLabel = ErrorLayerLabel(trace.ErrorLayer)
-	if trace.Original.Provider == "" && trace.Final.Provider == "" && len(trace.Steps) == 0 && trace.Fallback == nil && trace.Timing == nil && trace.RequestID == "" && trace.TaskID == "" && trace.UpstreamRequestID == "" && trace.DownstreamStatus == "" && trace.ErrorLayer == "" {
+	if trace.Original.Provider == "" && trace.Final.Provider == "" && len(trace.Steps) == 0 && trace.Fallback == nil && trace.Timing == nil && trace.RequestID == "" && trace.TaskID == "" && trace.Resolution == "" && trace.UpstreamRequestID == "" && trace.DownstreamStatus == "" && trace.ErrorLayer == "" {
 		return nil
 	}
 	return trace

@@ -52,7 +52,7 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	if len(routes) == 0 {
 		return false
 	}
-	policy := h.imageFallbackPolicy()
+	policy := imageFallbackPolicyForResolution(h.imageFallbackPolicy(), normalizeRequestedImageResolution(req))
 	routes, skippedSteps := prepareImageRoutes(routes, policy)
 	trace := ensureRequestTrace(req)
 	if trace != nil {
@@ -250,9 +250,10 @@ func (h *ImagesHandler) dispatchImageToChannel(c *gin.Context,
 	)
 
 	c.JSON(http.StatusOK, ImageGenResponse{
-		Created: time.Now().Unix(),
-		TaskID:  req.taskID,
-		Data:    data,
+		Created:    time.Now().Unix(),
+		TaskID:     req.taskID,
+		Resolution: normalizeRequestedImageResolution(req),
+		Data:       data,
 	})
 	return true
 }
@@ -275,7 +276,7 @@ func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 	if len(routes) == 0 {
 		return false, false
 	}
-	policy := h.imageFallbackPolicy()
+	policy := imageFallbackPolicyForResolution(h.imageFallbackPolicy(), normalizeRequestedImageResolution(req))
 	routes, skippedSteps := prepareImageRoutes(routes, policy)
 	if h.DAO == nil {
 		rec.Status = usage.StatusFailed
@@ -343,7 +344,7 @@ func (h *ImagesHandler) dispatchImageToChannelAsync(c *gin.Context,
 		ProviderTrace: trace,
 		RunnerPlans:   cloneImageRunnerFallbackPlans(policy.RunnerPlans),
 	})
-	writeAsyncImageSubmit(c, taskID)
+	writeAsyncImageSubmit(c, taskID, normalizeRequestedImageResolution(req))
 	return true, true
 }
 
@@ -692,7 +693,7 @@ func (h *ImagesHandler) dispatchChatImageToChannel(c *gin.Context,
 	if len(routes) == 0 {
 		return false
 	}
-	policy := h.imageFallbackPolicy()
+	policy := imageFallbackPolicyForResolution(h.imageFallbackPolicy(), normalizeRequestedImageResolution(req))
 	routes, skippedSteps := prepareImageRoutes(routes, policy)
 	trace := ensureRequestTrace(req)
 	if trace != nil {

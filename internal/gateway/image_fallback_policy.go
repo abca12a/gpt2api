@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	imageFallbackStatusSkipped       = "skipped"
-	imageFallbackReasonSkipCodex     = "policy_skip_codex"
-	imageFallbackReasonChannelWarmup = "channel_cooldown"
+	imageFallbackStatusSkipped              = "skipped"
+	imageFallbackReasonSkipCodex            = "policy_skip_codex"
+	imageFallbackReasonChannelWarmup        = "channel_cooldown"
+	imageFallbackReasonResolutionRunnerOnly = "resolution_runner_only"
 )
 
 type imageFallbackPolicy struct {
@@ -27,6 +28,8 @@ type imageFallbackPolicy struct {
 	ChannelCooldown      time.Duration
 	ChannelFailThreshold int
 	SkipCodexToAPIMart   bool
+	DisableChannels      bool
+	DisableChannelReason string
 }
 
 type imageRunnerFallbackPlan struct {
@@ -65,6 +68,25 @@ func (h *Handler) imageFallbackPolicy() imageFallbackPolicy {
 	}
 	policy.SkipCodexToAPIMart = h.Settings.ImageSkipCodexToAPIMart()
 	return policy
+}
+
+func imageFallbackPolicyForResolution(policy imageFallbackPolicy, resolution string) imageFallbackPolicy {
+	switch normalizeImageResolutionToken(resolution) {
+	case "2k", "4k":
+		policy.ChannelOrder = []string{imagepkg.TraceProviderCodex, imagepkg.TraceProviderAPIMart}
+		if len(policy.RunnerPlans) == 0 {
+			policy.RunnerPlans = defaultImageFallbackPolicy().RunnerPlans
+		}
+		policy.DisableChannels = false
+		policy.DisableChannelReason = ""
+		return policy
+	default:
+		policy.ChannelOrder = nil
+		policy.RunnerPlans = defaultImageFallbackPolicy().RunnerPlans
+		policy.DisableChannels = true
+		policy.DisableChannelReason = imageFallbackReasonResolutionRunnerOnly
+		return policy
+	}
 }
 
 func normalizeImageFallbackTokens(raw []string) []string {
@@ -243,6 +265,14 @@ func prepareImageRoutes(routes []*channel.Route, policy imageFallbackPolicy) ([]
 	skipped := make([]imagepkg.TaskTraceStep, 0, len(routes))
 	for idx, rt := range routes {
 		if rt == nil || rt.Channel == nil {
+			continue
+		}
+		if policy.DisableChannels {
+			reason := strings.TrimSpace(policy.DisableChannelReason)
+			if reason == "" {
+				reason = imageFallbackReasonResolutionRunnerOnly
+			}
+			skipped = append(skipped, skippedImageRouteStep(rt, reason, "resolution policy uses account runner only"))
 			continue
 		}
 		if policy.SkipCodexToAPIMart && hasAPIMart && imageProviderForRoute(rt) == imagepkg.TraceProviderCodex {

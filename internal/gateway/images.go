@@ -166,9 +166,10 @@ type ImageGenData struct {
 
 // ImageGenResponse OpenAI 兼容返回。
 type ImageGenResponse struct {
-	Created int64          `json:"created"`
-	Data    []ImageGenData `json:"data"`
-	TaskID  string         `json:"task_id,omitempty"`
+	Created    int64          `json:"created"`
+	Data       []ImageGenData `json:"data"`
+	TaskID     string         `json:"task_id,omitempty"`
+	Resolution string         `json:"resolution,omitempty"`
 }
 
 type imageAsyncJob struct {
@@ -342,6 +343,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	}
 	explicitUpscale := requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality)
 	req.Upscale = explicitUpscale
+	applyRequestedImageResolution(&req)
 	logImageRequestOptions("image generation options", &req, explicitUpscale)
 
 	refID := uuid.NewString()
@@ -518,7 +520,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 			RunnerPlans:   cloneImageRunnerFallbackPlans(req.runnerFallbackPlans),
 		})
 		logImageAsyncAccepted(taskID, trace, time.Since(startAt), len(refs), waitForResult)
-		writeAsyncImageSubmit(c, taskID)
+		writeAsyncImageSubmit(c, taskID, req.Resolution)
 		return
 	}
 
@@ -582,9 +584,10 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 
 	// 9) 响应:URL 统一走自家代理,防止 chatgpt.com estuary/content 防盗链
 	out := ImageGenResponse{
-		Created: time.Now().Unix(),
-		TaskID:  taskID,
-		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
+		Created:    time.Now().Unix(),
+		TaskID:     taskID,
+		Resolution: req.Resolution,
+		Data:       make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
 	for i := range res.SignedURLs {
 		d := ImageGenData{URL: imageProxyURLForRequest(c, taskID, i)}
@@ -691,6 +694,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 	}
 	explicitUpscale := requestedUpscaleFromOptions(req.Upscale, req.Resolution, req.ImageSize, req.Scale, req.Quality)
 	imgReq := normalizeChatImageRequest(prompt, req)
+	applyRequestedImageResolution(imgReq)
 	defer func() {
 		if strings.TrimSpace(imgReq.taskID) == "" {
 			return
@@ -941,6 +945,34 @@ func requestedUpscaleFromOptions(values ...string) string {
 	return image.UpscaleNone
 }
 
+func normalizeRequestedImageResolution(req *ImageGenRequest) string {
+	if req == nil {
+		return "1k"
+	}
+	for _, value := range []string{req.Resolution, req.ImageSize, req.Scale, req.Upscale, req.Quality} {
+		if resolution := normalizeImageResolutionToken(value); resolution == "1k" || resolution == "2k" || resolution == "4k" {
+			return resolution
+		}
+		switch imageResolutionLongSide(value) {
+		case 3840:
+			return "4k"
+		case 2048:
+			return "2k"
+		case 1024:
+			return "1k"
+		}
+	}
+	return "1k"
+}
+
+func applyRequestedImageResolution(req *ImageGenRequest) string {
+	resolution := normalizeRequestedImageResolution(req)
+	if req != nil {
+		req.Resolution = resolution
+	}
+	return resolution
+}
+
 func imageRequestForChannel(req *ImageGenRequest, explicitUpscale string) *ImageGenRequest {
 	if req == nil {
 		return nil
@@ -1176,7 +1208,7 @@ type apimartImageSubmitEntry struct {
 	TaskID string `json:"task_id"`
 }
 
-func writeAsyncImageSubmit(c *gin.Context, taskID string) {
+func writeAsyncImageSubmit(c *gin.Context, taskID string, resolution ...string) {
 	if oaierr.WantsAPIMart(c) {
 		c.JSON(asyncImageSubmitStatusCode(), apimartImageSubmitResponse{
 			Code: http.StatusOK,
@@ -1187,11 +1219,11 @@ func writeAsyncImageSubmit(c *gin.Context, taskID string) {
 		})
 		return
 	}
-	c.JSON(asyncImageSubmitStatusCode(), ImageGenResponse{
-		Created: time.Now().Unix(),
-		TaskID:  taskID,
-		Data:    []ImageGenData{},
-	})
+	response := ImageGenResponse{Created: time.Now().Unix(), TaskID: taskID, Data: []ImageGenData{}}
+	if len(resolution) > 0 {
+		response.Resolution = strings.TrimSpace(resolution[0])
+	}
+	c.JSON(asyncImageSubmitStatusCode(), response)
 }
 
 func buildImageTaskPayload(t *image.Task, contexts ...*gin.Context) gin.H {
@@ -1203,6 +1235,7 @@ func buildImageTaskPayload(t *image.Task, contexts ...*gin.Context) gin.H {
 		"finished_at":     nullableUnix(t.FinishedAt),
 		"error":           t.Error,
 		"credit_cost":     t.CreditCost,
+		"resolution":      imageTaskResolution(t),
 		"data":            imageTaskData(t, contexts...),
 	}
 	attachImageTaskErrorFields(out, t.Error, t.Status == image.StatusFailed)
@@ -1218,6 +1251,7 @@ func buildImageTaskCompatPayload(t *image.Task, contexts ...*gin.Context) gin.H 
 		"object":     "image.task",
 		"status":     status,
 		"progress":   progress,
+		"resolution": imageTaskResolution(t),
 		"created_at": t.CreatedAt.Unix(),
 	}
 	if t.FinishedAt != nil && !t.FinishedAt.IsZero() {
@@ -1247,6 +1281,21 @@ func buildImageTaskCompatPayload(t *image.Task, contexts ...*gin.Context) gin.H 
 	}
 	attachImageTaskTraceFields(out, t)
 	return out
+}
+
+func imageTaskResolution(t *image.Task) string {
+	if t == nil {
+		return "1k"
+	}
+	if trace := t.DecodeProviderTrace(); trace != nil {
+		if resolution := normalizeImageResolutionToken(trace.Resolution); resolution == "1k" || resolution == "2k" || resolution == "4k" {
+			return resolution
+		}
+	}
+	if resolution := normalizeImageResolutionToken(t.Upscale); resolution == "1k" || resolution == "2k" || resolution == "4k" {
+		return resolution
+	}
+	return "1k"
 }
 
 func attachImageTaskErrorFields(out gin.H, stored string, include bool) {
@@ -1613,6 +1662,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		Upscale:        explicitUpscale,
 		User:           c.Request.FormValue("user"),
 	}
+	applyRequestedImageResolution(editReq)
 	defer func() {
 		if strings.TrimSpace(editReq.taskID) == "" {
 			return
@@ -1724,9 +1774,10 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	}
 
 	out := ImageGenResponse{
-		Created: time.Now().Unix(),
-		TaskID:  taskID,
-		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
+		Created:    time.Now().Unix(),
+		TaskID:     taskID,
+		Resolution: editReq.Resolution,
+		Data:       make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
 	for i := range res.SignedURLs {
 		d := ImageGenData{URL: imageProxyURLForRequest(c, taskID, i)}
