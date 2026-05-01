@@ -18,17 +18,34 @@ const imageRefMetaPrefix = "meta:"
 // ImageProxyTTL 单条签名 URL 的默认有效期(24h,够前端离线展示一段时间)。
 const ImageProxyTTL = 24 * time.Hour
 
-// imageProxySecret 进程级随机密钥,用于 HMAC 签名图片 URL。
-// 进程重启后旧的签名 URL 全部失效,这是故意的(防止长期有效的 URL 泄漏)。
+// imageProxySecret 用于 HMAC 签名图片 URL。
+// 生产启动时会从服务端稳定密钥派生,避免重启后已返回给下游的 24h URL 立即失效;
+// 若启动阶段未注入密钥,降级为进程级随机值。
 var imageProxySecret []byte
 
 func init() {
+	resetRandomImageProxySecret()
+}
+
+func resetRandomImageProxySecret() {
 	imageProxySecret = make([]byte, 32)
 	if _, err := rand.Read(imageProxySecret); err != nil {
 		for i := range imageProxySecret {
 			imageProxySecret[i] = byte(i*31 + 7)
 		}
 	}
+}
+
+// SetImageProxySigningSecret 使用稳定服务端密钥派生图片代理签名密钥。
+// 返回 false 表示传入为空,调用方可以继续使用进程级随机兜底。
+func SetImageProxySigningSecret(secret string) bool {
+	trimmed := strings.TrimSpace(secret)
+	if trimmed == "" {
+		return false
+	}
+	sum := sha256.Sum256([]byte("gpt2api:image-proxy:v1\x00" + trimmed))
+	imageProxySecret = sum[:]
+	return true
 }
 
 // BuildImageProxyURL 生成代理 URL。返回绝对 path(不含 host),调用方可以直接拼或交给前端同 origin 使用。

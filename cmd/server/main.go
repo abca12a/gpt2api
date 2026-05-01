@@ -71,6 +71,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer logger.Sync()
+	if !image.SetImageProxySigningSecret(cfg.JWT.Secret) {
+		fmt.Fprintln(os.Stderr, "image proxy signing secret is empty")
+		os.Exit(1)
+	}
 
 	log := logger.L()
 	log.Info("boot gpt2api",
