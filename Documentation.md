@@ -99,6 +99,7 @@
 
 ## 最近变更
 
+- 2026-05-01：检查当日日志时发现 `chat-requirements raw body` 会记录上游 requirements token 原文，且 access log 会记录 `/p/img` 的 `sig` / `api_key` 等敏感 query；已改为 requirements 摘要日志和敏感 query 值脱敏，并部署到当前号池。
 - 2026-05-01：已修复图片 runner 遇到上游 `401/403` 不标记账号 `dead` 的问题，并部署到当前号池；部署后已观察到 poll 阶段 `403` 会自动回写账号状态。
 - 2026-05-01：新增 `gpt-image-2 n=4` 结构化诊断输出和 `scripts/gpt-image-2-n4-diagnose.sh`：Runner 并发 part 会记录账号、会话、file_id 数、首次失败和最终 merge 摘要；live 探针输出 `GPT2API_IMAGE_N4_DIAGNOSTIC_JSON`，用于区分单账号执行、结果合并和代理回源阶段。
 - 2026-05-01：已修复 `/p/img` 签名随进程随机密钥重启失效的问题，签名密钥改为从稳定 `JWT_SECRET` 派生；新增重启后签名仍有效、换密钥后旧签名失效的回归测试。

@@ -1,6 +1,9 @@
 package middleware
 
 import (
+	"net/url"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,7 +23,7 @@ func AccessLog() gin.HandlerFunc {
 		fields := []zap.Field{
 			zap.String("method", c.Request.Method),
 			zap.String("path", c.Request.URL.Path),
-			zap.String("query", c.Request.URL.RawQuery),
+			zap.String("query", sanitizeRawQueryForLog(c.Request.URL.RawQuery)),
 			zap.Int("status", c.Writer.Status()),
 			zap.Duration("cost", cost),
 			zap.String("ip", c.ClientIP()),
@@ -47,6 +50,41 @@ func AccessLog() gin.HandlerFunc {
 			log.Info("http", fields...)
 		}
 	}
+}
+
+var sensitiveQueryKeys = []string{
+	"access_token",
+	"api_key",
+	"authorization",
+	"code",
+	"id_token",
+	"key",
+	"refresh_token",
+	"session_token",
+	"sig",
+	"signature",
+	"token",
+}
+
+func sanitizeRawQueryForLog(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return raw
+	}
+	for key := range values {
+		if isSensitiveQueryKey(key) {
+			values[key] = []string{"REDACTED"}
+		}
+	}
+	return values.Encode()
+}
+
+func isSensitiveQueryKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	return slices.Contains(sensitiveQueryKeys, key)
 }
 
 func getString(c *gin.Context, key string) string {
