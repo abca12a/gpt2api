@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/432539/gpt2api/internal/scheduler"
 	"github.com/432539/gpt2api/internal/upstream/chatgpt"
 )
 
@@ -130,6 +131,37 @@ func TestReferenceUploadBadRequestStaysUpstream(t *testing.T) {
 	}
 }
 
+func TestImageRunnerMarksUnauthorizedUpstreamAccountDead(t *testing.T) {
+	for _, status := range []int{401, 403} {
+		fake := &fakeImageScheduler{}
+		r := &Runner{sched: fake}
+		code := r.classifyUpstream(&chatgpt.UpstreamError{Status: status, Message: "unauthorized"})
+
+		r.markAccountFailure(253, code)
+
+		if fake.deadAccountID != 253 {
+			t.Fatalf("status %d marked dead account %d, want 253", status, fake.deadAccountID)
+		}
+		if fake.rateLimitedAccountID != 0 {
+			t.Fatalf("status %d also marked rate limited account %d", status, fake.rateLimitedAccountID)
+		}
+	}
+}
+
+func TestImageRunnerMarksRateLimitedAccountCooling(t *testing.T) {
+	fake := &fakeImageScheduler{}
+	r := &Runner{sched: fake}
+
+	r.markAccountFailure(254, ErrRateLimited)
+
+	if fake.rateLimitedAccountID != 254 {
+		t.Fatalf("rate limited account = %d, want 254", fake.rateLimitedAccountID)
+	}
+	if fake.deadAccountID != 0 {
+		t.Fatalf("rate limited account should not be marked dead, got %d", fake.deadAccountID)
+	}
+}
+
 func TestFilterOutReferenceFileIDsKeepsGeneratedImages(t *testing.T) {
 	referenceSet := referenceUploadFileIDSet([]*chatgpt.UploadedFile{
 		{FileID: "file_reference"},
@@ -162,4 +194,30 @@ func TestShouldSkipPollRequiresGeneratedRefsNotUploadedReferences(t *testing.T) 
 	if !shouldSkipImagePoll([]string{"file_generated"}, referenceSet, 1) {
 		t.Fatal("one generated image should satisfy n=1")
 	}
+}
+
+type fakeImageScheduler struct {
+	deadAccountID        uint64
+	rateLimitedAccountID uint64
+	warnedAccountID      uint64
+}
+
+func (f *fakeImageScheduler) Dispatch(context.Context, string) (*scheduler.Lease, error) {
+	return nil, scheduler.ErrNoAvailable
+}
+
+func (f *fakeImageScheduler) DispatchWithPlan(context.Context, string, string, bool) (*scheduler.Lease, error) {
+	return nil, scheduler.ErrNoAvailable
+}
+
+func (f *fakeImageScheduler) MarkRateLimited(_ context.Context, accountID uint64) {
+	f.rateLimitedAccountID = accountID
+}
+
+func (f *fakeImageScheduler) MarkWarned(_ context.Context, accountID uint64) {
+	f.warnedAccountID = accountID
+}
+
+func (f *fakeImageScheduler) MarkDead(_ context.Context, accountID uint64) {
+	f.deadAccountID = accountID
 }

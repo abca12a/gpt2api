@@ -610,11 +610,12 @@ const (
 
 // PollImageResult 是图片轮询的完整诊断结果。
 type PollImageResult struct {
-	Status        PollStatus
-	FileIDs       []string
-	SedimentIDs   []string
-	AssistantText string
-	LastError     string
+	Status         PollStatus
+	FileIDs        []string
+	SedimentIDs    []string
+	AssistantText  string
+	LastError      string
+	LastHTTPStatus int
 }
 
 // PollConversationForImages 轮询会话直到图片可用。
@@ -663,13 +664,18 @@ func (c *Client) PollConversationForImagesDetailed(ctx context.Context, convID s
 		mapping, err := c.getMappingRaw(ctx, convID)
 		if err != nil {
 			lastError = err.Error()
-			if ue, ok := err.(*UpstreamError); ok && ue.Status == 429 {
-				consecutive429++
-				if consecutive429 >= 3 {
-					return PollImageResult{Status: PollStatusError, AssistantText: assistantText, LastError: lastError}
+			if ue, ok := err.(*UpstreamError); ok {
+				if ue.IsUnauthorized() {
+					return PollImageResult{Status: PollStatusError, AssistantText: assistantText, LastError: lastError, LastHTTPStatus: ue.Status}
 				}
-				sleep(ctx, 10*time.Second)
-				continue
+				if ue.Status == 429 {
+					consecutive429++
+					if consecutive429 >= 3 {
+						return PollImageResult{Status: PollStatusError, AssistantText: assistantText, LastError: lastError, LastHTTPStatus: ue.Status}
+					}
+					sleep(ctx, 10*time.Second)
+					continue
+				}
 			}
 			sleep(ctx, opt.Interval)
 			continue

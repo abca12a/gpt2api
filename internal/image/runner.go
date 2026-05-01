@@ -22,6 +22,14 @@ type QuotaDecrementor interface {
 	DecrQuota(ctx context.Context, accountID uint64, n int) error
 }
 
+type accountScheduler interface {
+	Dispatch(ctx context.Context, modelType string) (*scheduler.Lease, error)
+	DispatchWithPlan(ctx context.Context, modelType, planType string, require bool) (*scheduler.Lease, error)
+	MarkRateLimited(ctx context.Context, accountID uint64)
+	MarkWarned(ctx context.Context, accountID uint64)
+	MarkDead(ctx context.Context, accountID uint64)
+}
+
 // Runner 单次/多次生图的执行器。封装完整的 chatgpt.com 协议链路:
 //
 //	ChatRequirements → PrepareFConversation → StreamFConversation (SSE) →
@@ -30,7 +38,7 @@ type QuotaDecrementor interface {
 // IMG2 已正式上线,不再做"灰度命中判定 / preview_only 换账号重试"这些节流操作,
 // 拿到任意 file-service / sediment 引用即算成功,以速度和效率优先。
 type Runner struct {
-	sched     *scheduler.Scheduler
+	sched     accountScheduler
 	dao       *DAO
 	quotaDecr QuotaDecrementor // 生图成功后立即扣减账号额度(可空,空时跳过)
 
@@ -414,12 +422,14 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	submitStart := time.Now()
 	cr, err := cli.ChatRequirementsV2(ctx)
 	if err != nil {
+		code := r.classifyUpstream(err)
+		r.markAccountFailure(lease.Account.ID, code)
 		if opt.Trace != nil {
 			opt.Trace.AddSubmitDuration(time.Since(submitStart))
 			opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
 			r.persistTrace(opt)
 		}
-		return false, r.classifyUpstream(err), err
+		return false, code, err
 	}
 	var proofToken string
 	if cr.Proofofwork.Required {
@@ -473,7 +483,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 				logger.L().Warn("image runner upload reference failed",
 					zap.Int("idx", idx), zap.Error(err))
 				if ue, ok := err.(*chatgpt.UpstreamError); ok && ue.IsRateLimited() {
-					r.sched.MarkRateLimited(context.Background(), lease.Account.ID)
+					r.markAccountFailure(lease.Account.ID, ErrRateLimited)
 					if opt.Trace != nil {
 						opt.Trace.AddSubmitDuration(time.Since(submitStart))
 						opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
@@ -482,12 +492,14 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 					return false, ErrRateLimited, err
 				}
 				uploadErr := fmt.Errorf("upload reference %d: %w", idx, err)
+				code := classifyReferenceUploadError(uploadErr)
+				r.markAccountFailure(lease.Account.ID, code)
 				if opt.Trace != nil {
 					opt.Trace.AddSubmitDuration(time.Since(submitStart))
 					opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
 					r.persistTrace(opt)
 				}
-				return false, classifyReferenceUploadError(uploadErr), uploadErr
+				return false, code, uploadErr
 			}
 			refs = append(refs, up)
 		}
@@ -533,23 +545,24 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	// Prepare(conduit_token;拿不到也能降级继续)
 	if ct, err := cli.PrepareFConversation(ctx, convOpt); err == nil {
 		convOpt.ConduitToken = ct
-	} else if ue, ok := err.(*chatgpt.UpstreamError); ok && ue.IsRateLimited() {
-		r.sched.MarkRateLimited(context.Background(), lease.Account.ID)
-		if opt.Trace != nil {
-			opt.Trace.AddSubmitDuration(time.Since(submitStart))
-			opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
-			r.persistTrace(opt)
+	} else if ue, ok := err.(*chatgpt.UpstreamError); ok {
+		if ue.IsRateLimited() || ue.IsUnauthorized() {
+			code := r.classifyUpstream(err)
+			r.markAccountFailure(lease.Account.ID, code)
+			if opt.Trace != nil {
+				opt.Trace.AddSubmitDuration(time.Since(submitStart))
+				opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
+				r.persistTrace(opt)
+			}
+			return false, code, err
 		}
-		return false, ErrRateLimited, err
 	}
 
 	// f/conversation SSE
 	stream, err := cli.StreamFConversation(ctx, convOpt)
 	if err != nil {
 		code := r.classifyUpstream(err)
-		if code == ErrRateLimited {
-			r.sched.MarkRateLimited(context.Background(), lease.Account.ID)
-		}
+		r.markAccountFailure(lease.Account.ID, code)
 		if opt.Trace != nil {
 			opt.Trace.AddSubmitDuration(time.Since(submitStart))
 			opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
@@ -707,11 +720,13 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 			}
 			return false, imageFailureCodeFromAssistant(ErrPollTimeout, assistantText), imageFailureError("poll timeout without any image", assistantText, pollResult.LastError)
 		default:
+			code := imagePollFailureCode(pollResult)
+			r.markAccountFailure(lease.Account.ID, code)
 			if opt.Trace != nil {
 				opt.Trace.FinalizeTiming(StatusFailed, time.Since(start))
 				r.persistTrace(opt)
 			}
-			return false, imageFailureCodeFromAssistant(ErrUpstream, assistantText), imageFailureError("poll error", assistantText, pollResult.LastError)
+			return false, imageFailureCodeFromAssistant(code, assistantText), imageFailureError("poll error", assistantText, pollResult.LastError)
 		}
 	}
 
@@ -740,6 +755,7 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		if err != nil {
 			logger.L().Warn("image runner download url failed",
 				zap.String("ref", ref), zap.Error(err))
+			r.markAccountFailure(lease.Account.ID, r.classifyUpstream(err))
 			continue
 		}
 		signedURLs = append(signedURLs, url)
@@ -998,6 +1014,28 @@ func (r *Runner) classifyUpstream(err error) string {
 		strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "broken pipe") {
 		return ErrNetworkTransient
+	}
+	return ErrUpstream
+}
+
+func (r *Runner) markAccountFailure(accountID uint64, code string) {
+	if r == nil || r.sched == nil || accountID == 0 {
+		return
+	}
+	switch code {
+	case ErrAuthRequired:
+		r.sched.MarkDead(context.Background(), accountID)
+	case ErrRateLimited:
+		r.sched.MarkRateLimited(context.Background(), accountID)
+	}
+}
+
+func imagePollFailureCode(result chatgpt.PollImageResult) string {
+	switch result.LastHTTPStatus {
+	case 401, 403:
+		return ErrAuthRequired
+	case 429:
+		return ErrRateLimited
 	}
 	return ErrUpstream
 }
