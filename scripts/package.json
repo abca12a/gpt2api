@@ -9,6 +9,7 @@
   "scripts": {
     "smoke": "node smoke.mjs",
     "smoke:docker": "node smoke.mjs --base http://localhost:8080",
-    "gpt-image-2:e2e": "node gpt-image-2-single-e2e.mjs"
+    "gpt-image-2:e2e": "node gpt-image-2-single-e2e.mjs",
+    "test": "node --test *.test.mjs"
   }
 }

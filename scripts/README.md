@@ -85,7 +85,8 @@ scripts/check-codex-auth-plans.sh
 - 号池任务状态、`resolution`、`provider_trace`、最终 provider、fallback、timing。
 - 号池本机 `image_tasks` 关键字段与最近容器日志。
 - 下游后端 `tasks.private_data.billing_context`、`quota`、`upstream_task_id`。
-- 前端 `/api/pricing` 是否返回 `resolution_options`，以及展示价是否可用于核对。
+- 前端 `/api/pricing` 是否返回 `resolution_options`，以及当前展示价。
+- 可选按订单时点核价，区分“价格漂移”“路由异常”和 `billing_context` 真不一致。
 
 ### 发起新请求并轮询
 
@@ -118,9 +119,21 @@ node scripts/gpt-image-2-single-e2e.mjs \
   --json-out /tmp/gpt-image-2-downstream.json
 ```
 
+复核老单时，显式传入这些订单创建时应使用的分档单价，避免后续改价导致旧 `billing_context` 被误报 FAIL：
+
+```bash
+node scripts/gpt-image-2-single-e2e.mjs \
+  --downstream-task-ids task_xxx,task_yyy,task_zzz \
+  --order-prices 1k=0.06,2k=0.10,4k=0.20 \
+  --json-out /tmp/gpt-image-2-old-orders.json
+```
+
+`--order-prices` 也可以写成 JSON，例如 `--order-prices '{"1k":0,"2k":0.06,"4k":0.12}'`。提供该参数后，脚本会用它核对 `billing_context.model_price`；当前前端展示价只用于标记 `price_drift`。未提供该参数时，脚本默认按当前前端展示价核对，适合验收新单。
+
 ### 常用参数
 
 - `--frontend-pricing-urls`：逗号分隔，默认检查 `https://dimilinks.com/api/pricing` 与 `https://preview.dimilinks.com/api/pricing`。
+- `--order-prices`：逗号分隔或 JSON 格式的下单时应价，例如 `1k=0.06,2k=0.10,4k=0.20`；也可用环境变量 `GPT_IMAGE2_ORDER_PRICES`。
 - `--skip-local-db true`：不查本机 `gpt2api-mysql`。
 - `--skip-logs true`：不抓 `gpt2api-server` 最近 4 小时日志。
 - `--skip-downstream-db true`：不通过 SSH 查下游 `new-api-postgres-local`。

@@ -6,6 +6,7 @@
  * - 用 API Key 发起 1k/2k/4k 单张异步请求并轮询终态。
  * - 复用已有号池 task_id / 下游 task_id 做核对。
  * - 汇总 resolution、provider_trace、任务状态、号池关键日志、下游 billing_context、前端 pricing 展示。
+ * - 支持 --order-prices 按下单时应价复核老单，并区分价格漂移、路由异常和 billing_context 真不一致。
  */
 
 import { argv, env, exit } from 'node:process'
@@ -13,6 +14,8 @@ import { writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const execFileAsync = promisify(execFile)
 
@@ -27,6 +30,7 @@ const N = clampInt(args.n, 1, 1, 4)
 const POLL_INTERVAL_MS = clampInt(args['poll-interval-sec'], 5, 1, 60) * 1000
 const TIMEOUT_MS = clampInt(args['timeout-sec'], 720, 30, 1800) * 1000
 const FRONTEND_PRICING_URLS = csv(args['frontend-pricing-urls'] || env.GPT_IMAGE2_PRICING_URLS || 'https://dimilinks.com/api/pricing,https://preview.dimilinks.com/api/pricing')
+const ORDER_PRICES_RAW = args['order-prices'] || args['order-price-map'] || env.GPT_IMAGE2_ORDER_PRICES || env.GPT_IMAGE2_ORDER_PRICE_MAP || ''
 const TASK_IDS = csv(args['task-ids'] || '')
 const DOWNSTREAM_TASK_IDS = csv(args['downstream-task-ids'] || '')
 const JSON_OUT = args['json-out'] || ''
@@ -44,10 +48,12 @@ const SERVER_CONTAINER = args['server-container'] || env.GPT2API_SERVER_CONTAINE
 const defaultUnitPrices = { '1k': 0, '2k': 0.06, '4k': 0.12 }
 const terminalStatuses = new Set(['success', 'failed', 'completed', 'cancelled', 'canceled'])
 
-main().catch((err) => {
-  console.error(`\n[FATAL] ${err.stack || err.message || err}`)
-  exit(2)
-})
+if (isDirectRun()) {
+  main().catch((err) => {
+    console.error(`\n[FATAL] ${err.stack || err.message || err}`)
+    exit(2)
+  })
+}
 
 async function main() {
   const startedAt = new Date()
@@ -57,6 +63,7 @@ async function main() {
     base: BASE,
     request: { model: 'gpt-image-2', resolutions: RESOLUTIONS, n: N, size: SIZE },
     frontend_pricing: [],
+    pricing: null,
     downstream_tasks: [],
     cases: [],
     summary: { pass: 0, warn: 0, fail: 0 },
@@ -68,7 +75,10 @@ async function main() {
   console.log(`mode: ${API_KEY ? 'submit/poll' : 'inspect only'}${TASK_IDS.length ? ' + existing task ids' : ''}`)
 
   report.frontend_pricing = await fetchFrontendPricing(FRONTEND_PRICING_URLS)
-  const pricing = choosePricingMap(report.frontend_pricing)
+  const currentPricing = choosePricingMap(report.frontend_pricing)
+  const orderPricing = chooseOrderPricing(ORDER_PRICES_RAW, currentPricing)
+  report.pricing = { current: currentPricing, order: orderPricing }
+  console.log(`pricing: 当前展示价=${currentPricing.ok ? currentPricing.source : 'fallback/default'} / 下单应价=${orderPricing.explicit ? '--order-prices' : '当前展示价兜底'}`)
 
   if (DOWNSTREAM_TASK_IDS.length && !SKIP_DOWNSTREAM_DB) {
     report.downstream_tasks = await queryDownstreamTasks(DOWNSTREAM_TASK_IDS)
@@ -125,7 +135,7 @@ async function main() {
   }
 
   for (const c of report.cases) {
-    c.checks = buildChecks(c, report.downstream_tasks, pricing)
+    c.checks = buildChecks(c, report.downstream_tasks, report.pricing)
     for (const check of c.checks) {
       report.summary[check.level]++
     }
@@ -287,6 +297,64 @@ function choosePricingMap(frontendPricing) {
   return { map, source: hit?.url || '', ok: Boolean(hit) }
 }
 
+function chooseOrderPricing(raw, currentPricing) {
+  const parsed = parsePriceMap(raw)
+  if (parsed.ok) {
+    return {
+      map: { ...currentPricing.map, ...parsed.map },
+      source: '--order-prices',
+      ok: true,
+      explicit: true,
+      provided: true,
+    }
+  }
+  return {
+    map: { ...currentPricing.map },
+    source: currentPricing.source || 'current frontend pricing',
+    ok: currentPricing.ok,
+    explicit: false,
+    provided: Boolean(String(raw || '').trim()),
+    error: parsed.error || '',
+  }
+}
+
+function parsePriceMap(raw) {
+  const text = String(raw || '').trim()
+  if (!text) return { ok: false, map: {}, error: '' }
+
+  const map = {}
+  try {
+    const parsed = JSON.parse(text)
+    const entries = Array.isArray(parsed)
+      ? parsed.map((item) => [item?.resolution || item?.key || item?.name, item?.model_price ?? item?.price ?? item?.value])
+      : Object.entries(parsed)
+    for (const [key, value] of entries) {
+      const resolution = normalizeResolution(key)
+      const price = Number(value)
+      if (resolution && Number.isFinite(price)) map[resolution] = price
+    }
+  } catch {
+    const parts = text.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
+    for (const part of parts) {
+      const match = part.match(/^([^:=]+)\s*[:=]\s*([+-]?\d+(?:\.\d+)?)$/)
+      if (!match) continue
+      const resolution = normalizeResolution(match[1])
+      const price = Number(match[2])
+      if (resolution && Number.isFinite(price)) map[resolution] = price
+    }
+  }
+
+  const missing = ['1k', '2k', '4k'].filter((resolution) => map[resolution] === undefined)
+  if (missing.length) {
+    return {
+      ok: false,
+      map,
+      error: `--order-prices 缺少 ${missing.join(', ')}，格式示例: 1k=0.06,2k=0.10,4k=0.20`,
+    }
+  }
+  return { ok: true, map, error: '' }
+}
+
 async function queryLocalImageTasks(taskIDs) {
   const ids = cleanIDs(taskIDs)
   if (!ids.length) return []
@@ -412,14 +480,21 @@ function pickUpstreamTaskID(row) {
 
 function buildChecks(c, downstreamRows, pricing) {
   const checks = []
-  const pricingMap = pricing.map
+  const currentPricing = pricing.current || choosePricingMap([])
+  const orderPricing = pricing.order || chooseOrderPricing('', currentPricing)
+  const currentPricingMap = currentPricing.map
+  const orderPricingMap = orderPricing.map
   const requested = normalizeResolution(c.requested_resolution)
   const actualResolution = normalizeResolution(c.resolution || c.provider_trace?.resolution)
   const taskID = c.task_id || c.submitted_task_id
   const downstream = downstreamRows.find((row) => row.upstream_task_id === taskID || row.task_id === taskID)
   const billing = downstream?.billing_context || null
-  const expectedUnit = pricingMap[requested] ?? defaultUnitPrices[requested]
-  const expectedTotal = roundMoney(expectedUnit * (c.local_db?.n || N))
+  const expectedUnit = orderPricing.provided && !orderPricing.explicit
+    ? undefined
+    : (orderPricingMap[requested] ?? defaultUnitPrices[requested])
+  const currentUnit = currentPricingMap[requested] ?? defaultUnitPrices[requested]
+  const imageCount = c.local_db?.n || downstream?.billing_context?.image_count || downstream?.result_count || N
+  const expectedTotal = Number.isFinite(expectedUnit) ? roundMoney(expectedUnit * imageCount) : null
 
   addCheck(checks, actualResolution === requested, 'resolution', `请求 ${requested || '-'} / 号池回显 ${actualResolution || '-'}`)
 
@@ -432,7 +507,9 @@ function buildChecks(c, downstreamRows, pricing) {
   const provider = c.provider || c.provider_trace?.final?.provider || ''
   if (requested === '1k') {
     const ok = provider === 'free_runner' || provider === 'account_runner' || /Free Runner|Account Runner/i.test(c.provider_trace_summary || '')
-    addCheck(checks, ok, 'provider_route', `1k 实际 provider=${provider || '-'} trace=${c.provider_trace_summary || '-'}`)
+    addCheck(checks, ok, ok ? 'provider_route' : 'route_anomaly', ok
+      ? `1k 路由正常: provider=${provider || '-'} trace=${c.provider_trace_summary || '-'}`
+      : `路由异常: 1k 实际 provider=${provider || '-'} trace=${c.provider_trace_summary || '-'}`)
   } else if (requested === '2k' || requested === '4k') {
     const externalOK = provider === 'codex' || provider === 'apimart'
     const fallbackOK = (provider === 'free_runner' || provider === 'account_runner') && c.fallback_triggered
@@ -441,7 +518,7 @@ function buildChecks(c, downstreamRows, pricing) {
     } else if (fallbackOK) {
       checks.push({ level: 'warn', name: 'provider_route', message: `${requested} 外置失败后兜底到 ${provider}，按当前业务语义可接受，但需确认交付质量` })
     } else {
-      checks.push({ level: 'fail', name: 'provider_route', message: `${requested} provider=${provider || '-'}，未看到 Codex/APIMart 或明确 fallback` })
+      checks.push({ level: 'fail', name: 'route_anomaly', message: `路由异常: ${requested} provider=${provider || '-'}，未看到 Codex/APIMart 或明确 fallback` })
     }
   }
 
@@ -450,25 +527,68 @@ function buildChecks(c, downstreamRows, pricing) {
     addCheck(checks, billResolution === requested, 'billing_context.resolution', `billing_context.resolution=${billResolution || '-'}`)
     const modelPrice = Number(billing.model_price ?? billing.price ?? billing.unit_price)
     if (Number.isFinite(modelPrice)) {
-      const ok = Math.abs(modelPrice - expectedUnit) < 0.000001
-      addCheck(checks, ok, 'billing_context.model_price', `unit=${modelPrice}, expected=${expectedUnit}`)
+      const ok = Number.isFinite(expectedUnit) && Math.abs(modelPrice - expectedUnit) < 0.000001
+      if (orderPricing.provided && !orderPricing.explicit) {
+        checks.push({
+          level: 'warn',
+          name: 'billing_context.model_price',
+          message: `--order-prices 无效，跳过 billing_context.model_price 真伪判定: unit=${modelPrice}`,
+        })
+      } else {
+        addCheck(
+          checks,
+          ok,
+          ok ? 'billing_context.model_price' : 'billing_context_mismatch',
+          ok
+            ? `下单应价一致: unit=${modelPrice}, expected_order=${expectedUnit}${orderPricing.explicit ? ' (--order-prices)' : ' (当前展示价)'}`
+            : `billing_context 真不一致: unit=${modelPrice}, expected_order=${expectedUnit}${orderPricing.explicit ? ' (--order-prices)' : ' (当前展示价；复核老单请传 --order-prices)'}`
+        )
+      }
+      if (orderPricing.explicit && Math.abs(modelPrice - currentUnit) >= 0.000001) {
+        checks.push({
+          level: 'warn',
+          name: 'price_drift',
+          message: `价格漂移: billing_context=${modelPrice}, 当前前端展示价=${currentUnit}, resolution=${requested || '-'}`,
+        })
+      } else if (orderPricing.explicit) {
+        checks.push({
+          level: 'pass',
+          name: 'price_drift',
+          message: `未发现价格漂移: billing_context=${modelPrice}, 当前前端展示价=${currentUnit}`,
+        })
+      }
     } else {
       checks.push({ level: 'warn', name: 'billing_context.model_price', message: 'billing_context 未看到 model_price/unit_price 字段' })
     }
-    checks.push({ level: 'pass', name: 'billing_context.present', message: `下游任务 ${downstream.task_id} 已固化 billing_context，预期单张总价=${expectedTotal}` })
+    checks.push({
+      level: 'pass',
+      name: 'billing_context.present',
+      message: expectedTotal === null
+        ? `下游任务 ${downstream.task_id} 已固化 billing_context，但 --order-prices 无效，未计算下单应价总计`
+        : `下游任务 ${downstream.task_id} 已固化 billing_context，下单应价总计=${expectedTotal} (unit=${expectedUnit}, n=${imageCount})`,
+    })
   } else if (DOWNSTREAM_TASK_IDS.length) {
     checks.push({ level: 'fail', name: 'billing_context.present', message: `下游任务未查到 billing_context: ${downstream?.query_error || 'private_data 缺失或无 upstream 映射'}` })
   } else {
     checks.push({ level: 'warn', name: 'billing_context.present', message: '未传 --downstream-task-ids，跳过后端 billing_context 核对' })
   }
 
-  const pricingOK = pricing.ok
+  const currentPricingOK = currentPricing.ok
   checks.push({
-    level: pricingOK ? 'pass' : 'warn',
-    name: 'frontend_pricing',
-    message: pricingOK
-      ? `前端 pricing 可读(${pricing.source}): 1k=${pricingMap['1k']} 2k=${pricingMap['2k']} 4k=${pricingMap['4k']}`
-      : `前端 pricing 未读到 resolution_options，脚本按默认值核对: 1k=${pricingMap['1k']} 2k=${pricingMap['2k']} 4k=${pricingMap['4k']}`,
+    level: currentPricingOK ? 'pass' : 'warn',
+    name: 'frontend_pricing.current',
+    message: currentPricingOK
+      ? `当前前端展示价可读(${currentPricing.source}): 1k=${currentPricingMap['1k']} 2k=${currentPricingMap['2k']} 4k=${currentPricingMap['4k']}`
+      : `当前前端展示价未读到 resolution_options，脚本按默认值展示: 1k=${currentPricingMap['1k']} 2k=${currentPricingMap['2k']} 4k=${currentPricingMap['4k']}`,
+  })
+  checks.push({
+    level: orderPricing.explicit ? 'pass' : orderPricing.provided ? 'fail' : 'warn',
+    name: 'pricing.order_time',
+    message: orderPricing.explicit
+      ? `下单时应价(--order-prices): 1k=${orderPricingMap['1k']} 2k=${orderPricingMap['2k']} 4k=${orderPricingMap['4k']}`
+      : orderPricing.provided
+        ? `--order-prices 无效，不能可靠复核下单时应价；${orderPricing.error || '请检查格式'}`
+        : `未传 --order-prices，下单应价暂用当前展示价；复核老单建议显式传历史价${orderPricing.error ? `；${orderPricing.error}` : ''}`,
   })
 
   if (c.local_db) {
@@ -495,6 +615,14 @@ function printReport(report) {
       ? p.resolution_options.map((o) => `${o.resolution || o.value}:${o.model_price ?? o.price}`).join(' ')
       : '无 resolution_options'
     console.log(`${p.ok ? 'PASS' : 'WARN'} ${p.url} ${p.status || ''} ${options}${p.error ? ` error=${p.error}` : ''}`)
+  }
+
+  if (report.pricing) {
+    printHeader('核价模式')
+    const currentMap = report.pricing.current?.map || {}
+    const orderMap = report.pricing.order?.map || {}
+    console.log(`当前前端展示价: 1k=${currentMap['1k']} 2k=${currentMap['2k']} 4k=${currentMap['4k']} source=${report.pricing.current?.source || '-'}`)
+    console.log(`下单时应价: 1k=${orderMap['1k']} 2k=${orderMap['2k']} 4k=${orderMap['4k']} source=${report.pricing.order?.source || '-'} explicit=${report.pricing.order?.explicit ? 'yes' : 'no'}`)
   }
 
   if (report.downstream_tasks.length) {
@@ -640,3 +768,13 @@ function downstreamSSHArgs() {
 }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)) }
 function printHeader(title) { console.log(`\n=== ${title} ===`) }
+function isDirectRun() {
+  return Boolean(argv[1]) && resolve(fileURLToPath(import.meta.url)) === resolve(argv[1])
+}
+
+export {
+  buildChecks,
+  chooseOrderPricing,
+  choosePricingMap,
+  parsePriceMap,
+}
