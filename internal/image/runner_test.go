@@ -3,6 +3,7 @@ package image
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -69,6 +70,74 @@ func TestRunParallelRetriesSubImageOnPollTimeout(t *testing.T) {
 	}
 	if result.Status != StatusSuccess || len(result.FileIDs) != 1 {
 		t.Fatalf("unexpected result: %#v", result)
+	}
+	if len(result.Parts) != 1 {
+		t.Fatalf("parts = %#v, want one diagnostic part", result.Parts)
+	}
+	part := result.Parts[0]
+	if part.Part != 1 || !part.OK || part.AccountID != 42 || part.ConversationID != "conv_1" || part.FileIDCount != 1 || part.SignedURLCount != 1 {
+		t.Fatalf("unexpected part diagnostic: %#v", part)
+	}
+	if part.FirstFailure == nil || part.FirstFailure.ErrorCode != ErrPollTimeout {
+		t.Fatalf("first failure = %#v, want poll timeout", part.FirstFailure)
+	}
+	if result.Merge == nil || !result.Merge.Complete || result.Merge.MergedFileIDCount != 1 || result.Merge.SucceededParts != 1 {
+		t.Fatalf("unexpected merge diagnostic: %#v", result.Merge)
+	}
+}
+
+func TestRunParallelDiagnosticsExposePartialMerge(t *testing.T) {
+	var calls int32
+	r := &Runner{
+		runOnceHook: func(ctx context.Context, opt RunOptions, result *RunResult) (bool, string, error) {
+			call := atomic.AddInt32(&calls, 1)
+			if call == 1 {
+				result.AccountID = 101
+				result.AccountPlanType = "free"
+				result.ConversationID = "conv_success"
+				result.FileIDs = []string{"file_success"}
+				result.SignedURLs = []string{"https://example.test/success.png"}
+				return true, "", nil
+			}
+			result.AccountID = 202
+			result.AccountPlanType = "free"
+			result.ErrorMessage = fmt.Sprintf("part %d failed", call)
+			return false, ErrUpstream, errors.New(result.ErrorMessage)
+		},
+	}
+	result := &RunResult{Status: StatusFailed, ErrorCode: ErrUnknown}
+	r.runParallel(context.Background(), RunOptions{
+		TaskID:            "img_partial",
+		N:                 2,
+		MaxAttempts:       1,
+		PerAttemptTimeout: time.Second,
+	}, time.Now(), result)
+
+	if result.Status != StatusSuccess {
+		t.Fatalf("status = %q, want partial success", result.Status)
+	}
+	if len(result.Parts) != 2 {
+		t.Fatalf("parts = %#v, want two diagnostics", result.Parts)
+	}
+	var okParts, failedParts int
+	for _, part := range result.Parts {
+		if part.OK {
+			okParts++
+			if part.AccountID != 101 || part.ConversationID != "conv_success" || part.FileIDCount != 1 {
+				t.Fatalf("unexpected success part: %#v", part)
+			}
+			continue
+		}
+		failedParts++
+		if part.AccountID != 202 || part.FirstFailure == nil || part.FirstFailure.ErrorCode != ErrUpstream || part.FinalErrorCode != ErrUpstream {
+			t.Fatalf("unexpected failed part: %#v", part)
+		}
+	}
+	if okParts != 1 || failedParts != 1 {
+		t.Fatalf("ok parts=%d failed parts=%d, want 1/1", okParts, failedParts)
+	}
+	if result.Merge == nil || result.Merge.Complete || result.Merge.MissingImages != 1 || result.Merge.MergedFileIDCount != 1 || result.Merge.FailedParts != 1 {
+		t.Fatalf("unexpected merge diagnostic: %#v", result.Merge)
 	}
 }
 

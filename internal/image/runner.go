@@ -92,6 +92,47 @@ type RunResult struct {
 	ErrorMessage    string
 	Attempts        int // 跨账号尝试次数(runOnce 次数)
 	DurationMs      int64
+	Parts           []RunPartDiagnostic `json:"parts,omitempty"`
+	Merge           *RunMergeDiagnostic `json:"merge,omitempty"`
+}
+
+type RunPartFailure struct {
+	Attempt         int    `json:"attempt"`
+	AccountID       uint64 `json:"account_id,omitempty"`
+	AccountPlanType string `json:"account_plan_type,omitempty"`
+	ConversationID  string `json:"conversation_id,omitempty"`
+	ErrorCode       string `json:"error_code,omitempty"`
+	ErrorMessage    string `json:"error_message,omitempty"`
+}
+
+type RunPartDiagnostic struct {
+	Part            int             `json:"part"`
+	Requested       int             `json:"requested"`
+	OK              bool            `json:"ok"`
+	AccountID       uint64          `json:"account_id,omitempty"`
+	AccountPlanType string          `json:"account_plan_type,omitempty"`
+	ConversationID  string          `json:"conversation_id,omitempty"`
+	FileIDCount     int             `json:"file_id_count"`
+	SignedURLCount  int             `json:"signed_url_count"`
+	FileIDs         []string        `json:"file_ids,omitempty"`
+	Attempts        int             `json:"attempts"`
+	DurationMs      int64           `json:"duration_ms"`
+	FirstFailure    *RunPartFailure `json:"first_failure,omitempty"`
+	FinalErrorCode  string          `json:"final_error_code,omitempty"`
+	FinalError      string          `json:"final_error,omitempty"`
+}
+
+type RunMergeDiagnostic struct {
+	Requested         int    `json:"requested"`
+	SucceededParts    int    `json:"succeeded_parts"`
+	FailedParts       int    `json:"failed_parts"`
+	MergedFileIDCount int    `json:"merged_file_id_count"`
+	MergedSignedURLs  int    `json:"merged_signed_url_count"`
+	Complete          bool   `json:"complete"`
+	MissingImages     int    `json:"missing_images,omitempty"`
+	Status            string `json:"status"`
+	ErrorCode         string `json:"error_code,omitempty"`
+	ErrorMessage      string `json:"error_message,omitempty"`
 }
 
 // Run 执行生图。会同步阻塞直到完成/失败;调用方自行做超时控制(传 ctx)。
@@ -200,6 +241,7 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 // 各 goroutine 不写 DAO(TaskID 置空),写库由外层 Run 统一完成。
 func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Time, result *RunResult) {
 	type subResult struct {
+		part       int
 		ok         bool
 		fileIDs    []string
 		signedURLs []string
@@ -209,6 +251,7 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 		errCode    string
 		errMsg     string
 		attempts   int
+		diagnostic RunPartDiagnostic
 	}
 
 	n := opt.N
@@ -229,18 +272,28 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
+		part := i + 1
 		wg.Add(1)
-		go func() {
+		go func(part int) {
 			defer wg.Done()
+			partStart := time.Now()
 			sub := &RunResult{Status: StatusFailed, ErrorCode: ErrUnknown}
 			var ok bool
 			var status string
 			var err error
+			var firstFailure *RunPartFailure
 			attempt := 0
 			for attempt = 1; attempt <= maxAttempts; attempt++ {
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					status = ErrUnknown
 					err = ctxErr
+					if firstFailure == nil {
+						firstFailure = &RunPartFailure{
+							Attempt:      attempt,
+							ErrorCode:    status,
+							ErrorMessage: ctxErr.Error(),
+						}
+					}
 					break
 				}
 				attemptCtx, cancel := context.WithTimeout(ctx, perAttemptTimeout)
@@ -252,11 +305,23 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 				if status == "" {
 					status = sub.ErrorCode
 				}
+				if firstFailure == nil {
+					firstFailure = &RunPartFailure{
+						Attempt:         attempt,
+						AccountID:       sub.AccountID,
+						AccountPlanType: sub.AccountPlanType,
+						ConversationID:  sub.ConversationID,
+						ErrorCode:       status,
+						ErrorMessage:    runAttemptErrorMessage(err, sub),
+					}
+				}
 				if attempt >= maxAttempts || !isRetryableImageStatus(status) {
 					break
 				}
 				logger.L().Info("image runner parallel retry with another account",
 					zap.String("task_id", opt.TaskID),
+					zap.Int("part", part),
+					zap.Int("requested", n),
 					zap.String("reason", status),
 					zap.Int("attempt", attempt))
 			}
@@ -267,7 +332,58 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 			if !ok && status == "" {
 				status = sub.ErrorCode
 			}
+			diag := RunPartDiagnostic{
+				Part:            part,
+				Requested:       n,
+				OK:              ok,
+				AccountID:       sub.AccountID,
+				AccountPlanType: sub.AccountPlanType,
+				ConversationID:  sub.ConversationID,
+				FileIDCount:     len(sub.FileIDs),
+				SignedURLCount:  len(sub.SignedURLs),
+				FileIDs:         append([]string(nil), sub.FileIDs...),
+				Attempts:        attempt,
+				DurationMs:      time.Since(partStart).Milliseconds(),
+				FirstFailure:    firstFailure,
+			}
+			if ok {
+				fields := []zap.Field{
+					zap.String("task_id", opt.TaskID),
+					zap.Int("part", part),
+					zap.Int("requested", n),
+					zap.Uint64("account_id", sub.AccountID),
+					zap.String("plan_type", sub.AccountPlanType),
+					zap.String("conv_id", sub.ConversationID),
+					zap.Int("attempts", attempt),
+					zap.Int("file_ids", len(sub.FileIDs)),
+					zap.Int("signed_urls", len(sub.SignedURLs)),
+					zap.Duration("duration", time.Since(partStart)),
+				}
+				if firstFailure != nil {
+					fields = append(fields,
+						zap.String("first_failure_code", firstFailure.ErrorCode),
+						zap.String("first_failure_message", firstFailure.ErrorMessage),
+					)
+				}
+				logger.L().Info("image runner parallel part done", fields...)
+			} else {
+				diag.FinalErrorCode = status
+				diag.FinalError = msg
+				logger.L().Warn("image runner parallel part failed",
+					zap.String("task_id", opt.TaskID),
+					zap.Int("part", part),
+					zap.Int("requested", n),
+					zap.Uint64("account_id", sub.AccountID),
+					zap.String("plan_type", sub.AccountPlanType),
+					zap.String("conv_id", sub.ConversationID),
+					zap.Int("attempts", attempt),
+					zap.String("error_code", status),
+					zap.String("error_message", msg),
+					zap.Duration("duration", time.Since(partStart)),
+				)
+			}
 			ch <- subResult{
+				part:       part,
 				ok:         ok,
 				fileIDs:    sub.FileIDs,
 				signedURLs: sub.SignedURLs,
@@ -277,8 +393,9 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 				errCode:    status,
 				errMsg:     msg,
 				attempts:   attempt,
+				diagnostic: diag,
 			}
-		}()
+		}(part)
 	}
 
 	// 等待全部完成后关闭 channel
@@ -289,9 +406,13 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 		lastErrCode   string
 		lastErrMsg    string
 		totalAttempts int
+		partDiags     = make([]RunPartDiagnostic, n)
 	)
 	for sr := range ch {
 		totalAttempts += sr.attempts
+		if sr.part >= 1 && sr.part <= n {
+			partDiags[sr.part-1] = sr.diagnostic
+		}
 		if sr.ok {
 			successCount++
 			for _, fileID := range sr.fileIDs {
@@ -313,26 +434,81 @@ func (r *Runner) runParallel(ctx context.Context, opt RunOptions, start time.Tim
 		}
 	}
 	result.Attempts = totalAttempts
+	result.Parts = compactRunPartDiagnostics(partDiags)
 
 	if successCount > 0 {
 		result.Status = StatusSuccess
 		result.ErrorCode = ""
 		result.ErrorMessage = ""
 		capRunResultImages(result, n)
+		finalizeParallelMergeDiagnostic(result, n, successCount)
 		logger.L().Info("image runner parallel done",
 			zap.String("task_id", opt.TaskID),
 			zap.Int("requested", n),
 			zap.Int("succeeded", successCount),
 			zap.Int("got_images", len(result.FileIDs)),
+			zap.Any("merge", result.Merge),
 		)
 	} else {
 		result.ErrorCode = lastErrCode
 		result.ErrorMessage = lastErrMsg
+		finalizeParallelMergeDiagnostic(result, n, successCount)
 		logger.L().Warn("image runner parallel all failed",
 			zap.String("task_id", opt.TaskID),
 			zap.Int("requested", n),
 			zap.String("last_err", lastErrCode),
+			zap.Any("merge", result.Merge),
 		)
+	}
+}
+
+func runAttemptErrorMessage(err error, result *RunResult) string {
+	if err != nil {
+		return err.Error()
+	}
+	if result != nil {
+		return strings.TrimSpace(result.ErrorMessage)
+	}
+	return ""
+}
+
+func compactRunPartDiagnostics(parts []RunPartDiagnostic) []RunPartDiagnostic {
+	out := make([]RunPartDiagnostic, 0, len(parts))
+	for _, part := range parts {
+		if part.Part <= 0 {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+func finalizeParallelMergeDiagnostic(result *RunResult, requested, successCount int) {
+	if result == nil {
+		return
+	}
+	requested = normalizeRequestedImageCount(requested)
+	failedParts := 0
+	for _, part := range result.Parts {
+		if !part.OK {
+			failedParts++
+		}
+	}
+	missing := requested - len(result.FileIDs)
+	if missing < 0 {
+		missing = 0
+	}
+	result.Merge = &RunMergeDiagnostic{
+		Requested:         requested,
+		SucceededParts:    successCount,
+		FailedParts:       failedParts,
+		MergedFileIDCount: len(result.FileIDs),
+		MergedSignedURLs:  len(result.SignedURLs),
+		Complete:          missing == 0,
+		MissingImages:     missing,
+		Status:            result.Status,
+		ErrorCode:         result.ErrorCode,
+		ErrorMessage:      result.ErrorMessage,
 	}
 }
 

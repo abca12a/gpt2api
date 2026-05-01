@@ -15,6 +15,7 @@
 - `Corrections.md`：纠正过的误解、踩坑记录和不要再犯的问题。
 - `docs/API_MANUAL.md`：`gpt2api` 图片 API 对外手册。
 - `docs/DOWNSTREAM_INTEGRATION.md`：下游 `new-api` 和前端对接文档。
+- `docs/IMAGE_N4_DIAGNOSTICS.md`：`gpt-image-2 n=4` 少图问题的单账号、Runner 合并和 `/p/img` 回源三段诊断步骤。
 - `deploy/README.md`：容器化部署、预编译、备份恢复。
 - `scripts/README.md`：smoke、Codex auth 校验、`gpt-image-2` 真单联调工具。
 
@@ -91,6 +92,7 @@
 - 参考图不生效先看 gpt2api 图片参数日志的 `reference_count`：`0` 表示前端或 `new-api` 没传到号池，`>0` 后再查上传和上游生成效果。
 - 图片裂图先看任务是否有 `file_ids` 和单图代理元信息；浏览器直接访问上游临时图链失败，通常不是任务生成失败。
 - 多图缺失先查下游任务详情 `result.data[]` 和号池 `file_ids/result_urls` 数量；不要只看下游 `private_data.result_url`。
+- `gpt-image-2 n=4` 少图优先按 `docs/IMAGE_N4_DIAGNOSTICS.md` 跑探针：默认 `single_run_once` 判断单账号单会话是否出满 4 个 `file_id`，`GPT2API_LIVE_SINGLE_ACCOUNT_N4_MODE=parallel` 判断正式 Runner 各 part 和最终 merge。
 - 手机保存 `/p/img` 失败先看 HTTP 状态：`403` 多半是签名过期、密钥变更或旧随机签名；`502` 多半是代理回源或上游临时图下载问题。
 - 账号 401/403 后仍被调度，先查账号状态是否已自动变 `dead`；如果没有，补充对应阶段日志再修状态回写。
 - 修改 `deploy/nginx.conf` 后若容器内仍读取旧配置，优先重建 `gpt2api-nginx`，不要只依赖 `nginx -s reload`。
@@ -98,6 +100,7 @@
 ## 最近变更
 
 - 2026-05-01：已修复图片 runner 遇到上游 `401/403` 不标记账号 `dead` 的问题，并部署到当前号池；部署后已观察到 poll 阶段 `403` 会自动回写账号状态。
+- 2026-05-01：新增 `gpt-image-2 n=4` 结构化诊断输出和 `scripts/gpt-image-2-n4-diagnose.sh`：Runner 并发 part 会记录账号、会话、file_id 数、首次失败和最终 merge 摘要；live 探针输出 `GPT2API_IMAGE_N4_DIAGNOSTIC_JSON`，用于区分单账号执行、结果合并和代理回源阶段。
 - 2026-05-01：已修复 `/p/img` 签名随进程随机密钥重启失效的问题，签名密钥改为从稳定 `JWT_SECRET` 派生；新增重启后签名仍有效、换密钥后旧签名失效的回归测试。
 - 2026-05-01：已确认 free runner 多图生产依赖并发拆单；单个 free 账号单次会话不应承诺稳定一次性出满 4 张。
 - 2026-05-01：下游后端已把 `gpt-image-2` 分辨率计费改为按 `n` 放大；当前单价为 `1k=0`、`2k=0.06`、`4k=0.12` ⭐。

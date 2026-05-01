@@ -141,6 +141,18 @@ node scripts/gpt-image-2-single-e2e.mjs \
 
 退出码：`0` 表示没有 FAIL；`1` 表示至少一项核对失败；`2` 表示脚本异常。
 
+## gpt-image-2 n=4 单账号/合并/代理诊断
+
+多图少图排查先看 [`docs/IMAGE_N4_DIAGNOSTICS.md`](../docs/IMAGE_N4_DIAGNOSTICS.md)。
+
+最小入口:
+
+```bash
+scripts/gpt-image-2-n4-diagnose.sh --mode single --jsonl-out /tmp/gpt-image-2-n4-single.jsonl
+```
+
+`--mode single` 验证单账号单会话 `runOnce(N=4)`；`--mode parallel` 验证正式 `Runner.Run(N=4)` 的每个 part 与最终 merge。输出行以 `GPT2API_IMAGE_N4_DIAGNOSTIC_JSON=` 开头，可直接 `jq` 解析。
+
 ### 与 CI 配合
 
 GitHub Actions 示例骨架:
