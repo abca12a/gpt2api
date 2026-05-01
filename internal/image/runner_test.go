@@ -200,20 +200,36 @@ func TestReferenceUploadBadRequestStaysUpstream(t *testing.T) {
 	}
 }
 
-func TestImageRunnerMarksUnauthorizedUpstreamAccountDead(t *testing.T) {
-	for _, status := range []int{401, 403} {
-		fake := &fakeImageScheduler{}
-		r := &Runner{sched: fake}
-		code := r.classifyUpstream(&chatgpt.UpstreamError{Status: status, Message: "unauthorized"})
+func TestImageRunnerMarksUnauthorized401AccountDead(t *testing.T) {
+	fake := &fakeImageScheduler{}
+	r := &Runner{sched: fake}
+	code := r.classifyUpstream(&chatgpt.UpstreamError{Status: 401, Message: "unauthorized"})
 
-		r.markAccountFailure(253, code)
+	r.markAccountFailure(253, code)
 
-		if fake.deadAccountID != 253 {
-			t.Fatalf("status %d marked dead account %d, want 253", status, fake.deadAccountID)
-		}
-		if fake.rateLimitedAccountID != 0 {
-			t.Fatalf("status %d also marked rate limited account %d", status, fake.rateLimitedAccountID)
-		}
+	if fake.deadAccountID != 253 {
+		t.Fatalf("401 marked dead account %d, want 253", fake.deadAccountID)
+	}
+	if fake.rateLimitedAccountID != 0 || fake.warnedAccountID != 0 {
+		t.Fatalf("401 should only mark dead, rate_limited=%d warned=%d", fake.rateLimitedAccountID, fake.warnedAccountID)
+	}
+}
+
+func TestImageRunnerMarksForbidden403AccountWarned(t *testing.T) {
+	fake := &fakeImageScheduler{}
+	r := &Runner{sched: fake}
+	code := r.classifyUpstream(&chatgpt.UpstreamError{Status: 403, Message: "forbidden"})
+
+	if code != ErrAccountForbidden {
+		t.Fatalf("403 code = %q, want %q", code, ErrAccountForbidden)
+	}
+	r.markAccountFailure(253, code)
+
+	if fake.warnedAccountID != 253 {
+		t.Fatalf("403 warned account %d, want 253", fake.warnedAccountID)
+	}
+	if fake.deadAccountID != 0 || fake.rateLimitedAccountID != 0 {
+		t.Fatalf("403 should not mark dead/rate-limited, dead=%d rate_limited=%d", fake.deadAccountID, fake.rateLimitedAccountID)
 	}
 }
 

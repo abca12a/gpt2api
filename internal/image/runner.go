@@ -528,7 +528,8 @@ func (r *Runner) persistTrace(opt RunOptions) {
 
 func isRetryableImageStatus(status string) bool {
 	return status == ErrRateLimited || status == ErrNoAccount ||
-		status == ErrAuthRequired || status == ErrNetworkTransient || status == ErrPollTimeout
+		status == ErrAuthRequired || status == ErrAccountForbidden ||
+		status == ErrNetworkTransient || status == ErrPollTimeout
 }
 
 // runOnce 一次完整的尝试。返回 (ok, errorCode, err)。
@@ -1175,8 +1176,11 @@ func (r *Runner) classifyUpstream(err error) string {
 		if ue.IsRateLimited() {
 			return ErrRateLimited
 		}
-		if ue.IsUnauthorized() {
+		if ue.Status == 401 {
 			return ErrAuthRequired
+		}
+		if ue.Status == 403 {
+			return ErrAccountForbidden
 		}
 		return ErrUpstream
 	}
@@ -1201,6 +1205,8 @@ func (r *Runner) markAccountFailure(accountID uint64, code string) {
 	switch code {
 	case ErrAuthRequired:
 		r.sched.MarkDead(context.Background(), accountID)
+	case ErrAccountForbidden:
+		r.sched.MarkWarned(context.Background(), accountID)
 	case ErrRateLimited:
 		r.sched.MarkRateLimited(context.Background(), accountID)
 	}
@@ -1208,8 +1214,10 @@ func (r *Runner) markAccountFailure(accountID uint64, code string) {
 
 func imagePollFailureCode(result chatgpt.PollImageResult) string {
 	switch result.LastHTTPStatus {
-	case 401, 403:
+	case 401:
 		return ErrAuthRequired
+	case 403:
+		return ErrAccountForbidden
 	case 429:
 		return ErrRateLimited
 	}
@@ -1225,8 +1233,11 @@ func classifyReferenceUploadError(err error) string {
 		if ue.IsRateLimited() {
 			return ErrRateLimited
 		}
-		if ue.IsUnauthorized() {
+		if ue.Status == 401 {
 			return ErrAuthRequired
+		}
+		if ue.Status == 403 {
+			return ErrAccountForbidden
 		}
 		if ue.Status == 408 || ue.Status >= 500 {
 			return ErrNetworkTransient

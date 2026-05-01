@@ -31,6 +31,7 @@ const (
 	ErrUnknown           = "unknown"
 	ErrNoAccount         = "no_available_account"
 	ErrAuthRequired      = "auth_required"
+	ErrAccountForbidden  = "account_forbidden"
 	ErrRateLimited       = "rate_limited"
 	ErrNetworkTransient  = "network_transient" // 瞬态网络错误(EOF / reset),可自动重试
 	ErrPOWTimeout        = "pow_timeout"
@@ -101,6 +102,8 @@ func LocalizeTaskError(code, raw string) string {
 		zh = "账号池暂无可用账号,请稍后重试"
 	case ErrRateLimited:
 		zh = "上游风控,请稍后再试"
+	case ErrAccountForbidden:
+		zh = "上游临时拒绝当前账号,系统会切换账号或稍后复试"
 	case ErrUnknown, "":
 		zh = "图片生成失败"
 	case ErrInterrupted:

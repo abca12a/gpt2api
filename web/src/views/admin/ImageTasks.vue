@@ -136,6 +136,8 @@ const total = ref(0)
 const statsLoading = ref(false)
 const statsHours = ref(24)
 const stats = ref<ProviderTraceStats | null>(null)
+const accountStatsMode = ref<'focus' | 'all'>('focus')
+const accountStatsExpanded = ref(false)
 const filter = reactive({
   keyword: '',
   status: '',
@@ -244,6 +246,7 @@ const errorCodeLabel: Record<string, string> = {
   poll_timeout: '轮询超时',
   download_failed: '下载失败',
   no_available_account: '无可用账号',
+  account_forbidden: '账号临时拒绝',
   rate_limited: '上游限流',
   interrupted: '部署/重启中断',
 }
@@ -261,6 +264,7 @@ const errorTagType: Record<string, 'danger' | 'warning' | 'info'> = {
   content_moderation: 'danger',
   invalid_request_error: 'warning',
   upstream_error: 'warning',
+  account_forbidden: 'warning',
   poll_timeout: 'warning',
   interrupted: 'info',
 }
@@ -378,6 +382,36 @@ function formatMs(ms?: number) {
   if (!ms) return '-'
   if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
   return `${ms}ms`
+}
+
+function compactEmail(email = '') {
+  const trimmed = email.trim()
+  if (!trimmed) return '-'
+  const [name, domain = ''] = trimmed.split('@')
+  if (!domain) return trimmed.length > 18 ? `${trimmed.slice(0, 8)}...${trimmed.slice(-6)}` : trimmed
+  const compactName = name.length > 10 ? `${name.slice(0, 6)}...${name.slice(-2)}` : name
+  const compactDomain = domain.length > 16 ? `${domain.slice(0, 8)}...${domain.slice(-5)}` : domain
+  return `${compactName}@${compactDomain}`
+}
+
+function accountStatsSource() {
+  const list = stats.value?.accounts || []
+  if (accountStatsMode.value === 'all') return list
+  return list.filter((row) => row.circuit_open || row.in_cooldown || row.consecutive_failures > 0 || row.failed > 0)
+}
+
+function accountStatsRows() {
+  const list = accountStatsSource()
+  return accountStatsExpanded.value ? list : list.slice(0, 8)
+}
+
+function accountStatsHiddenCount() {
+  const hidden = accountStatsSource().length - accountStatsRows().length
+  return hidden > 0 ? hidden : 0
+}
+
+function onAccountStatsModeChange() {
+  accountStatsExpanded.value = false
 }
 
 function accountStatusType(row: AccountRealtimeStat): 'success' | 'danger' | 'warning' | 'info' {
@@ -523,27 +557,69 @@ onMounted(() => {
           </el-tag>
         </div>
         <div v-if="stats?.accounts?.length" class="account-realtime-panel">
-          <div class="trace-stats-title">账号级实时统计（最近 {{ stats.window_hours }} 小时）</div>
-          <el-table :data="stats.accounts" size="small" border style="margin-top:8px">
-            <el-table-column label="账号" min-width="210">
+          <div class="account-realtime-head">
+            <div class="trace-stats-title">账号级实时统计（最近 {{ stats.window_hours }} 小时）</div>
+            <div class="account-realtime-actions">
+              <el-segmented
+                v-model="accountStatsMode"
+                size="small"
+                @change="onAccountStatsModeChange"
+                :options="[
+                  { label: '异常', value: 'focus' },
+                  { label: '全部', value: 'all' },
+                ]"
+              />
+              <el-button
+                v-if="accountStatsHiddenCount()"
+                link
+                type="primary"
+                size="small"
+                @click="accountStatsExpanded = true"
+              >
+                展开 {{ accountStatsHiddenCount() }}
+              </el-button>
+              <el-button
+                v-else-if="accountStatsExpanded && accountStatsSource().length > 8"
+                link
+                type="primary"
+                size="small"
+                @click="accountStatsExpanded = false"
+              >
+                收起
+              </el-button>
+            </div>
+          </div>
+          <el-empty v-if="accountStatsRows().length === 0" description="暂无异常账号" :image-size="52" />
+          <el-table
+            v-else
+            :data="accountStatsRows()"
+            size="small"
+            border
+            max-height="360"
+            class="account-stats-table"
+          >
+            <el-table-column label="账号" min-width="170">
               <template #default="{ row }">
-                <div>#{{ row.account_id }} · {{ row.email || '-' }}</div>
+                <div class="account-main-line">
+                  #{{ row.account_id }} ·
+                  <span class="account-email" :title="row.email || '-'">{{ compactEmail(row.email) }}</span>
+                </div>
                 <div class="trace-subtext">{{ row.plan_type || '-' }} / {{ row.status || '-' }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="成功率" width="115">
+            <el-table-column label="成功率" width="96">
               <template #default="{ row }">
                 <div>{{ row.success_rate?.toFixed ? row.success_rate.toFixed(2) : row.success_rate }}%</div>
                 <div class="trace-subtext">{{ row.success }} / {{ row.recent_total }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="首包/完成" width="145">
+            <el-table-column label="耗时" width="112">
               <template #default="{ row }">
                 <div>{{ formatMs(row.avg_first_packet_ms) }}</div>
                 <div class="trace-subtext">完成 {{ formatMs(row.avg_completion_ms) }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="连续失败" width="110">
+            <el-table-column label="失败" width="90">
               <template #default="{ row }">
                 <el-tag :type="row.consecutive_failures ? 'danger' : 'success'" size="small">
                   {{ row.consecutive_failures }}
@@ -551,7 +627,7 @@ onMounted(() => {
                 <div class="trace-subtext">{{ row.last_error_type || '-' }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="冷却/熔断" width="135">
+            <el-table-column label="状态" width="122">
               <template #default="{ row }">
                 <el-tag :type="accountStatusType(row)" size="small">{{ cooldownLabel(row) }}</el-tag>
               </template>
@@ -851,6 +927,39 @@ onMounted(() => {
 
 .account-realtime-panel {
   margin-top: 14px;
+}
+
+.account-realtime-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.account-realtime-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.account-stats-table {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.account-main-line {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.account-email {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .error-reason {

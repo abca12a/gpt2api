@@ -69,7 +69,7 @@
 - OAuth 的 `proxy_id` 同时用于服务端换 token 和新建账号默认代理绑定；更新已有账号时不会自动改绑原代理。
 - 外置 Codex image channel 使用 `/home/ubuntu/CLIProxyAPI/auths/codex-*.json` 文件池，由 `cli-proxy-api` 独立调度；`gpt2api-server` 不直接把数据库 `oai_accounts` 当作外置 Codex 调度池。
 - 外置 Codex auth 文件可以与数据库账号邮箱重合，但两边不是同一个队列：外置池消耗 Codex usage/credits，内置 ChatGPT Web Runner 消耗 Web 图片额度。
-- 图片 runner 在 ChatRequirements、参考图上传、prepare、SSE、poll、download URL 阶段遇到上游 `401/403` 会标记账号 `dead`；`429` 仍走 throttled/cooldown。
+- 图片 runner 在 ChatRequirements、参考图上传、prepare、SSE、poll、download URL 阶段会区分账号鉴权与临时风控：上游 `401` 才标记账号 `dead`；上游 `403` 视作可恢复拒绝，标记 `warned` 并按 warned pause 冷却后复试；`429` 仍走 throttled/cooldown。
 
 ### 可观测性与后台
 
@@ -99,8 +99,9 @@
 
 ## 最近变更
 
+- 2026-05-02：后台“账号级实时统计”默认聚焦异常/冷却/失败账号，邮箱做中间省略并限制初始展示行数；图片 runner 失效判定改为 `401 -> dead`、`403 -> warned/cooldown`，减少可用账号被永久误判失效。
 - 2026-05-01：检查当日日志时发现 `chat-requirements raw body` 会记录上游 requirements token 原文，且 access log 会记录 `/p/img` 的 `sig` / `api_key` 等敏感 query；已改为 requirements 摘要日志和敏感 query 值脱敏，并部署到当前号池。
-- 2026-05-01：已修复图片 runner 遇到上游 `401/403` 不标记账号 `dead` 的问题，并部署到当前号池；部署后已观察到 poll 阶段 `403` 会自动回写账号状态。
+- 2026-05-01：图片 runner 已补齐上游 `401/403` 账号状态回写；该日策略曾统一回写 `dead`，已被 2026-05-02 的 `401 -> dead`、`403 -> warned/cooldown` 策略收敛。
 - 2026-05-01：新增 `gpt-image-2 n=4` 结构化诊断输出和 `scripts/gpt-image-2-n4-diagnose.sh`：Runner 并发 part 会记录账号、会话、file_id 数、首次失败和最终 merge 摘要；live 探针输出 `GPT2API_IMAGE_N4_DIAGNOSTIC_JSON`，用于区分单账号执行、结果合并和代理回源阶段。
 - 2026-05-01：已修复 `/p/img` 签名随进程随机密钥重启失效的问题，签名密钥改为从稳定 `JWT_SECRET` 派生；新增重启后签名仍有效、换密钥后旧签名失效的回归测试。
 - 2026-05-01：已确认 free runner 多图生产依赖并发拆单；单个 free 账号单次会话不应承诺稳定一次性出满 4 张。

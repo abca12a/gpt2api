@@ -30,6 +30,7 @@
 
 ## 失败归因与展示
 
+- 账号失效判定：不能把 ChatGPT Web Runner 任意阶段的 `403` 都永久标记为 `dead`；`401` 才是强鉴权失效信号，`403` 更常见于风控/权限/环境临时拒绝，应先 `warned` 冷却并允许后续复试。
 - 图片失败诊断：不能只看结构化错误；ChatGPT Web Runner 可能在 assistant 文本里解释拒绝原因但不产出图片引用，必须提取 SSE 和 conversation mapping 的最新 assistant 文本。
 - 内容安全归因：只有出现安全、政策、未成年、内容审核等明确文本或上游信号时才归为 `content_moderation`；普通 `poll_timeout / poll_error / no image ref produced` 不能凭空推断违规。
 - 后台白图：不能看到管理员后台或预览弹窗一片白就判定“没拿到图”；`4k/2k` 任务首次访问 `/p/img/...` 时可能先卡在本地超分或缓存未命中的原图回源阶段。

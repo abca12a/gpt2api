@@ -243,7 +243,7 @@ func (e *UpstreamError) Error() string {
 // IsRateLimited 对应 HTTP 429 / 资源耗尽。
 func (e *UpstreamError) IsRateLimited() bool { return e.Status == 429 }
 
-// IsUnauthorized 对应 401 / 403(token 失效 / 风控封号)。
+// IsUnauthorized 历史兼容地覆盖 401 / 403;状态回写需要区分 e.Status。
 func (e *UpstreamError) IsUnauthorized() bool { return e.Status == 401 || e.Status == 403 }
 
 // ChatRequirementsResp 对应响应(仅摘取关键字段)。
