@@ -78,6 +78,56 @@ scripts/check-codex-auth-plans.sh
 - 只输出文件名和汇总计数，不读取或打印 token 内容
 - 退出码 `0` 表示全部合规；`1` 表示存在 `free/未知` 账号；`2` 表示目录不存在
 
+## gpt-image-2-single-e2e.mjs · 1K/2K/4K 真单联调
+
+对 `gpt-image-2` 的 `1k / 2k / 4k` 单张图请求做可重复联调，自动整理：
+
+- 号池任务状态、`resolution`、`provider_trace`、最终 provider、fallback、timing。
+- 号池本机 `image_tasks` 关键字段与最近容器日志。
+- 下游后端 `tasks.private_data.billing_context`、`quota`、`upstream_task_id`。
+- 前端 `/api/pricing` 是否返回 `resolution_options`，以及展示价是否可用于核对。
+
+### 发起新请求并轮询
+
+需要提供可调用 `gpt-image-2` 的号池 API Key：
+
+```bash
+cd scripts
+GPT2API_IMAGE_TEST_KEY=sk-xxx npm run gpt-image-2:e2e -- \
+  --base https://lmage2.dimilinks.com \
+  --resolutions 1k,2k,4k \
+  --n 1 \
+  --json-out /tmp/gpt-image-2-e2e.json
+```
+
+### 复用已有任务核对
+
+只有号池任务号时：
+
+```bash
+node scripts/gpt-image-2-single-e2e.mjs \
+  --task-ids img_xxx,img_yyy,img_zzz \
+  --json-out /tmp/gpt-image-2-existing.json
+```
+
+有下游任务号时，脚本会通过下游 Postgres 的 `private_data.upstream_task_id` 自动映射到号池 `img_*`：
+
+```bash
+node scripts/gpt-image-2-single-e2e.mjs \
+  --downstream-task-ids task_xxx,task_yyy,task_zzz \
+  --json-out /tmp/gpt-image-2-downstream.json
+```
+
+### 常用参数
+
+- `--frontend-pricing-urls`：逗号分隔，默认检查 `https://dimilinks.com/api/pricing` 与 `https://preview.dimilinks.com/api/pricing`。
+- `--skip-local-db true`：不查本机 `gpt2api-mysql`。
+- `--skip-logs true`：不抓 `gpt2api-server` 最近 4 小时日志。
+- `--skip-downstream-db true`：不通过 SSH 查下游 `new-api-postgres-local`。
+- `--downstream-ssh`、`--downstream-db-container`、`--downstream-db-name`、`--downstream-db-user`：覆盖下游连接参数；当前生产默认 `root@212.50.232.214`、`new-api-postgres-local`、`new-api`、`root`。
+
+退出码：`0` 表示没有 FAIL；`1` 表示至少一项核对失败；`2` 表示脚本异常。
+
 ### 与 CI 配合
 
 GitHub Actions 示例骨架:
