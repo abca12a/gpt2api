@@ -2,11 +2,63 @@
 
 ## 记忆边界
 
-- 本文件只记录当前状态、长期排查入口和最近仍有复用价值的阶段事实；一次性任务 ID、临时文件路径、即时数据库计数和 smoke 细节不再长期保存。
-- 项目机器拓扑、SSH 角色和项目目录以根目录 `AGENTS.md` 的“项目连接信息”为唯一权威来源；本文件不重复保存连接详情。
-- 历史误判、回归原因和“不要再犯”的经验写入 `Corrections.md`；实现细节和接口状态写在本文件。
+- 本文件只记录当前状态、长期排查入口和最近仍有复用价值的阶段事实。
+- 项目机器拓扑、SSH 角色和项目目录以根目录 `AGENTS.md` 的“项目连接信息”为唯一权威来源。
+- 历史误判、回归原因和“不要再犯”的经验写入 `Corrections.md`。
+- 面向外部调用方的接口细节写入 `docs/API_MANUAL.md`；下游 `new-api` / 前端协作细节写入 `docs/DOWNSTREAM_INTEGRATION.md`。
+
+## 文档索引
+
+- `AGENTS.md`：长期协作规则、机器拓扑、连接判断规则。
+- `Prompt.md`：当前目标、业务约定、成功标准。
+- `Plan.md`：当前维护计划、验收命令和文档边界。
+- `Corrections.md`：纠正过的误解、踩坑记录和不要再犯的问题。
+- `docs/API_MANUAL.md`：`gpt2api` 图片 API 对外手册。
+- `docs/DOWNSTREAM_INTEGRATION.md`：下游 `new-api` 和前端对接文档。
+- `deploy/README.md`：容器化部署、预编译、备份恢复。
+- `scripts/README.md`：smoke、Codex auth 校验、`gpt-image-2` 真单联调工具。
 
 ## 当前事实
+
+### 图片任务协议
+
+- 图片生成默认建议走异步任务：`POST /v1/images/generations?async=true` 提交，`GET /v1/tasks/:id` 轮询。
+- 异步提交返回 `{created, task_id, data: []}`，HTTP 状态保持 `200`，避免下游网关误判 `202`。
+- `GET /v1/tasks/:id` 返回 OpenAI/Sora 风格 `image.task` 包装；`GET /v1/images/tasks/:id` 保持历史响应。
+- 服务启动时会把启动前仍处于 `queued / dispatched / running` 的图片任务标记为 `interrupted`，避免部署或重启后下游长期轮询不到终态。
+- 请求 `n` 最终按 `1..4` 处理；`n>1` 时服务端可能并发拆成多个单图任务，结果必须读取 `result.data[]`，不要用只保存首图的兼容字段判断是否缺图。
+
+### gpt-image-2 路由
+
+- 下游公网入口始终是 `https://lmage2.dimilinks.com/v1`；下游不要直接调用 `cliproxyapi` 公网域名或浏览器直连号池内部接口。
+- `resolution` 规范化为 `1k / 2k / 4k`；缺省或无法识别时默认 `1k`，并在任务响应和 `provider_trace` 中回显。
+- `1k` 策略：跳过外置图片渠道，走 strict `free runner`；trace 中会出现 `resolution_runner_only`。
+- `2k/4k` 策略：外置渠道顺序强制为 `Codex -> APIMart`，外置渠道遇到可重试瞬态错误后允许回落 strict `free runner`。
+- 生产 Codex image channel 为数据库中的 `codex-cli-proxy-image -> http://cli-proxy-api:8317`，映射 `gpt-image-2 -> gpt-image-2 / modality=image`。
+- APIMart 第二跳使用官方 `gpt-image-2-official` 协议：`POST /v1/images/generations`、`resolution=1k/2k/4k`、`image_urls[]`、`mask_url`；`background=transparent` 在 APIMart 路径降级为 `auto`。
+- 外置渠道返回 APIMart 异步任务格式时，号池适配器会自动轮询 `/v1/tasks/{task_id}` 并在超时边缘做一次短终态确认，减少“刚放弃上游就完成”的重复出图。
+- `content_policy_violation / content_moderation / moderation_blocked / safety system` 归为内容安全，不兜底、不标记渠道 unhealthy，也不继续换渠道绕过。
+- `400 invalid_value / image_generation_user_error / minimum pixel budget` 属于用户请求参数错误，返回 `invalid_request_error` 并保留详情，不切 free runner。
+
+### 图片参数与结果
+
+- 推荐传参是 `size=比例` + `resolution=1k/2k/4k`；也兼容 `image_size / scale / upscale / quality` 中的分辨率别名。
+- 非正方形 `1k` 不能再按长边 1024 映射；示例：`16:9 -> 1536x864`、`9:16 -> 864x1536`、`2:3 -> 1024x1536`、`21:9 -> 1568x672`。
+- Codex/native 路径宽高按 16 对齐，4K 档像素预算约为 `3840*2160`；正方形 `1:1/auto + 1k` 仍是 `1024x1024`。
+- JSON 参考图兼容 `reference_images / images / image / image_url / image_urls / input_image / input_images`，支持字符串、字符串数组、`{"url":...}` 和对象数组；图片参数日志会记录 `reference_count`。
+- 参考图唯一输入上限按当前实现控制为 4 张；解析失败要退款并直接 400，不创建残留 `image_tasks`。
+- 图片任务优先返回本站 `/p/img/<task_id>/<idx>` HMAC 签名代理 URL，不直接暴露上游临时 `result_urls`；`data:image/...;base64` 大块结果也会改走代理。
+- `/p/img` 签名密钥由服务端稳定 `JWT_SECRET` 派生；同一密钥下服务重启不影响新签 URL。签名过期、更换 `JWT_SECRET` 或 2026-05-01 修复前随机密钥签出的旧 URL 失效，属于预期。
+
+### 下游集成与计费
+
+- `docs/DOWNSTREAM_INTEGRATION.md` 是下游 `new-api` 后端和前端对接文档；当前对外是 `gpt2api` OpenAI 兼容图片接口，不是 OpenAI 官方 API。
+- API Key 客户端/业务后端提交图片任务走下游 `POST /v1/images/generations?async=true`；登录态前端提交走下游同源 `POST /pg/images/generations?async=true`；两者轮询都走下游 `GET /v1/tasks/{task_id}`。
+- 下游 `new-api` token 必须命中含 `gpt-image-2` 渠道的分组；错误里出现 `under group default` 时，请求通常还没进入 gpt2api。
+- 下游 `new-api` 的 `Request ID` 不会原样透传成号池 request id；跨系统排查时，优先用下游公开 `task_id` 在 `tasks.private_data.upstream_task_id` 映射到号池 `img_*`。
+- 用户侧价格真相源在下游后端：当前默认单价为 `1k=0`、`2k=0.06`、`4k=0.12` ⭐，按 `n` 放大并在任务创建时固化到 `billing_context`。
+- 当前下游 `/api/pricing` 会返回 `gpt-image-2.resolution_options` 与 `pricing_version=gpt-image-2-resolution-v1`；后台仍可保留单个基础模型项 `gpt-image-2=0`，分档键仅作为覆盖项使用，不应当作多个真实模型。
+- 号池内部 `models.image_price_per_call`、`image_tasks.estimated_credit/credit_cost` 和 `usage_logs.credit_cost` 是号池自身成本/余额语义，不是下游用户实际扣费依据。
 
 ### 账号与基础服务
 
@@ -14,185 +66,49 @@
 - OAuth 导入只是获取账号凭据的新入口，不替换旧导入链路；默认回调仍优先使用 OpenAI/Codex 常用的 `http://localhost:1455/auth/callback`。
 - OAuth 会话状态保存在服务端内存，TTL 为 30 分钟；服务重启或超时后需要重新生成授权链接。
 - OAuth 的 `proxy_id` 同时用于服务端换 token 和新建账号默认代理绑定；更新已有账号时不会自动改绑原代理。
-- 2026-04-29 当前号池巡检：`gpt2api-server / mysql / redis / nginx / cli-proxy-api` 均在线，`https://127.0.0.1/healthz`、容器内 `http://127.0.0.1:8080/healthz` 与 `http://cli-proxy-api:8317/healthz` 返回正常；数据库 `oai_accounts` 共 409 条，仅 `healthy=17`（`free=8`、`plus=9`），其余 `warned=392`。当前仅 1 条代理、健康分 100、400 个账号已绑定代理，暂无“代理池整体失效”迹象。
-- 2026-04-29 当前外置 Codex auth 文件池共 34 个文件（`plus=31`、`team=3`、`forbidden_or_unknown=0`），未混入 free/未知 plan；但 `codex-cli-proxy-image(channel_id=1)` 当天持续报 `Tool choice 'image_generation' not found in 'tools' parameter.`，`CLIProxyAPI/logs/main.log` 当天已出现 33 次该错误，说明问题不在 auth 文件数量，而在当前外置 Codex 图片执行链路本身。
-- 2026-04-29 当前图片链路状态：近 24 小时 `image_tasks` 共 173 条，`success=163`、`failed=10`，成功率约 `94.2%`；今天截至巡检时共 111 条，`success=105`、`failed=5`，成功率约 `94.6%`。多数成功单是在外置 Codex 或 APIMart 失败后回落内置 free runner 完成，因此“整体可出图”不代表“外置图片号池健康”。
-- 2026-04-29 基于最近 24 小时 `image_tasks.status='success'` 的复盘，第一层外置图片渠道成功单（`account_id=0`）平均耗时约 `99.9s`，而 fallback 到内置 runner 的成功单平均耗时约 `303.7s`。部署后能严格对齐到日志 `reference_count` 的第一层成功样本只有 2 单，均为图生图，耗时分别 `113s` 和 `227s`；同一窗口内尚未拿到“文生图且第一层成功”的严格样本，因此不能拍脑袋把图生图第一层硬切到 `120s` 以下。
-- 2026-04-29 17:10（Asia/Shanghai）补做两组多轮实测后确认：当前 `Codex` 会员链路不是“整体兜不住”。直连 `cli-proxy-api:8317 /v1/images/generations` 的 5 轮文生图全部成功，平均约 `18.4s`；通过当前号池 `gpt2api /v1/images/generations?async=true` 再走完整路由的 5 轮文生图也全部成功，`image_tasks.account_id` 全为 `0`、单任务耗时约 `30~37s`，对应窗口内未出现这些任务的 `channel async image fail, try next` 或 `fallback to free account runner` 日志，说明这 5 单都停在第一层外置 Codex 成功。
-- 2026-04-29 17:10（Asia/Shanghai）同批观测也确认：问题还没“完全解决”，但已经收敛到更窄的边界。最近半小时内仍能看到 `img_d1ad737a2d5d47849df9c0e0 / img_bf0aa13ff29f4d6799835124 / img_cf3953d6b30b4d869957849b` 这类任务先在 `codex-cli-proxy-image` 报 `POST /v1/images/edits ... context deadline exceeded`，随后 fallback 到 `free` 账号成功；`cli-proxy-api` 同时间窗也仍有部分 `plus` auth 自动 refresh 返回 `401`。因此当前更准确的判断是：`文生图` 路径已能稳定命中 Codex 会员池，但 `图生图/edits` 与部分 auth 刷新仍会把慢单推向 `free runner`。
-- 2026-04-29 17:23（Asia/Shanghai）补做“更贴近真实请求”的图生图压测后，边界再次收窄：选取最近真实提示词中的单参考图改背景（`背景换成四季融合的背景`）和三参考图海报合成（`图2 图3 是素材合成按照第一个图的风格生成合成一张...不要抖音截图模式`），并把最近真实结果图先下载为本地 `data:image` 后再提交，排除了“参考图 URL 回源慢/失效”干扰。在此条件下，经 `gpt2api /v1/images/generations?async=true` 提交的 `2` 轮单参考图和 `3` 轮三参考图共 `5/5` 全部成功，任务号 `img_bfb928149a1f458e93c5e72a / img_dfe77a9127404c239c427a7e / img_8e81785390104fa48d66f638 / img_70f765dc0c5245f393642258 / img_3a969958efa14723893fedaf` 的 `account_id` 全为 `0`，未切到 `APIMart` 或 `free runner`。
-- 2026-04-29 17:23（Asia/Shanghai）上述 5 轮图生图虽然都停在第一层外置 Codex 成功，但耗时明显高于文生图：整单约 `108.7s ~ 122.4s`；`cli-proxy-api` 对应窗口内的 `/v1/images/edits` 日志耗时约 `1m41s ~ 1m59s`。因此当前更准确的结论应改为：`图生图` 并非“必然兜不住”，而是“成功率在这批样本上可接受，但单次成功耗时本身就贴近 2 分钟超时边缘”；后续若继续优化，重点不再是证明会员链路是否可用，而是收敛 `edits` 路径尾延迟与超时阈值。
-- 2026-04-29 晚间继续核实时，已拿到“兜底后原上游又完成”的硬证据，而且不是只停留在代码推断。对 `img_18cc5f852d1c49c7ad8a2712`，号池在 `16:57:49` 因 `apimart` 轮询超时报 `fallback to free account runner`，随后 free runner 于 `16:58:17` 成功；但直接查询同单 `apimart` 上游任务 `task_01KQC77A5V1SYY1MKM44HNSCY1`，其状态为 `completed`，完成时间是 `16:57:53`，也就是号池放弃后约 `4s` 就完成。对 `img_8822b0ce838d4d3194394987` 也有同类现象：号池于 `16:43:26` 放弃 `apimart` 并切 free，free runner 于 `16:44:30` 成功；但对应 `apimart` 任务 `task_01KQC6D0FHJ79D978AHZZJHWNC` 最终在 `16:47:00` completed。当前可确认：`codex-cli-proxy-image` 这跳暂未发现“同一次 /v1/images/edits 请求先被号池超时、后又在 CLIProxyAPI 里 200 完成”的样本，已核到的重复出图硬证据集中在第二跳 `apimart` 任务轮询超时后。
-- 2026-04-29：已在仓库中对第二跳 `APIMart` 轮询补上“超时前最后一次终态确认”。原因是现有实现一旦 `pollAPIMartImageTask` 的上下文到点，就直接把 `context deadline exceeded` 交回上层，导致号池可能立刻切 `free runner`，而上游 `APIMart task` 实际已在超时边缘完成。当前修复把最终确认收敛在 `openaiAdapter` 内：当轮询上下文结束时，会用独立 `5s` 短上下文再查一次同一 `task_id`；若已 `completed`，直接返回成功结果，不再误切兜底；若仍 `pending/processing`，则保持原超时失败。该修复只覆盖已确认有硬证据的第二跳 `APIMart` 异步任务竞态，不改变第一跳 `codex-cli-proxy-image` 的超时策略，也不延长正常轮询窗口。
-- 2026-04-29：继续追查首跳 `unknown provider for model gpt-image-2` 后确认，这批失败不是此前“坏 auth 仍参与图片轮询池”的老代码问题复发，而是运行时 provider 池被人为抽空。`CLIProxyAPI` 日志显示在 `17:24:12 ~ 17:24:46` 有一串来自管理接口的 `PATCH /v0/management/auth-files/status`，把多批 `codex-*.json` 从 `disabled: false -> true`；对应 `model_registry` 中 `gpt-image-2` 计数一路从 `29` 降到 `0`。而 `CLIProxyAPI/sdk/api/handlers/handlers.go` 的 `getRequestDetails` 在 provider 列表为空时会直接返回 `unknown provider for model gpt-image-2`，因此号池里 `17:25` 之后观测到的这批 `502 unknown provider...` 属于“首跳图片 provider 已清空”的运行时状态，不是单纯把超时线从 `120s` 往后推就能修复。当前本机直接检查 `/home/ubuntu/CLIProxyAPI/auths/codex-*.json` 也确认：`34` 个 Codex auth 文件全部处于 `disabled=true`。
-- 2026-04-29：图片 `upscale=2k/4k` 已从阿里云外部服务切换为号池本地高质量缩放算法，不再依赖 AK/SK、地域、端点和异步轮询。当前策略同时收紧为“仅 `free` 账号任务触发超分”：图片代理 `/p/img/...` 在拿到原图后，会先判断该图最终账号 `plan_type`；只有 `free` 才进入本地超分 + 进程内 LRU，`plus/team` 或外置 channel 结果即使带 `upscale` 字段也直接返回原图。边界是：这是代理出口层策略，不改变上游原始生图尺寸，也不把放大结果写回 `image_tasks`。
-
-### 图片任务协议
-
-- 图片生成默认走异步任务：提交后保存 `task_id` 并轮询任务接口；`dispatched` 表示等待账号调度，拿到账号 lease 后才进入 `running`。
-- `POST /v1/images/generations?async=true` 与 `Prefer: respond-async` 会按异步任务 body 返回，但 HTTP 状态保持 `200`，避免下游网关把 `202` 当上游错误。
-- 默认异步提交返回 `{created, task_id, data: []}`；显式传 `compat=apimart`、`response_schema=apimart` 或 `X-Response-Format: apimart` 时，响应改为 APIMart 风格 `{code:200,data:[{status:"submitted",task_id}]}`。
-- `GET /v1/tasks/:id` 返回 OpenAI/Sora 风格 `image.task` 包装；`GET /v1/images/tasks/:id` 保持历史响应。
-- 服务启动时会把启动前仍处于 `queued / dispatched / running` 的图片任务标记为 `interrupted`，避免部署或重启后下游长期轮询不到终态。
-
-### gpt-image-2 路由
-
-- 下游公网入口始终是 `https://lmage2.dimilinks.com/v1`；下游不要直接调用 `cliproxyapi` 公网域名或浏览器直连号池内部接口。
-- 生产 `gpt-image-2` 优先走数据库中的外置 image channel：`codex-cli-proxy-image -> http://cli-proxy-api:8317`，映射为 `gpt-image-2 -> gpt-image-2 / modality=image`。
-- 外置 OpenAI 兼容图片渠道若返回 APIMart 异步任务格式 `{code:200,data:[{status:"submitted",task_id}]}`，当前适配器会自动轮询 `/v1/tasks/{task_id}` 直到 `completed/failed/cancelled`，因此可把 `apimart` 之类的异步 OpenAI 兼容图片渠道接在 Codex route 之后做第二跳兜底。
-- APIMart `gpt-image-2` 的图生图要按其官方 `gpt-image-2-official` 文档走 `POST /v1/images/generations + image_urls[]`，不要沿用通用 OpenAI 兼容的 `POST /v1/images/edits + images[{image_url}]`；当前适配器已对 `apimart.ai` 基于域名做特判，并把本地 `gpt-image-2` 映射为 APIMart 上游模型名 `gpt-image-2-official`。
-- APIMart 渠道若需要启用它自身的官方兜底，可在 `upstream_channels.extra` 写 JSON `{"official_fallback":true}`；当前 `openai` 适配器会把该字段原样透传给 APIMart 图片请求。
-- 走外置图片渠道时，会同时保留原始比例尺寸 `size=1:1/16:9/...` 与 `resolution=1k/2k/4k` 给 APIMart 这类比例协议上游；Codex/native 渠道仍可继续吃转换后的像素尺寸，不再因为第二跳协议不同而把 `1:1` 强制压成 `1024x1024`。
-- `gpt2api-server` 与 `cli-proxy-api` 必须同在 Docker 网络 `deploy_default`；容器内 `cli-proxy-api` DNS 和 `/healthz` 要可用。
-- 外置 Codex image channel 使用 `/home/ubuntu/CLIProxyAPI/auths/codex-*.json` 文件池，由 `cli-proxy-api` 独立调度；`gpt2api-server` 只挂载该目录和日志用于路由、展示与统计，不直接把数据库 `oai_accounts` 当作外置 Codex 调度池。
+- 外置 Codex image channel 使用 `/home/ubuntu/CLIProxyAPI/auths/codex-*.json` 文件池，由 `cli-proxy-api` 独立调度；`gpt2api-server` 不直接把数据库 `oai_accounts` 当作外置 Codex 调度池。
 - 外置 Codex auth 文件可以与数据库账号邮箱重合，但两边不是同一个队列：外置池消耗 Codex usage/credits，内置 ChatGPT Web Runner 消耗 Web 图片额度。
-- 外置 Codex/OpenAI image channel 在同渠道重试后若仍遇到 `502/5xx`、超时、EOF、connection reset、broken pipe 等瞬态错误，会回落内置 ChatGPT Web Runner，并强制调度 `plan_type=free` 账号。
-- `content_policy_violation / content_moderation / moderation_blocked / safety system` 归为 `content_moderation`，不兜底、不标记渠道 unhealthy，也不继续换渠道绕过安全策略。
-- `400 invalid_value / image_generation_user_error / minimum pixel budget` 属于用户请求参数错误，返回 `invalid_request_error` 并保留详情，不切 Free 账号。
-- Free 账号可走内置 Web Runner 图片链路，但当前不具备/未暴露 Codex `image_generation` 工具，不能作为 Codex image channel 主力；轮换 Codex auth 后运行 `scripts/check-codex-auth-plans.sh`，避免 `*-free.json` 或未知后缀混入。
+- 图片 runner 在 ChatRequirements、参考图上传、prepare、SSE、poll、download URL 阶段遇到上游 `401/403` 会标记账号 `dead`；`429` 仍走 throttled/cooldown。
 
-### 图片参数与结果
+### 可观测性与后台
 
-- APIMart 风格 `size=比例 + resolution=1k/2k/4k` 会转换为 Codex 可接受像素；非正方形 `1k` 不能按长边 1024 直接映射，当前示例为 `16:9 -> 1536x864`、`9:16 -> 864x1536`、`2:3 -> 1024x1536`、`21:9 -> 1568x672`。
-- Codex 路径约束：最长边不超过 3840，宽高需 16 对齐，4K 档像素预算约等于 `3840*2160`；正方形 `1:1/auto + 1k` 仍是 `1024x1024`。
-- JSON 参考图兼容 `reference_images / images / image / image_url / image_urls / input_image / input_images`，支持字符串、字符串数组、`{"url":...}` 和对象数组；图片参数日志会记录 `reference_count`。
-- 参考图唯一输入上限仍按当前实现控制为 4 张；解析失败要退款并直接 400，不写入 `image_tasks` 残留任务。
-- 内置 ChatGPT Web Runner 的 Azure 参考图 PUT 使用独立标准 HTTP/TLS transport，并对 EOF、timeout、5xx、408、429 做短重试；外置 `cli-proxy-api` 容器内部上传逻辑仍是黑盒。
-- 请求 `n` 是最终落库和结算上限；如果上游 SSE 一次返回超出 `n` 的 sediment/file 引用，服务端会在落库前裁剪到请求数量。
-- `N>1` 时每张图可能来自不同账号和 conversation；不要假设一个任务只有一个可下载全部图片的账号上下文。
-- 对外 `ImageGenerations / ImageTask / ImageTaskCompat / ImageEdits / chat->image` 返回的 `/p/img` 代理图会按当前请求 `Host/X-Forwarded-Proto` 补成绝对 URL；`internal/image` 内部仍保留相对 path。
-- 图片任务对前端展示优先返回本站 `/p/img/<task_id>/<idx>` 签名代理 URL，不直接暴露上游临时 `result_urls`；缺少 `file_ids` 时，普通旧直链仍兼容保留，但 `data:image/...;base64` 这类大块内联结果也改走代理，避免把多 MB base64 直接塞进任务详情或后台弹窗响应。
-
-### 失败归因与后台展示
-
-- OpenAI 兼容网关错误按 APIMart 常见类型归类：401=`authentication_error`、402=`payment_required`、429=`rate_limit_error`、5xx=`server_error/service_unavailable`；APIMart 兼容模式下 HTTP 错误的 `error.code` 改为数字状态码。
-- ChatGPT Web Runner 会同时提取图片 SSE 和 conversation mapping 中最新 assistant 文本；如果上游没有给出图片引用但返回自然语言拒绝/说明，会写入 `image_tasks.error` detail。
-- 管理员账号池页的“Codex今日”来自外置 CLIProxyAPI 日志，只统计请求数、成功数、失败数和 429 次数；它不是官方 Codex 剩余 credits，也不等同“Web 图剩余”。
-- `GET /v1/tasks/:id` 失败时除 `error{code,message,detail}` 外，还返回顶层 `error_code / error_message / error_msg / message / error_detail / failure_reason / failed_reason / fail_reason`，方便下游不同读取路径展示原因。
-- 管理员“生成记录”列表不再查询或返回 `image_tasks.result_urls` 大字段，只返回任务元数据、结果数量和失败摘要；点击“查看结果 / 查看失败”时再调用 `GET /api/admin/image-tasks/:id/images` 懒加载。
+- `image_tasks.provider_trace` 记录请求档位、首跳 provider、每一步尝试顺序、fallback 原因、最终 provider、上游 task/request id、错误层级和 timing。
+- 管理端“生成记录”列表只返回任务元数据、结果数量和失败摘要；图片/失败详情懒加载，避免列表带回 `result_urls` 大字段。
+- 管理端“Codex 今日”来自外置 CLIProxyAPI 日志，只统计请求数、成功数、失败数和 429 次数；不是官方 Codex 剩余 credits，也不等同 Web 图剩余。
 - 后台生成记录不要使用 `el-image` 内置预览承载结果图；使用普通 `img` 与受控 `el-dialog`，避免 base64/data URL 误跳 `about:blank#blocked`。
 
-### 下游集成
+### 部署边界
 
-- `docs/DOWNSTREAM_INTEGRATION.md` 是下游 `new-api` 后端和前端对接文档；当前对外是 `gpt2api -> chatgpt.com` Web 反代与本机 Codex image channel 组合路线，不是 OpenAI 官方 API 路线。
-- API Key 客户端/业务后端提交图片任务走下游 `POST /v1/images/generations?async=true`；登录态前端提交走下游同源 `POST /pg/images/generations?async=true`；两者轮询都走下游 `GET /v1/tasks/{task_id}`。
-- `/v1/tasks/batch` 当前不建议用于 `gpt-image-2`，因为号池未提供批量任务查询接口。
-- 下游 `new-api` token 必须命中含 `gpt-image-2` 渠道的分组；错误里出现 `under group default` 时，请求通常还没进入 gpt2api。
-- 下游用量日志中的 `LogTypeConsume / quota=0 / use_time=0 / 操作 textGenerate` 只是异步提交记录，不代表任务成功；最终状态看 `tasks.status/fail_reason`、错误日志和号池 `image_tasks.error`。
-- 下游 `new-api` 的 `Request ID` 不会原样透传成号池 `gpt2api` 的 `request_id`；跨系统排查时，优先用下游公开 `task_id` 在 `tasks.private_data.upstream_task_id` 映射到号池 `img_*` 任务号，或按提交时间窗口对齐两边日志。
-- 2026-04-29 进一步确认：当前下游 `new-api` 中，`channels.id=20 / 自有账号 / https://lmage2.dimilinks.com` 表示请求先进入当前号池；这类任务在下游 `tasks.private_data.upstream_task_id` 中会映射为号池 `img_*` 任务号。若随后在号池日志里看到 `channel_id=2 apimart` 的 `503`，这是号池内部“Codex -> APIMart -> free runner”链路的第二跳报错，不等于“下游后端 APIMart 兜底失败”。
-- 2026-04-29 进一步确认：当前下游 `new-api` 中，`channels.id=18 / 图片上游apimart / https://api.apimart.ai` 表示后端直连 APIMart；这类任务的 `upstream_task_id` 通常仍是 APIMart 自己的 `task_*`。若下游 `tasks.fail_reason` 或后端日志里出现 `all channels failed. Last error: HTTP 400 ... Tool choice 'image_generation' not found in 'tools' parameter.`，应归因为下游后端这条直连 APIMart 链路，而不是号池第二跳。
-- 下游前端 `/console/logs` 已新增状态说明：图片失败日志显示“图像生成失败”和后端错误原因，异步提交日志显示“图像生成已提交”。
-- 2026-04-28 进一步确认：下游 `new-api` 的 `default` 分组里，`gpt-image-2` 当前会优先选 `channels.id=18 / 图片上游apimart / https://api.apimart.ai`，因为它的 ability/channel priority 高于 `channels.id=20 / 自有账号 / https://lmage2.dimilinks.com`。因此登录态 `POST /pg/images/generations?async=true` 若命中 `group=default`，请求会直接走下游 APIMart，不会进入当前号池；若要先经过号池，需在下游调整 `gpt-image-2` 的分组归属或优先级。
+- 本项目 Dockerfile 是“宿主预编译 + 镜像复制产物”，镜像构建不会自动 `go build`。
+- 部署前必须先更新 `deploy/bin/gpt2api`，推荐执行 `bash deploy/build-local.sh`；不能只跑 `docker compose build/up`。
+- Alpine 镜像需要静态 linux/amd64 二进制；手工构建命令为 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o deploy/bin/gpt2api ./cmd/server`。
+- `gpt2api-server` 与 `cli-proxy-api` 必须同在 Docker 网络 `deploy_default`；容器内 `cli-proxy-api` DNS 和 `/healthz` 要可用。
+- `JWT_SECRET` 不能为空，否则服务启动失败；该密钥同时影响登录 JWT 和图片代理签名派生。
 
 ## 排查入口
 
-- 慢单先分层：`new-api` 分组/任务状态、gpt2api `image_tasks`、外置 `codex-cli-proxy-image` 健康、内置 Runner、`/p/img` 回源/超分/保存链路分别看；不要只补账号。
-- 成功任务 `created_at -> started_at` 等待时间正常但总体慢时，优先查外置渠道连续超时；当前异步任务改为“双层预算”：整单总窗口无参考图 8 分钟、参考图 8 分 30 秒；外置 Codex/APIMart 渠道在整单窗口内单独占用 4 分 30 秒，free runner 兜底只复用剩余时间，不再重新起一整段独立倒计时。
-- `/p/img/<task>` 首次代理取图或超分可能额外消耗数秒到二十余秒，不计入 `image_tasks.finished_at`；区分“生成耗时”和“代理下载/超分/保存耗时”。
+- 慢单先分层：`new-api` 分组/任务状态、gpt2api `image_tasks`、外置 `codex-cli-proxy-image` 健康、APIMart、内置 runner、`/p/img` 回源/超分/保存链路分别看。
 - 参考图不生效先看 gpt2api 图片参数日志的 `reference_count`：`0` 表示前端或 `new-api` 没传到号池，`>0` 后再查上传和上游生成效果。
 - 图片裂图先看任务是否有 `file_ids` 和单图代理元信息；浏览器直接访问上游临时图链失败，通常不是任务生成失败。
+- 多图缺失先查下游任务详情 `result.data[]` 和号池 `file_ids/result_urls` 数量；不要只看下游 `private_data.result_url`。
+- 手机保存 `/p/img` 失败先看 HTTP 状态：`403` 多半是签名过期、密钥变更或旧随机签名；`502` 多半是代理回源或上游临时图下载问题。
+- 账号 401/403 后仍被调度，先查账号状态是否已自动变 `dead`；如果没有，补充对应阶段日志再修状态回写。
 - 修改 `deploy/nginx.conf` 后若容器内仍读取旧配置，优先重建 `gpt2api-nginx`，不要只依赖 `nginx -s reload`。
-- CLIProxyAPI 管理界面当前经公网域名可访问，安全性依赖强管理密钥；若要改回仅本机可用，需要重新加 Nginx 层拦截。
 
 ## 最近变更
 
-- 2026-04-29：`fix(image): retry transient reference fetch failures` 已正式部署到当前号池。执行路径为：在当前仓库运行 `bash deploy/build-local.sh` 生成最新 `deploy/bin/gpt2api` 与 `web/dist/`，随后执行 `docker compose -f deploy/docker-compose.yml build server && docker compose -f deploy/docker-compose.yml up -d server` 重建 `gpt2api-server`；之后在 `/home/ubuntu/CLIProxyAPI` 执行 `docker compose up -d --no-build --pull never --force-recreate cli-proxy-api`，让 `deploy_default` 外部网络配置持久生效且不拉取新镜像。部署后 `gpt2api-server` 启动时间为 `2026-04-29 15:44:32 +0800`，`cli-proxy-api` 启动时间为 `2026-04-29 15:44:54 +0800`，本机 `https://127.0.0.1/healthz`、容器内 `http://127.0.0.1:8080/healthz` 与 `http://cli-proxy-api:8317/healthz` 均返回正常；`gpt2api-server` 启动日志记录本次重启将 `3` 个运行中图片任务标记为 `interrupted`。
-- 2026-04-29：已定位并修复本轮大量 `openai: image request ... lookup cli-proxy-api on 127.0.0.11:53: no such host`。根因不是数据库路由或账号池失效，而是 `cli-proxy-api` 容器在最近一次重建后只挂在 `cliproxyapi_default`，没有继续加入 `deploy_default`，导致 `gpt2api-server` 容器内 DNS 无法解析 `cli-proxy-api`。现场先用 `docker network connect deploy_default cli-proxy-api` 恢复运行态，再把 `/home/ubuntu/CLIProxyAPI/docker-compose.yml` 改成默认同时加入外部网络 `deploy_default`，避免下次 `docker compose up` 后再次漂移。修复后容器内 `getent hosts cli-proxy-api` 与 `http://cli-proxy-api:8317/healthz` 已恢复正常，随后新任务已再次出现成功单。
-- 2026-04-29：已为 JSON 参考图下载补上短重试，覆盖 `5xx/408/429` 与 `timeout/EOF/connection reset/broken pipe` 等瞬态失败；同时把单次 HTTP 拉取超时放宽到 `20s`，并新增 `internal/gateway/images_reference_test.go` 覆盖“`5xx` 后重试成功”“读 body 中断后重试成功”“`404` 不重试”三类场景。边界不变：参考图 URL 若持续不可达，仍在落任务前直接返回 `400 invalid_reference_image`，不会创建残留 `image_tasks`。
-- 2026-04-28：已将 `sub2api-valid-openai-json-20260427-105111.zip` 中可用于生产 Codex 图片渠道的账号导入本机 `CLIProxyAPI` 文件池。导入策略为：跳过 `1` 个 `free` 账号，新增 `20` 个 `plus` 文件，并对与现网重合的 `10` 个文件做保守更新——仅当 zip 中 token 明显更新时才覆盖，避免把 `CLIProxyAPI` 已自动刷新的新 token 回滚成旧值。按 `2026-04-27` live-check 结果，`5` 个 `ok` 新号设为 `priority=1` 主池，`15` 个 `quota_or_rate_limit` 新号设为 `priority=0` 冷备；原来仍在主池但最新 live-check 已 429 的重合号也降为 `priority=0`。导入后 `scripts/check-codex-auth-plans.sh` 校验通过，当前文件池为 `34` 个 auth（`plus=31`、`team=3`、`free=0`），其中 `29` 个启用、`5` 个禁用。导入时 `cli-proxy-api` watcher 已热加载这些文件；但日志同时表明，旧池里已有少量账号、以及本次提升到主池的部分新号，在自动 refresh 时会返回 `401`，说明这些号当前 access token 可继续用到过期，但 refresh token 并不都长期稳定，后续若追求长期稳定容量，应补 fresh OAuth。
-- 2026-04-28：`fix(image): align apimart reference image protocol` 已部署到当前号池。部署路径为：在构建机 `43.152.240.30` 的 `/home/ubuntu/gpt2api-build-6d119d5` 运行 `bash deploy/build-local.sh` 产出 `deploy/bin/gpt2api`、`deploy/bin/goose` 和 `web/dist/`，再回传到当前仓库后执行 `docker compose -f deploy/docker-compose.yml build server && docker compose -f deploy/docker-compose.yml up -d server`。部署后 `gpt2api-server` 于 `2026-04-28 16:07:03 +0800` 重启，容器健康状态为 `healthy`，容器内 `http://127.0.0.1:8080/healthz`、容器内到 `http://cli-proxy-api:8317/healthz` 以及本机 `https://127.0.0.1/healthz` 均返回 `ok`。
-- 2026-04-28：已对齐 APIMart `gpt-image-2` 官方文档的图生图协议。当前 `apimart.ai` 渠道在存在参考图时不再走通用 OpenAI 兼容的 `/v1/images/edits`，而是改走 `/v1/images/generations` 并发送 `image_urls[]`；同时 `openai` 适配器开始读取 `upstream_channels.extra` 中的 `official_fallback` 布尔配置并透传给 APIMart。已补适配器单测覆盖“参考图走 generations + image_urls”和“official_fallback 透传”。
-- 2026-04-28：已修复异步图片渠道成功任务在 `file_ids=null` 且 `result_urls` 为 `data:image/...;base64` 时，后台“生成记录”详情和 `/v1/tasks/{id}` 直接返回多 MB JSON 的问题。当前逻辑会把这类内联图片也改走本站 `/p/img/...` 代理，由代理按需解码并返回图片字节；这样不会再把整张图 base64 直接回给前端。排查时已确认这不是整机负载问题：当时主机负载不高，但最近任务中大量成功任务的 `result_urls` 长度在 3MB~14MB，足以触发管理后台 30 秒 axios 超时。修复已在当前号池 `gpt2api-server` 部署。
-- 2026-04-28：已把 `apimart(channel_id=2)` 补上映射 `gpt-image-2 -> gpt-image-2 / modality=image`，并在当前号池部署“APIMart 异步任务 + 比例尺寸/分辨率保留”修复。真实烟测时短暂停掉 `cli-proxy-api`，日志出现 `channel_id=1 codex-cli-proxy-image ... no such host` 后，同一任务 `img_de94e2474a8b4a21ac64fe13` 最终 `succeeded`，结果图来自 `upload.apimart.ai`，证明链路已按“Codex 失败 -> APIMart -> 内置 free runner”顺序工作。
-- 2026-04-28：已补齐构建机 `43.152.240.30` 的基础构建环境。`ubuntu` 用户下安装了系统级 `nodejs`/`npm`，并把 `/usr/local/go/bin` 提前注入到 `~/.bashrc` 的非交互分支与 `~/.profile`，保证 `ssh 构建机 'cmd'` 这类远程非交互执行也能直接拿到 `go`。随后在构建机同步当前工作树并完整跑通 `bash deploy/build-local.sh`，成功产出 `deploy/bin/gpt2api`、`deploy/bin/goose` 和 `web/dist/index.html`；当前只剩 Sass legacy JS API 与 Vite 大 chunk 警告，不影响构建成功。
-- 2026-04-28：已将当前 Codex 环境公钥对应的私钥 `~/.ssh/cliproxyapi_212_50_232_214_ed25519` 加入构建机 `43.152.240.30` 上 `ubuntu` 用户的 `~/.ssh/authorized_keys`，并完成免密 SSH 验证。后续涉及老前端或画布构建时，可直接从当前号池机器进入构建机，不再依赖临时密码登录。
-- 2026-04-28：为 OpenAI 兼容图片适配器补充 APIMart 异步任务兼容。`/v1/images/generations` 若返回 `task_id`，服务端会自动轮询 `/v1/tasks/{id}` 并提取 `result.images[].url`；这样数据库里的 `apimart` 渠道可以作为 `gpt-image-2` 的第二跳外置兜底，而不是只能直落内置 free runner。
-- 2026-04-28：量化最近 24 小时 `gpt2api-server` 日志，外置 Codex 图片渠道触发 `fallback to free account runner` 约 68 次，而异步生图提交约 182 次；主要触发源不是参数错误，而是 `cli-proxy-api:8317` 在旧的 90 秒/2 分钟窗口内大量 `context deadline exceeded`。现已把外置渠道改成“单次独立限时 + 同渠道最多重试一次”，并把外置阶段收敛到统一 `4 分 30 秒` 窗口；其中参考图单次等待也从 3 分钟收短到 2 分钟，避免 Codex/APIMart 两跳都把 free 兜底时间吃空。
-- 2026-04-29：继续针对“第一层拖几分钟才切层”收敛策略，代码已调整为“按 route 分配第一层预算”，不再让 `codex-cli-proxy-image` 靠两次 `timeout` 吃光整段外置窗口；同时对 `context deadline exceeded / timeout` 不再在同一渠道内重试，只保留 `502/EOF/stream disconnected` 这类快失败的短重试。当前本地阈值为：无参考图单 route `90s`、两条 route 总预算 `3m30s`；有参考图单 route `2m`、两条 route 总预算 `4m30s`。截至本次记录时该改动已在仓库通过 `go test ./internal/gateway/...`，但尚未热部署，因为线上仍有进行中的图片任务，直接重启会把它们标成 `interrupted`。
-- 2026-04-29：用户反馈“下游前端生成了几分钟结果任务都没了”后，已跨系统核对 `1575 / 1589` 对应任务，确认号池 `image_tasks` 与下游 `new-api.tasks` 均保留了成功/失败记录，不存在后端删任务。根因在下游前端 `new-api-web` 的 AI 创作作品库：它原先只展示“已有生成图资产”或“仍含正在生成文案”的消息，导致图片任务超时/失败后会从作品库直接消失。该问题已在下游前端提交 `725f769 fix(ai-studio): keep failed image tasks visible` 修复并发布到 `https://dimilinks.com/`；后续再遇到“任务没了”先区分是前端展示消失，还是号池/后端真实丢单。
-- 2026-04-28：继续收敛异步图片长尾后确认，`10+` 分钟不出图的主因是“外置图片渠道超时后，再给 free runner 新开一整段总预算”，而不是任务根本没下发。现已将图片任务改为共享总窗口：无参考图整单 8 分钟、参考图整单 8 分 30 秒；外置渠道仍只占用前 4 分 30 秒，Codex/APIMart 连续超时后，free runner 只吃剩余时间，不再把总时长串行叠加到 10~15 分钟以上。此次阈值保留了近 24 小时里真实存在的 `7m53s` 参考图成功单空间，同时把此前 `12m47s` 的失败长尾提前收口。
-- 2026-04-28：上述“异步图片总预算收敛”已联动部署到三段链路。当前号池 `gpt2api` 已上线共享总窗口策略；下游后端 `new-api` 已把同步图片等待上限从 10 分钟收短到 9 分钟；下游前端 `new-api-web` 已把首轮轮询从 10 秒提前到 3 秒，并把总等待提示窗口从 15 分钟收短到 9 分钟。部署后分别验证了 `gpt2api-server` 健康检查、`new-api-local` 的 `/api/status`、以及 `https://dimilinks.com/` 的线上 hash，三边均已生效。
-- 2026-04-28：上述“减少 Codex 会员链路过早切 Free”修复已在当前号池部署。执行 `bash deploy/build-local.sh`、`docker compose -f deploy/docker-compose.yml build server`、`docker compose -f deploy/docker-compose.yml up -d server` 后，`gpt2api-server` 容器重新启动并恢复 `healthy`；容器内 `http://127.0.0.1:8080/healthz` 与 `http://cli-proxy-api:8317/healthz` 均返回 ok。本次重启有 1 个运行中图片任务被标记为 interrupted。
-- 2026-04-27：手工移植元项目 2026-04-26 的关键修复：图生图 SSE 结果会剔除参考图 file_id；用量日志成功图片按真实产出张数写入并对历史 image_count=0 兜底；账号额度探测支持 max_value/cap/total/limit 和“今日已用+剩余”估算；UploadFile 创建文件步骤加入瞬时错误重试；在线体验参考图限制对齐后端 4 张/20MB。
-- 2026-04-27：上述元项目关键修复已部署到当前号池 `gpt2api-server`；部署命令为 `bash deploy/build-local.sh` 后 `docker compose -f deploy/docker-compose.yml build server && docker compose -f deploy/docker-compose.yml up -d server`，本机与 Nginx `/healthz` 均返回 ok，容器内 `cli-proxy-api:8317/healthz` 可达。重启时有 1 个运行中图片任务被标记为 interrupted。
-- 2026-04-27：外置图片渠道等待窗口收敛为无参考图 90 秒、有参考图 2 分钟；超时后尽快走内置 Runner 兜底，下游前端轮询窗口需覆盖到 15 分钟。
-- 2026-04-27：对外 `/p/img` 代理图统一补绝对 URL，避免下游把相对路径补到错误域名后下载到 HTML。
-- 2026-04-27：管理员“生成记录”改为轻量列表与懒加载图片/失败详情；不要把 base64/data URL 或 `result_urls` 大字段重新放回列表接口。
-- 2026-04-29：`image_tasks` 已新增结构化 `provider_trace`，同步/异步图片请求都会记录原始命中 provider、每一步尝试顺序、触发 free fallback 的原因、最终成功 provider，以及最终使用的内置账号（若落到 runner）。管理侧“生成记录”列表与详情会直接展示这条链路，`codex / apimart / free runner` 不再需要靠日志人工反推。边界是：外置渠道内部若还有更细的 auth 文件/子账号选择，当前号池只能看到命中的 channel，拿不到它们各自服务内部的具体 auth 标识。
-- 2026-04-29 19:51（Asia/Shanghai）：`feat(image): trace provider fallback chain` 已部署到当前号池。执行流程为：在当前仓库运行 `bash deploy/build-local.sh` 重新产出 `deploy/bin/gpt2api` 与 `web/dist/`，随后执行 `docker compose -f deploy/docker-compose.yml build server && docker compose -f deploy/docker-compose.yml up -d server` 重建 `gpt2api-server`；容器启动时自动执行 goose，`20260429000001_image_tasks_provider_trace.sql` 已成功应用，库内确认存在 `image_tasks.provider_trace`。部署后 `gpt2api-server` 于 `2026-04-29 19:51:33 +0800` 启动并恢复 `healthy`，本机 `https://127.0.0.1/healthz`、容器内 `http://127.0.0.1:8080/healthz` 与容器内 `http://cli-proxy-api:8317/healthz` 均返回正常；本次重启日志记录有 `1` 个运行中图片任务被标记为 `interrupted`。
-- 2026-04-29：图片外置兜底已收敛为“可配置策略”，入口在系统设置 `gateway.image_*`。当前支持五项热更：`image_channel_fallback_order`（按 provider/渠道名配置外置顺序）、`image_account_fallback_order`（按账号类型配置内置 runner 兜底顺序，支持 `free/plus/team/pro/codex/any/none`）、`image_channel_cooldown_sec`（连续失败后的冷却时间）、`image_channel_fail_threshold`（连续失败熔断阈值）、`image_skip_codex_to_apimart`（有 APIMart route 时直接跳过 Codex）。实现边界：该策略只作用于图片链路，不改文字渠道；“渠道冷却/熔断”复用 `upstream_channels.fail_count + last_test_at` 推断，不额外引入新状态表。
-- 2026-04-29：管理侧“生成记录”已新增 `/api/admin/image-tasks/stats` 最小命中统计面板，直接基于 `image_tasks.provider_trace` 聚合最近窗口内的总任务、成功率、fallback 触发次数、各 provider 首跳/终态命中，以及主要转移链路（如 `Codex -> APIMart`、`Codex -> Free Runner`）。当前目的是辅助继续压低 Codex 兜底频率，而不是替代完整 BI；统计粒度仍停留在 provider / channel / plan_type，不含外置服务内部 auth 文件级别明细。
-- 2026-04-29：号池图片链路已补“最小侵入”的卡顿定位日志。`image_tasks.provider_trace` 现在除 provider fallback 外，还会累计 `request_ms / queue_ms / submit_ms / upstream_wait_ms / poll_ms / download_ms / total_ms`；`/v1/images/generations`、`/v1/images/edits`、`chat->image`、Runner、外置 channel(APIMart/Codex/OpenAI/Gemini)都会在关键阶段更新这组 timing，并在阶段过慢时输出 `slow image task stage` / `slow image web request` / `slow image task query` / `slow image dao query`。用途是快速区分卡顿主要落在入口 Web、上游等待、上游轮询还是 `image_tasks` 相关数据库查询；边界是：这些 timing 只覆盖当前号池可见的阶段，拿不到外部服务内部更细的 auth 文件/子任务耗时。
-- 2026-04-29：`GET /api/admin/image-tasks/stats` 已在原 provider stats 基础上追加“最近慢任务概览”，支持查询参数 `slow_ms`（默认 `90000`）和 `slow_limit`（默认 `10`，最大 `50`）。返回体会按最近活跃时间给出慢任务列表、各慢阶段计数和每单 `dominant_phase`，便于和上述慢日志互相对照；任务详情接口 `/v1/images/tasks/:id`、`/v1/tasks/:id`、`/api/me/images/tasks*`、管理员生成记录列表也会带上 `timing` 字段，便于不翻日志先看单任务耗时拆分。
-- 2026-04-29 20:18（Asia/Shanghai）：`feat(image): add configurable fallback strategy` 已部署到当前号池。执行流程为：在当前仓库运行 `bash deploy/build-local.sh` 重新产出 `deploy/bin/gpt2api` 与 `web/dist/`，随后执行 `docker compose -f deploy/docker-compose.yml build server && docker compose -f deploy/docker-compose.yml up -d server` 重建 `gpt2api-server`。本次 `goose` 启动时确认 `no migrations to run, current version: 20260429000001`；部署后 `gpt2api-server` 启动时间为 `2026-04-29 20:18:30 +0800`，容器健康状态为 `healthy`，本机 `https://127.0.0.1/healthz`、容器内 `http://127.0.0.1:8080/healthz` 与容器内 `http://cli-proxy-api:8317/healthz` 均返回正常。
-- 2026-04-27：内置 Runner 与外置图片渠道成功结果落库/结算前统一按请求 `n` 截断，防止上游多产出导致下游展示多图。
-- 2026-04-27：新增 `scripts/check-codex-auth-plans.sh`，用于 Codex auth 导入/轮换后拦截 free 或未知 plan 文件。
-- 2026-04-27：参考图上传的 Azure PUT/确认链路增加短重试；上传失败归类为 `network_transient`，不再直接当图片参数错误。
-- 2026-04-27：下游前端 AI 画布已在构建期修正 `gpt-image-2` payload，把比例尺寸转像素尺寸、`1k/2k/4k` 改为 `resolution`，参考图发往 `/pg/images/generations` 前转为 `data:image`。
+- 2026-05-01：已修复图片 runner 遇到上游 `401/403` 不标记账号 `dead` 的问题，并部署到当前号池；部署后已观察到 poll 阶段 `403` 会自动回写账号状态。
+- 2026-05-01：已修复 `/p/img` 签名随进程随机密钥重启失效的问题，签名密钥改为从稳定 `JWT_SECRET` 派生；新增重启后签名仍有效、换密钥后旧签名失效的回归测试。
+- 2026-05-01：已确认 free runner 多图生产依赖并发拆单；单个 free 账号单次会话不应承诺稳定一次性出满 4 张。
+- 2026-05-01：下游后端已把 `gpt-image-2` 分辨率计费改为按 `n` 放大；当前单价为 `1k=0`、`2k=0.06`、`4k=0.12` ⭐。
+- 2026-05-01：当前仓库新增 `scripts/gpt-image-2-single-e2e.mjs`，用于新发或复核 `1k/2k/4k` 真单，支持区分当前展示价漂移和历史订单下单价不一致。
+- 2026-05-01：号池已完成 `gpt-image-2` resolution 路由最小切片：`1k -> free runner`，`2k/4k -> Codex -> APIMart -> free runner`，并在响应和 `provider_trace` 回显 resolution。
+- 2026-04-30：已修复 Codex 图片渠道在 CLIProxyAPI 中用工具模型选路的问题，选路改为 Responses 顶层主模型并禁用 free-tier auth 选择。
+- 2026-04-30：已对齐 APIMart 最新 `gpt-image-2-official` 图片协议，并修复 APIMart 4K 比例请求继续发送不支持比例的问题。
+- 2026-04-29：`image_tasks.provider_trace`、fallback 可配置策略、慢阶段 timing、账号级实时统计已部署，用于减少靠日志人工反推 provider 链路。
 
 ## 已清理内容
 
-- 已删除 2026-04-25 至 2026-04-27 的大部分单次任务 ID、smoke 任务耗时、账号导入文件路径、临时容器/临时 token 细节和一次性数据库快照。
-- 账号导入、SSE 超时、参考图解析、外置渠道接入、下游日志展示等历史流水已折叠到“当前事实”“排查入口”和 `Corrections.md`。
+- 已删除旧文档中大量单次任务 ID、临时 token、即时数据库计数、重复 smoke 结果和已被后续结论覆盖的阶段流水。
+- 早期 `0.12` 单价、`0.06/0.10/0.20` 过渡价、临时“只保留单模型不展开分档”的中间结论已折叠为当前事实。
 - 机器拓扑与连接方式已收敛到 `AGENTS.md`；后续不要在本文件复制 SSH 详情，避免形成两套来源。
-
-## 最近变更
-
-- 2026-04-30 10:00（Asia/Shanghai）：复查“免费兜底很多”的原因时确认，`provider_trace` 完整部署后的窗口（自 `2026-04-29 19:51:33` 起）共 81 个图片任务，其中 50 个最终命中 `free_runner`、31 个命中 `apimart`、0 个命中 `codex`。根因不是免费兜底策略误触发，而是外置链路连续失败后按既定策略兜底：Codex 渠道 `codex-cli-proxy-image` 仍按默认顺序排第一，但当前 `fail_count=56/status=unhealthy`，常见失败为 `unknown provider for model gpt-image-2`；APIMart 作为第二跳的主要失败为 `context deadline exceeded`，其次是 4K 比例不支持（例如 `4K file does not support ratio=4:3/1:1/3:4`）。线上尚未写入 `gateway.image_*` 热更项，因此当前使用代码默认 `image_channel_fallback_order=codex,apimart`、`image_account_fallback_order=free`、`cooldown=300s`、`fail_threshold=3`、`skip_codex_to_apimart=false`。
-
-- 2026-04-30 10:18（Asia/Shanghai）：进一步核对 Codex 图片渠道调用方式后确认，当前 `gpt2api -> cli-proxy-api:8317 /v1/images/generations|edits` 不是直接把图片模型作为 Responses 顶层模型调用；`CLIProxyAPI` 的图片兼容 handler 会构造 `Responses API + image_generation tool`，顶层默认主模型为 `gpt-5.4-mini`，工具模型为 `gpt-image-2`。但 handler 在执行时调用 `ExecuteStreamWithAuthManager(..., "openai-response", defaultImagesToolModel, ...)`，选择账号/路由仍传入 `defaultImagesToolModel=gpt-image-2`；当前运行实例 `/v1/models` 返回空，且直接请求 `/v1/images/generations` 或 `/v1/responses` 均报 `unknown provider for model gpt-image-2/gpt-5.4-mini`。因此 Codex 首跳 502 的直接代码原因更像是 CLIProxyAPI 的模型注册/账号选择层没有可用 provider，或图片 handler 选路模型用错，而不是 gpt2api 传参本身把 `gpt-image-2` 当 Responses 顶层模型。
-
-- 2026-04-30 10:27（Asia/Shanghai）：已在本机 `CLIProxyAPI` 修复并部署 Codex 图片渠道。修复点是图片兼容 handler 选路从工具模型 `gpt-image-2` 改为 Responses 顶层主模型 `gpt-5.4-mini`，并禁用 free-tier auth 选择；同时恢复 27 个 plus Codex auth，保留 3 个已知图片能力异常 plus auth 和 4 个无 plan auth 禁用。验证结果：`cli-proxy-api:8317 /v1/images/generations` 直连返回 `200`；通过当前 `gpt2api` 端到端 smoke 任务 `img_7844e9083dba4662a753ecdc` 成功且 `provider_trace.final.provider=codex`、`channel_name=codex-cli-proxy-image`；`upstream_channels.codex-cli-proxy-image` 已自动恢复 `healthy/fail_count=0`。
-
-- 2026-04-30 11:12（Asia/Shanghai）：定位并修复图片外置渠道超时与 APIMart 4K 比例问题。根因一是号池异步外置通道在 `internal/gateway/image_channel.go` 固定使用 90s/120s 内部 deadline，覆盖了 `upstream_channels.timeout_s`；线上 `codex-cli-proxy-image.timeout_s=420` 仍会被 90s 截断，日志表现为 `openai: image request ... context deadline exceeded`，APIMart 轮询也会在约 90s 被切断。修复后每条 route 使用渠道配置 timeout（低于内部下限时仍保留下限），总外置渠道窗口和任务总窗口按实际 route timeout 扩展，避免长 Codex 超时挤压 APIMart 与 free runner 兜底。根因二是 APIMart 适配器对 4K 请求会用原始 `AspectRatio` 覆盖号池已映射出的像素 `size`，导致继续发送 `1:1/4:3/3:4` 等 APIMart 4K 不支持比例；修复后 APIMart 4K 且已有像素尺寸时发送像素 `size`，不再发送不支持比例。已通过 `go test ./internal/gateway ./internal/upstream/adapter -count=1`。
-
-- 2026-04-30 15:10（Asia/Shanghai）：日志巡检发现 `img_605fae131fc3488aa0eadfd6` 卡在 `running`，`provider_trace` 只写入 `original=codex-cli-proxy-image`，无 step/final/finished_at。根因边界是外置图片适配器调用如果未及时响应 `context`，`imageChannelGenerateWithRetry` 会同步等待 `Adapter.ImageGenerate` 返回，导致异步任务 goroutine 和 `image_tasks` 状态长期悬挂。修复为单次 channel 调用增加外层 watchdog goroutine：到达 attempt/route deadline 时立即返回 `context deadline exceeded`，让后续 APIMart/free runner 或失败结算继续执行；即使底层 HTTP/代理稍后返回，也不会再阻塞任务主流程。部署重启时旧卡单已由启动清理逻辑标记为 `failed/interrupted`；随后观察新提交任务 `img_efc45d936fa54cce9828bbe9`、`img_c95aeadafe3a424ca38ecf07` 均正常完成为 `success`。验证命令：`go test ./internal/gateway ./internal/upstream/adapter ./internal/image -count=1`、`bash deploy/build-local.sh`、`cd deploy && docker compose build server && docker compose up -d server`。
-
-- 2026-04-30 16:20（Asia/Shanghai）：按 APIMart 最新 `gpt-image-2-official` 文档调整第二跳图片渠道协议。提交侧本地 `gpt-image-2` 会映射为上游 `gpt-image-2-official`，继续使用 `POST /v1/images/generations`、`size=比例或像素`、`resolution=1k/2k/4k`、`image_urls`、`mask_url` 风格；`background=transparent` 会在 APIMart 路径静默降级为 `auto`，避免官方不支持透明背景导致无谓失败。任务解析兼容旧 `{data:[{task_id}]}` 与新 `{data:{id,status}}` 两种提交响应，轮询状态新增兼容 `submitted/in_progress`，终态仍从 `data.result.images[].url[]` 取图。该改动只影响 `base_url` 含 `apimart.ai` 的外置 OpenAI 图片渠道，不改变 Codex/native 渠道参数。
-
-- 2026-04-30 21:17（Asia/Shanghai）：已部署 `fix(image): support apimart gpt-image-2 official protocol` 到当前号池线上 `gpt2api-server`。执行命令为 `bash deploy/build-local.sh`、`cd deploy && docker compose build server && docker compose up -d server`；启动日志显示 goose 无新迁移且服务于 `2026-04-30T21:17:24+08:00` 启动。部署后 `docker ps` 显示 `gpt2api-server` 为 `healthy`，本机 `http://127.0.0.1:8080/healthz` 与 Nginx HTTPS `https://127.0.0.1/healthz` 均返回 `status=ok`。
-
-- 2026-04-30 21:49（Asia/Shanghai）：han 在 APIMart 后台放开 `gpt-image-2-official` 后已完成验证。直连 APIMart 官方协议 `POST /v1/images/generations` 返回 `200` 和 `task_01KQFA8TXAVQH4A845B8TPBBM6`，轮询后 `completed` 且有 1 张结果图；随后短暂禁用 Codex 渠道、恢复 APIMart 健康状态，用临时 Key 走号池完整链路提交 `img_08aec6ccfdf64ec3917dbe02`，任务约 19 秒完成，`provider_trace.final.provider=apimart`、`upstream_request_id=task_01KQFADK8AD400S3M6N2Y212K2`。测试后已恢复 `codex-cli-proxy-image` 启用状态，APIMart 渠道置为 `healthy/fail_count=0`，临时 Key `apimart-smoke-temp` 已禁用并软删。
-
-- 2026-04-30 21:40（Asia/Shanghai）：排查下游用户 `1613`（ComfyUI API 用户）在 `3 张参考图 -> 1 张图`、多为 `4k/3200x2560` 的图生图任务中频繁触发兜底。17:00 后该用户 21 个任务全部成功，其中 4 个走 `Codex -> APIMart -> Free Runner` 兜底；外置失败主要为 `context deadline exceeded` / `upstream 502 stream disconnected before completion`。本次修复两点：一是对重型参考图请求（`reference_count>=3` 且 `resolution=4k` 或像素边 >=3000）把外置单路等待下限提升到 6 分钟，并让外置总窗口按请求感知超时计算，避免重型任务被普通 2 分钟参考图阈值提前切走；二是修复 Free Runner 兜底时参考图回显 ID 过滤，原先 `sed:<reference_file_id>` 不会被识别为已上传参考图，可能把参考图回显误当作生成图而提前跳过 Poll，表现为免费账号链路像是只带/只认了 1 张参考图。修复后 `sed:` 与普通 file id 均按上传参考图集合过滤，只有真实生成图满足 `n` 后才跳过 Poll。
-
-- 2026-04-30 21:45（Asia/Shanghai）：补齐图片请求跨层 trace 链路。`provider_trace` 现在统一记录同一次 `/v1/images/*` 的 `request_id`、`task_id`、APIMart 上游 `task_id/upstream_request_id`、下游轮询/转发状态、最终 `error_layer/error_layer_label`；错误层级固定枚举为 `号池入口(gateway_entry)`、`任务队列(task_queue)`、`轮询(polling)`、`号池兜底(gateway_fallback)`、`下游后端(downstream_backend)`、`下游 apimart(downstream_apimart)`。管理端生成记录列表、详情弹窗和复制失败原因会直接展示层级、request/task/upstream id 与转发状态；任务查询接口也透出同样字段，减少排查 503/400 时手工判断错误归属。
-
-- 2026-04-30 22:35（Asia/Shanghai）：对 `/v1/images/edits` 与 JSON 参考图入口做专项错误分类加固。参考图 URL 下载超时会返回/记录 `reference_image_timeout`，参考图体积超限会返回/记录 `reference_image_too_large`，不再统一压成 `invalid_reference_image`；multipart 上传超限也使用同一分类。`codex-cli-proxy-image` 调用前新增 3 秒最小 `Ping` 探活，仅限 `base_url/name` 含 `cli-proxy-api` 的图片渠道，用于提前区分 DNS 解析失败 `channel_resolve_failed` 与连接失败 `channel_connect_failed`；APIMart 等其他外置渠道不走该 `/models` 探活，避免兼容站点误伤。外置渠道真实 HTTP 错误进一步拆为 `upstream_4xx` / `upstream_5xx`，失败日志增加 `error_code/http_status/channel_base_url/upstream_status/upstream_code/upstream_type` 字段，便于把 cli-proxy 基础设施问题、参考图入口问题和上游真实拒绝分开排查。
-
-- 2026-04-30 23:20（Asia/Shanghai）：为图片账号池补齐账号级实时统计和选择日志。管理端 `/api/admin/image-tasks/stats` 现在随 provider trace 统计返回 `accounts`：按账号聚合最近窗口内成功率、平均首包耗时（submit+upstream wait）、平均完成耗时、连续失败次数、最近错误类型、冷却剩余时间和熔断状态；后台图片任务页新增“账号级实时统计”表，便于快速确认是否某批 Codex/Plus 账号拖慢出图。内置 Runner 在调度到账号后会记录 `image account selected` 与 `image account realtime stats`，包含账号状态、plan、成功率、平均耗时、连续失败、最近错误、冷却/熔断；外置图片渠道每次尝试也记录 `image channel selected`，包含 provider、channel 状态、fail_count、优先级、超时和上游模型。验证命令：`go test ./internal/image ./internal/gateway ./internal/scheduler -count=1`、`npm --prefix web run build`（仅出现既有 Sass legacy JS API 与大 chunk 警告）。
-
-- 2026-05-01 00:30（Asia/Shanghai）：复核下游后端 `new-api` 最近 15 个提交（截至 `f6dc35d18 docs(admin-frontend): close deploy chain plan`）。本轮主要是上游 split frontend 导入、`web/default`/`web/classic` 前端拆分、`preview.dimilinks.com` 管理员前端独立部署链和文档/验证脚本；后端业务目录未出现与号池协议相关的改动。实际触及的非前端/文档文件集中在 `tools/deploy_admin_frontend.py`、`tools/tests/test_deploy_admin_frontend.py` 与 `web/default/src/features/system-settings/models/upstream-ratio-sync*`，其中部署脚本只 smoke `/api/status`、`/api/pricing` 并校验 `gpt-image-2 quota_type=1/model_price=0.12`。结论：这批下游更新不要求当前号池 `gpt2api` 立即改接口、路由或返回结构；只有当下游后续切换 `gpt-image-2` 分辨率分档计费、调整转发到号池的渠道优先级/分组、或新增依赖号池管理 API 的字段时，号池才需要跟改。
-
-- 2026-05-01（Asia/Shanghai）：本轮重新确认 `gpt-image-2` 分档联动计划。历史 `model_price=0.12` 视为旧单价状态，不再作为本轮定价依据；默认目标额度价为 `1k=0.06`、`2k=0.10`、`4k=0.20` ⭐，最终以后台 `model_price` 分档配置为准。默认缺失 resolution 的旧请求按 `1k` 兼容。`2k/4k` 成功时按请求档位结算，即使最终由 free runner 兜底；但 Web/free runner 只作为完成率兜底，不承诺原生稳定 2K/4K，原生大图能力仍以 Codex/APIMart 外置渠道为主。
-
-- 2026-05-01（Asia/Shanghai）：号池已完成 `gpt-image-2` resolution 分档路由最小切片：请求会规范化 `resolution=1k/2k/4k` 并写入 `provider_trace.resolution`；`1k` 策略跳过外置图片渠道，只走 strict free runner；`2k/4k` 策略强制外置渠道顺序为 `Codex -> APIMart`，保留 strict free runner 兜底。同步、异步提交和任务查询响应均开始回显规范化 `resolution`；未新增数据库字段，避免污染 `image_tasks.upscale` 的本地超分语义。验证命令：`go test ./internal/gateway ./internal/image ./internal/scheduler -count=1`。
-- 2026-05-01（Asia/Shanghai）：下游后端 `new-api` 已完成 `gpt-image-2` 分辨率分档计费最小切片并提交 `62a30ba51 feat(image): add gpt-image-2 resolution pricing`。后端按请求 resolution 覆盖预扣价格，缺省/未知按 `1k=0.06`，`2k=0.10`，`4k=0.20`；任务 `private_data.billing_context` 固化 `resolution` 与 `pricing_version=gpt-image-2-resolution-v1`，成功按请求档位结算，失败沿用任务退款逻辑。`/api/pricing` 的 `gpt-image-2` 条目新增 `resolution_options`，`model_price` 兼容默认 `1k`，任务查询会回显完成任务的 `resolution`。验证命令：`go test ./relay/channel/task/sora ./controller ./model ./service -count=1`。
-- 2026-05-01（Asia/Shanghai）：下游前端 `new-api-web` 已完成 `gpt-image-2` 分辨率价格展示并提交 `e0e0f2a feat(ai-studio): show gpt-image-2 resolution pricing`。AI 创作台 `/console/images` 读取后端 `/api/pricing` 的 `gpt-image-2.resolution_options`，在分辨率下拉中展示 `1K/2K/4K` 后端价格，并提示按所选档位预扣、`2K/4K` 兜底成功仍按请求档位结算；价格缺失时保留原泛化说明。前端验证通过：`bun run test -- --run src/lib/api/services.test.ts src/features/console/ai-studio-page.test.tsx`、`bun run build`、`bun run preview:publish`、`bun run preview:verify`。
-
-- 2026-05-01（Asia/Shanghai）：修正 `gpt-image-2` 分档价格单位和真相源。此前前端把 `model_price` 展示为人民币 `¥`，容易误导；实际下游按额度 ⭐ 计算，业务换算关系为 `2 RMB = 1 ⭐`。下游后端改为优先读取后台 `model_price` 分档键 `gpt-image-2:1k` / `gpt-image-2:2k` / `gpt-image-2:4k`，未配置时才使用默认 `0.06/0.10/0.20` ⭐；因此后台可把 `gpt-image-2:1k` 设置为 `0` 实现 1K 免费。下游前端同步改为展示 `0.06 ⭐` 这类额度单位，不再展示 `¥0.06`。
-
-- 2026-05-01（Asia/Shanghai）：实际复核三端后发现一个上线遗漏：下游后端源码已提交 `bddf831e4 fix(image): make resolution pricing configurable`，但生产 `new-api-local` 容器仍运行旧二进制，导致公网 `/api/pricing` 仍返回 `gpt-image-2 model_price=0.12` 且没有 `resolution_options`。已按既有热替换流程执行 `python3 tools/deploy_production_hot_swap.py --remote-build-script /home/ubuntu/bin/build-new-api-production.sh --health-timeout 120`，生产容器二进制更新到提交 `bddf831e46a376beda521c05d9851b183ab95cd4`，容器内 `/new-api` sha256 为 `c9691f476ce5b8d7c808ba870395e7e27841d2a4b6ddc70f1372b4406f1a815a`，回滚备份为 `/root/new-api/.deploy-backups/new-api-local-new-api-before-bddf831e46a376beda521c05d9851b183ab95cd4-20260430T135749`。复测 `https://preview.dimilinks.com/api/pricing` 与 `https://dimilinks.com/api/pricing` 均返回 `gpt-image-2` 的 `resolution_options`：`1k=0.06`、`2k=0.10`、`4k=0.20` ⭐，并带 `pricing_version=gpt-image-2-resolution-v1`。同时修正构建机 `/home/ubuntu/bin/build-new-api-production.sh`：当前 `new-api` 已是 `web/default` split frontend，构建脚本必须进入 `web/default`，使用隔离 Node `22.12.0` 路径 `/home/ubuntu/.local/node-v22.12.0-linux-x64/bin`，构建后复制 `web/default/dist` 到 `web/dist` 再编译后端；否则会因 `web/package.json` 不存在或 Node `18.19.1` 不满足 Rsbuild 要求而失败。
-
-- 2026-05-01（Asia/Shanghai）：完成 `gpt-image-2` 三端真实联调。先发现当前号池只执行 `docker compose build/up` 时仍复制旧的 `deploy/bin/gpt2api`，导致线上 1K/2K/4K 都走 Codex 且任务响应不回显 `resolution`；根因是本项目 Dockerfile 是“宿主预编译 + 镜像复制产物”，镜像构建不会自动 `go build`。已用 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o deploy/bin/gpt2api ./cmd/server` 重新生成静态二进制，再重建并重启 `gpt2api-server`，容器恢复 healthy。真实下游入口 `/v1/images/generations` 联调结果：`1k` 下游任务 `task_TfqzwOgpz7BrU25uyfry7cvLvtYGFJQA` 预扣 `30000`、`billing_context.model_price=0.06`、`resolution=1k`，号池 upstream `img_f2cbc1580b8b451fb1f5b18c` 跳过 Codex/APIMart 并由 `free_runner` 成功；`2k` 下游任务 `task_3FhvgT5rH7Iixr2vDM2VpA7QRijzl1bI` 预扣 `50000`、`model_price=0.1`、`resolution=2k`，号池 upstream `img_f6862f2101d44c81944c4abc` 走 Codex 成功；`4k` 下游任务 `task_NUjqPPjdlqlTsUbvyqBVqAiwJtT22tOs` 预扣 `100000`、`model_price=0.2`、`resolution=4k`，号池 upstream `img_b20b16cce5e74db088c4b691` 走 Codex 成功。测试用的号池 key `api_keys.id=21` 已禁用；下游测试 token `id=449/450` 与测试用户 `id=1621/1622` 已禁用。结论：前端 pricing、下游扣费快照、号池路由 trace 三者已对齐；后续号池部署必须先更新 `deploy/bin/gpt2api`，不能只重建镜像。
-
-- 2026-05-01（Asia/Shanghai）：按 han 明确要求回退下游后台 `gpt-image-2` 分档展示/计费特判，只保留单个真实模型和单个价格键 `gpt-image-2`。已将 `ModelPrice` 中的 `gpt-image-2:1k/2k/4k` 删除并设 `gpt-image-2=0`，补回 `models.model_name='gpt-image-2'` 元信息；同时在下游后端提交并热替换 `52e8fc433 fix(image): keep gpt-image-2 as single priced model`，移除 `/api/pricing` 自动返回 `resolution_options` 和 Sora 任务适配器按请求体 resolution 覆盖价格的逻辑。验证结果：`https://dimilinks.com/api/pricing` 仅返回一个 `model_name=gpt-image-2`，`model_price=0`，没有 `resolution_options/pricing_version`；数据库 `ModelPrice` 只匹配到 `{gpt-image-2}`。
-
-- 2026-05-01（Asia/Shanghai）：按 han 新要求重新启用下游后端 `gpt-image-2` 按请求体 `resolution` 分档计费，且默认价改为额度 ⭐：`1k=0`、`2k=0.06`、`4k=0.12`。下游后端提交 `1caa90321 fix(image): price gpt-image-2 by resolution`，恢复 `/api/pricing` 的 `resolution_options` 与任务预扣阶段的分辨率价格覆盖；后台 `ModelPrice` 仍保留单个 `gpt-image-2=0`，分档价默认来自代码，也支持后台键 `gpt-image-2:1k` / `gpt-image-2:2k` / `gpt-image-2:4k` 覆盖。验证通过：`go test ./relay/channel/task/sora ./controller ./model ./service -count=1`；已热替换生产，`https://dimilinks.com/api/pricing` 与 `https://preview.dimilinks.com/api/pricing` 均返回 `1k=0`、`2k=0.06`、`4k=0.12`，`pricing_version=gpt-image-2-resolution-v1`。
-
-- 2026-05-01（Asia/Shanghai）：复核 han 提供的 `gpt-image-2` 三档真实调用记录。当前公网 `/api/pricing` 返回 `resolution_options` 为 `1k=0`、`2k=0.06`、`4k=0.12` ⭐；下游最近三条任务 `3208/3209/3210` 分别按 `quota=0/30000/60000` 预扣，对应 `model_price=0/0.06/0.12`。号池对应任务 `3156/3157/3158` 的 `provider_trace.resolution` 分别为 `1k/2k/4k`，链路分别为 `1k -> Codex/APIMart skipped(resolution_runner_only) -> Free Runner(#254/free)`、`2k -> Codex(codex-cli-proxy-image)`、`4k -> Codex(codex-cli-proxy-image)`。需要注意：号池自身 `models.image_price_per_call` 仍是固定 `10`，因此号池内部 `image_tasks.estimated_credit/credit_cost` 和 `usage_logs.credit_cost` 对三档都显示 `10`，这是号池侧成本/内部余额语义，不是下游用户实际扣费；用户侧真相源仍以下游任务 `quota` 和 `logs.other.model_price` 为准。
-
-- 2026-05-01（Asia/Shanghai）：完成免费账号 `gpt-image-2` 生成能力矩阵实测。测试通过本机临时 key `api_keys.id=22/codex-free-matrix-20260501`（已禁用）强制 `resolution=1k`，所有任务均走 `Free Runner`，涉及账号 `178/198/254/255`。结论：当前号池服务端硬限制 `n` 最大为 `4`，`n=8` 会被 clamp 成 `4`；Runner 对 `n>1` 是并发启动多个单张任务，实测 `n=2` 和 `n=4` 均成功返回对应张数。免费账号返回内容类型实际为 `image/png`，`output_format=png/jpeg/webp` 不改变输出格式。实测常见比例可出：`1:1` 返回约 `1254x1254`，`16:9`/`4:3` 请求通常落库为 `1536x864`/`1536x1152`，但 free Web Runner 实际图片可能为 `1536x1024` 或约 `16:9` 的 `16xx/17xx x 8xx/9xx`；`9:16`/`3:4` 返回 `1024x1536`。多张任务可能首次代理回源单张图超时 502，但重试可成功，根因是 `/p/img` 代理回源 chatgpt attachment 经代理偶发超时，不是生成失败。
-
-- 2026-05-01（Asia/Shanghai）：排查 han 提供的 `gpt-image-2` 多图任务 `task_Xq6ih8aksQPOWZD2w2tGOkzzs2G07qn0` / 号池 `image_tasks.id=3171`。事实：号池任务 `img_1989286139d3466db8707888` 为 `n=4`，`file_ids=4`、`result_urls=4`；下游 `tasks.id=3212` 的 `data.result.data` 也是 4 张，缺图不是号池生成或下游任务结果丢失。容易误导的是下游 `private_data.result_url` / 列表兼容字段只保存首张 URL，不能用它判断多图完整性；前端/客户端应读取任务详情 `result.data[]`。同时发现下游后端分辨率计费只按档位收一次、未乘 `n`；已在下游后端提交并部署 `023e1875b fix(image): bill gpt-image-2 by image count`，现在 `gpt-image-2` 分档价格会按 `n`（1-4，超过按 4 clamp）放大预扣，例如 `2k n=4` 按 `0.06×4` 计。下游前端已提交并发布 `d5db923 fix(ai-studio): persist multiple image count`，修复 AI 创作台草稿恢复只允许 `imageCount=1` 的问题；静态资源验证包含 `imageCount<=4`。验证：下游后端 `go test ./relay/channel/task/sora -run "TestTaskAdaptorEstimateBilling_UsesGPTImageResolutionPrices|TestTaskAdaptorEstimateBilling_UsesConfiguredGPTImage2ResolutionPrice" -count=1` 通过；前端 `npm test -- --run src/features/console/ai-studio-local-store.test.ts src/features/console/ai-studio-request-builder.test.ts` 通过；生产后端 `/new-api --version` 为 `023e1875b7e3d658e77767f4af1c6b0cbeff7208`。
-
-- 2026-05-01（Asia/Shanghai）：当前仓库新增可重复运行的 `gpt-image-2` 三档真单联调工具 `scripts/gpt-image-2-single-e2e.mjs`，npm 入口为 `cd scripts && npm run gpt-image-2:e2e -- ...`。工具支持用号池 API Key 新发 `1k/2k/4k` 单张异步请求并轮询，也支持传 `--task-ids` 复用号池任务或传 `--downstream-task-ids` 由下游 `tasks.private_data.upstream_task_id` 映射到号池任务；输出会整理 `resolution`、`provider_trace`、任务状态、号池 DB 关键字段、最近容器日志、下游 `billing_context` 和前端 `/api/pricing` 展示价。脚本默认会用 `~/.ssh/cliproxyapi_212_50_232_214_ed25519` 进入下游后端，并按当前生产下游 Postgres 参数 `container=new-api-postgres-local / db=new-api / user=root` 查询。用历史三单复核时，号池路由核对通过：`1k -> free_runner`，`2k/4k -> codex-cli-proxy-image`；现在可通过 `--order-prices 1k=0.06,2k=0.10,4k=0.20` 或环境变量 `GPT_IMAGE2_ORDER_PRICES` 指定订单创建时应价，脚本会把旧 `billing_context` 与当前前端展示价 `0/0.06/0.12` 的差异标为 `price_drift` WARN，而只有相对 `--order-prices` 不一致时才标 `billing_context_mismatch` FAIL；未传 `--order-prices` 时仍按当前展示价严格核对，适合验收新单。
-
-- 2026-05-01 12:40~12:48（Asia/Shanghai）：专项测试“单个免费账号是否能稳定一次性出 4 张图”。测试没有走公网 `n=4` 入口，因为当前 `Runner.Run(n>1)` 会拆成 4 个并发单张任务、可能使用多个账号；改用底层 `runOnce(N=4, RequirePlanType=free)` 验证同一个免费账号、同一次 ChatGPT 会话。结果不支持“稳定一次性 4 张”：账号 `254/free` 同会话约 133s 后只返回 2 张；账号 `255/free` 在临时 Redis 锁固定调度后约 141s 只返回 1 张；账号 `253/free` 在 chat-requirements 阶段返回 401。结论：免费账号可作为 1K 完成率兜底，但不应承诺单个 free 账号一次性稳定交付 4 张；生产多图仍应依赖当前并发拆单策略，并在日志中关注每个 part 的账号、张数和失败原因。测试后确认 `acct:lock:*` 无 Redis 锁残留。
-
-- 2026-05-01 12:22~12:53（Asia/Shanghai）：排查手机端作品库“图片未能保存到本机，请重新生成一次”。han 提供的下游任务 `task_7bGgeqUn1Sk7Q1oyLpVPRatWC69vG34z` / 号池任务 `img_9cadc1d30aa04fe9a2c5e845` 实际已成功生成，号池 `n=3`、`file_ids=3`、`result_urls=3`，最终链路为 `Free Runner #254/free`；下游 `tasks.data.result.data` 也有 3 张结果。失败发生在下游前端把远端 `/p/img` 图片物化成本机 Blob 时：下游 `new-api-local` 日志在 12:22 记录三张图访问 `https://lmage2.dimilinks.com/p/img/img_9cadc...` 均返回 403，号池日志同一时间也记录对应 `/p/img` 403。根因是号池 `/p/img` 签名密钥此前为进程级随机值，任务 12:16 完成后返回的 24h 签名 URL 在 12:19 号池重启后立刻失效，导致手机 12:22 保存时 403。
-
-- 2026-05-01 12:53（Asia/Shanghai）：已修复并部署 `/p/img` 签名重启失效问题。`imageProxySecret` 改为启动时从稳定服务端 `JWT_SECRET` 派生，保留空密钥时的随机兜底；`cmd/server` 若 `JWT_SECRET` 为空会启动失败，避免生产继续发出重启即失效的图片 URL。新增回归测试覆盖“同一服务密钥重启后签名仍有效”和“换密钥后旧签名失效”。部署使用干净 worktree 构建以避免混入当前目录中已有的 `runner.go` 日志改动，执行并通过 `go test ./internal/image ./internal/gateway -count=1`、`bash deploy/build-local.sh`、`cd deploy && docker compose build server && docker compose up -d server`；本机和 HTTPS `/healthz` 均正常。验证真单 `img_dbe4c2d1043e4c6b8c9991dc`：部署后新生成的 `/p/img` URL 在号池重启前后均返回 `200 image/png`，大小 `929288` 字节且二进制一致；测试 key `api_keys.id=25/codex-image-proxy-secret-20260501` 已禁用并软删。边界：部署前旧随机密钥签出的 URL 无法反向恢复，需要重新查询任务生成新 URL 才能查看/保存。
-
-- 2026-05-01（Asia/Shanghai）：排查后台 GPT 账号池“401 免费账号状态未更新、仍被调度”。线上证据：`12:51` 左右账号 `253/free` 被图片 runner 选中后，`chat-requirements/prepare` 返回 `403`，任务以 `auth_required` 换号重试到账号 `254`，但账号 `253` 仍保持 `healthy`；根因是图片 runner 只把 `401/403` 分类为 `auth_required` 并重试，没有像文字链路一样调用 `Scheduler.MarkDead`。已修复图片链路状态回写：ChatRequirements、参考图上传、prepare、SSE、poll、download URL 阶段遇到上游 `401/403` 会标记账号 `dead`，遇到 `429` 仍走 `throttled/cooldown`；poll 阶段新增 `LastHTTPStatus`，避免 `401/403` 被伪装成普通 poll 错误或超时。验证命令：`go test ./internal/image ./internal/upstream/chatgpt ./internal/gateway ./internal/scheduler -count=1`。已通过 `bash deploy/build-local.sh`、`docker compose -f deploy/docker-compose.yml build server && docker compose -f deploy/docker-compose.yml up -d server` 部署到当前号池，容器内 `/app/gpt2api` 时间为 `2026-05-01 13:06`，本机和 HTTPS `/healthz` 正常；已手工把确认坏号 `253/free` 标为 `dead`。部署后真实流量又命中 `254/free` 的 poll 阶段 `conversation get 403`，新逻辑已自动把 `254/free` 标为 `dead`，说明回写生效；当前账号汇总为 `dead/free=2`、`healthy/free=1`、`healthy/plus=8`、`warned/free=397`。最终部署应使用 `HEAD` 干净快照重编译二进制，避免混入当前工作区未提交的多图 part 日志草稿。

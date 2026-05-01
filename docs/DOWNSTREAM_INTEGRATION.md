@@ -1,6 +1,6 @@
 # 下游 new-api / 前端对接开发文档
 
-> 更新时间：2026-04-26（Asia/Shanghai）
+> 更新时间：2026-05-01（Asia/Shanghai）
 > 适用范围：下游自有后端 `new-api` + 下游前端，对接当前 `gpt2api` 图片生成能力。
 
 ## 1. 当前结论
@@ -9,10 +9,11 @@
 - **推荐 Base URL**：`https://lmage2.dimilinks.com/v1`。
 - **认证方式**：`Authorization: Bearer <gpt2api API Key>`；该 Key 只能放在 `new-api` 后端，不能下发到浏览器。
 - **当前主要能力**：图片生成；文字 `/v1/chat/completions` 后端保留，但前端入口关闭，不建议新接入时依赖文字能力。
-- **当前账号池**：生产库快照为 409 个活跃账号：`codex/free` 114 个 `healthy`、286 个 `warned`，以及 `codex/plus` 9 个 `healthy`。
+- **当前账号池**：账号健康会随上游 401/403、429 和任务结果实时变化；排查时以线上数据库和后台统计为准，不沿用旧快照。
 - **当前模型**：`gpt-image-2` 启用；模型配置仍保留内置 Web Runner 的 `upstream_model_slug=gpt-5-3`，但生产优先通过外置 Codex image channel 路由到上游 `gpt-image-2`。
 - **当前关键依赖**：生产库必须存在并启用 `codex-cli-proxy-image` 渠道，`base_url=http://cli-proxy-api:8317`，映射 `local_model=gpt-image-2 / upstream_model=gpt-image-2 / modality=image`；`gpt2api-server` 与 `cli-proxy-api` 必须同在 Docker 网络 `deploy_default`，容器内 DNS `cli-proxy-api` 必须可解析。
 - **当前下游依赖**：`new-api` 的 token 不只要 `model_limits=gpt-image-2`，还要落到能使用该模型的分组（当前为 `gpt-image-2`），否则会在 `new-api` 侧报 `No available channel for model gpt-image-2 under group default`，请求不会进入 gpt2api。
+- **当前分辨率策略**：`1k` 走 strict free runner；`2k/4k` 优先 `Codex -> APIMart`，外置瞬态失败后可回落 strict free runner。
 
 一句话回答：**公网调用只走 `https://lmage2.dimilinks.com/v1`；但 gpt2api 内部的 `gpt-image-2` 生产路径依赖本机 `cli-proxy-api:8317` Codex 图片渠道，不是让下游直接调用 `cliproxyapi.845817074.xyz`。**
 
@@ -36,9 +37,8 @@ flowchart LR
 ### 2.1 哪些事情由 gpt2api 负责
 
 - 校验 `Authorization: Bearer` API Key、IP 白名单、模型白名单。
-- 用户积分预扣、成功结算、失败退款。
-- 优先按 `upstream_channels` + `channel_model_mappings` 把 `gpt-image-2` 路由到外置 Codex image channel，并记录渠道健康状态。
-- 在没有启用 image route 时，才回退调度 ChatGPT 账号池：一号一任务加锁，失败时跨账号重试。
+- 号池内部 API Key 计费、成功结算、失败退款；下游终端用户计费真相源在 `new-api`。
+- 按请求 `resolution` 选择路由：`1k` 只走 strict free runner，`2k/4k` 优先外置 Codex/APIMart，必要时回退调度 ChatGPT 账号池。
 - 内置 Web Runner 调用 chatgpt.com 的 `f/conversation` 图片链路；Codex image channel 调用本机 `cli-proxy-api:8317`。
 - 生成并保存 `image_tasks`，返回 `task_id`、稳定错误码、上游错误详情和图片 URL。
 - 通过 `/p/img/:task_id/:idx?exp=...&sig=...` 代理下载图片，避免下游直接暴露或依赖上游短期直链。
@@ -49,6 +49,7 @@ flowchart LR
 - 把下游前端请求转换成 `gpt2api` 支持的 OpenAI 兼容请求，并完整转发 `size / resolution / image_urls` 等图片字段。
 - 确保用户 token 落在支持 `gpt-image-2` 的分组；不要只设置 `model_limits` 却让请求落到 `default` 分组。
 - 记录下游自己的业务任务 ID 与 `gpt2api.task_id` 的映射。
+- 创建任务时固化终端用户计费快照：`resolution`、单张 `model_price`、`image_count`、`pricing_version`；当前默认单价为 `1k=0`、`2k=0.06`、`4k=0.12` ⭐，总价按 `n` 放大。
 - 轮询 `gpt2api` 任务状态，并把状态归一化给前端。
 - 将 `gpt2api` 返回的相对图片地址补成绝对 URL，或者原样透传并让前端按 `gpt2api` origin 补全。
 
@@ -331,7 +332,7 @@ const absoluteUrl = new URL(item.url, GPT2API_ORIGIN).toString()
 
 - 不要丢掉 `exp` 和 `sig`。
 - 签名 URL 默认有效期约 24 小时。
-- gpt2api 进程重启后，旧签名 URL 会失效；如果前端历史图裂了，应让后端重新查询任务拿新 URL，而不是复用旧 URL。
+- 同一 `JWT_SECRET` 下 gpt2api 进程重启不会让新签 URL 失效；签名过期、更换密钥或早期随机密钥签出的旧 URL 失效时，应让后端重新查询任务拿新 URL。
 - `/p/img` 只适用于任务返回本站签名代理 URL 的场景；Codex image channel 也可能直接返回 `https://...` 或 `data:image/...`。只有内置 Web Runner 的 `/p/img` 回源链路才会下载 chatgpt.com 文件；显式本地超分开启且任务最终账号为 `free` 时，才会触发本地超分。
 
 ## 5. 关键依赖清单
@@ -378,7 +379,7 @@ async function submitImageTask(input: {
       prompt: input.prompt,
       n: input.n || 1,
       size: input.size || '16:9',
-      resolution: input.resolution || '2k',
+      resolution: input.resolution || '1k',
       image_urls: input.image_urls,
     }),
   })

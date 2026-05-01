@@ -1,6 +1,6 @@
 # gpt2api 图片 API 手册
 
-更新时间：2026-04-26（Asia/Shanghai）
+更新时间：2026-05-01（Asia/Shanghai）
 适用范围：`gpt2api` 对外图片接口、下游 `new-api` 后端、AI 创作前端。  
 当前重点模型：`gpt-image-2`。
 
@@ -29,7 +29,7 @@ Authorization: Bearer <gpt2api API Key>
 Content-Type: application/json
 ```
 
-图片结果 URL `/p/img/...` 不需要 API Key；它依赖 URL 中的 `exp` 和 `sig` 做签名校验，默认有效期约 24 小时，服务重启后旧签名可能失效。
+图片结果 URL `/p/img/...` 不需要 API Key；它依赖 URL 中的 `exp` 和 `sig` 做签名校验，默认有效期约 24 小时。当前签名密钥由服务端 `JWT_SECRET` 稳定派生，同一密钥下服务重启不会让新签 URL 失效；签名过期或更换 `JWT_SECRET` 后旧 URL 会失效。
 
 ### 1.3 推荐调用链路
 
@@ -55,6 +55,7 @@ GET  /v1/tasks/{task_id}
 - 容器内解析：`gpt2api-server` 内 `cli-proxy-api` 能解析到容器 IP，并且 `http://cli-proxy-api:8317/healthz` 返回 ok。
 - 数据库路由：`upstream_channels` 存在 `codex-cli-proxy-image`，`base_url=http://cli-proxy-api:8317`，`enabled=1`；`channel_model_mappings` 存在 `gpt-image-2 -> gpt-image-2 / modality=image / enabled=1`。
 - 下游分组：`new-api` token 需要落在支持 `gpt-image-2` 的分组；如果错误是 `No available channel for model gpt-image-2 under group default`，说明请求通常还没进入 gpt2api。
+- 分辨率路由：`1k` 跳过外置渠道并走 strict free runner；`2k/4k` 优先 `Codex -> APIMart`，必要时回落 strict free runner。
 
 快速核验：
 
@@ -407,6 +408,7 @@ curl https://lmage2.dimilinks.com/v1/tasks/img_xxx \
 
 - `size`：画幅比例，支持 `1:1`、`16:9` 等。
 - `resolution`：目标清晰度档位，支持 `1k`、`2k`、`4k`。
+- 未传或无法识别 `resolution` 时，协议层默认按 `1k` 处理，并在任务响应中回显实际采用的档位。
 
 也支持直接传具体像素：
 
@@ -464,7 +466,7 @@ curl https://lmage2.dimilinks.com/v1/tasks/img_xxx \
 
 - 画幅：`1:1`、`3:2`、`2:3`、`4:3`、`3:4`、`16:9`、`9:16`、`21:9`、`9:21`。
 - 清晰度：`1k`、`2k`、`4k`。
-- 默认值：`size=1:1`、`resolution=2k`。
+- 协议缺省：未传 `resolution` 时按 `1k`；前端产品默认值可按后端 pricing/产品策略选择。
 - 专业模式再开放具体像素 `WxH`。
 
 ## 9. 参数说明
@@ -667,22 +669,25 @@ function normalizeImageUrl(url: string) {
 - 不要把 `gpt2api API Key` 下发到浏览器。
 - 不要只改前端枚举而忘记后端转发 `size/resolution/image_urls`。
 - 不要把浏览器 `blob:` URL 直接传给 gpt2api；要先上传到后端或转成 data URL。
-- 不要默认 `n>1`；当前 Codex/native 渠道按 `n=1` 设计最稳。
+- 不要只看兼容首图字段判断多图是否缺失；多图结果以任务详情 `result.data[]` 为准。
+- `n>1` 会按最多 4 张处理；free runner 生产多图依赖并发拆单，不承诺单个 free 账号单次会话稳定一次性出满 4 张。
 - 不要把 `/v1/images/tasks/{id}` 和 `/v1/tasks/{id}` 的响应结构混在一起。
 - 不要把 `model_limits=gpt-image-2` 当成完整授权；`new-api` token 分组也必须能命中 `gpt-image-2` 渠道。
 - 不要把 `reference_count=0` 的问题归因到上游生成效果；这通常说明参考图没有转发到 gpt2api。
 
 ## 13. 已验证能力快照
 
-截至 2026-04-26，当前链路已验证：
+截至 2026-05-01，当前链路已验证：
 
 - 文生图：`gpt-image-2` 可提交、轮询、取图。
 - JSON 图生图：`image_urls` / `reference_images` 等字段可携带参考图。
 - multipart 图生图：`/v1/images/edits` 可上传参考图。
+- 分辨率路由：`1k -> free runner`，`2k/4k -> Codex -> APIMart -> free runner`。
 - 尺寸：`auto`、`1:1`、`3:2`、`2:3`、`4:3`、`3:4`、`5:4`、`4:5`、`16:9`、`9:16`、`2:1`、`1:2`、`21:9`、`9:21` 均完成过提交、轮询、取图验证。
 - 内容：中文场景、英文场景、产品图、文字海报、人像、建筑等类型均完成过测试。
 - 2K/4K：Codex/native 图片渠道已验证文生图和参考图链路能返回 2K/4K 档结果。
 - 1K 非正方形：`16:9+1k` 已验证映射为 `1536x864` 并成功返回，避免旧的 `1024x576` 最小像素预算错误。
+- 多图：号池 `n` 最大按 4 处理，任务详情可返回多张 `result.data[]`；下游计费应按实际计费张数放大。
 
 仍需前端按产品策略处理：
 

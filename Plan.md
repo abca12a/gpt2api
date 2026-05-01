@@ -1,94 +1,45 @@
 # Plan
 
-## 目标拆分
+## 当前维护计划
 
-### 1. 先统一“真相源”
+### 1. 先分层定位
 
-- 用户收费真相源放在下游后端 `new-api`，不要把价格常量写死在前端。
-- 渠道路由真相源放在号池 `gpt2api`，不要让下游前后端各自猜测 `1k/2k/4k` 该走哪条链路。
-- 前端只展示后端返回的可用分辨率、额度价格（⭐）和提示文案。
-- 结算语义按“请求档位”而不是“最终命中 provider”定义；`2k/4k -> free runner` 属于执行层兜底，不自动改写用户侧价格。
+- 前端问题先确认是展示/保存/轮询问题，还是下游任务真实失败。
+- 下游问题先查 `new-api.tasks`、`logs.other`、`private_data.upstream_task_id` 和 `billing_context`。
+- 号池问题再查 `image_tasks`、`provider_trace`、容器日志、外置 channel 状态和账号状态。
+- 外部上游问题最后再看 `cli-proxy-api`、APIMart、ChatGPT Web Runner 和代理网络。
 
-### 2. 先做兼容，再切默认
+### 2. gpt-image-2 路由验收
 
-- 第一阶段先补“按 resolution 选路”的能力，但保持现网默认行为不变，优先通过配置开关或灰度条件控制。
-- 第二阶段补下游后端分辨率收费逻辑与接口透传。
-- 第三阶段补下游前端文案和用户提示。
-- 第四阶段完成联调后再切默认策略，避免三端未同时上线时出现前端、后端、号池语义不一致。
-- 切换保护：在下游后端未完成分档预扣前，不应只在前端展示新价；在号池未完成分档路由前，不应把 `2k/4k` 默认公开为稳定原生大图。
+- `1k`：请求缺省或显式 `1k` 时，号池应跳过 Codex/APIMart，只用 strict free runner。
+- `2k`：优先 `codex-cli-proxy-image`，Codex 不可用或瞬态失败时尝试 APIMart，再按策略 free runner 兜底。
+- `4k`：同 `2k`，但重参考图或大像素任务要保留更长外置等待窗口。
+- 所有任务查询响应都应回显规范化 `resolution` 和 `provider_trace_summary`。
 
-### 3. 号池改动最小切片
+### 3. 下游计费验收
 
-- 把 `1k/2k/4k` 映射为明确策略对象，而不是散落在条件分支里。
-- 至少要能表达：
-  - 首选外置渠道顺序
-  - 是否允许 runner 兜底
-  - 允许兜底时的 plan 范围
-- 保持现有 `provider_trace` 可观测性，便于上线后核对不同 resolution 实际命中的渠道。
+- 当前默认单价：`1k=0`、`2k=0.06`、`4k=0.12` ⭐。
+- 总价必须按 `n` 放大，`n <= 0` 按 `1`，`n > 4` 按 `4`。
+- 下游 `billing_context.model_price` 表示单张图单价，`billing_context.image_count` 表示本次计费张数。
+- 旧单复核时要按订单创建时价格判断，不能拿当前 `/api/pricing` 直接判老单错误。
 
-### 4. 下游后端改动最小切片
+### 4. 常用验证
 
-- 按 resolution 计费，不再把 `gpt-image-2` 当单一价格模型。
-- 保证下游创建任务、轮询任务、结算记录都能带上 resolution，避免后续对账只能靠日志猜。
-- 若前端未升级，也要有兼容默认值，避免旧请求因缺少 resolution 直接报错。
-- 因为 `new-api` 是预扣费模型，创建任务时就要把 `requested_resolution`、`quoted_price`、`pricing_version` 固化到任务记录；结算/退款不能在任务结束时重新按“当前配置”现算，避免中途改价后账实不一致。
-- 成功结算优先按“请求档位”消费；只有当号池明确返回“实际交付档位低于请求档位”时，才考虑退差价或全额退款。
+- 号池单测：`go test ./internal/image ./internal/upstream/chatgpt ./internal/gateway ./internal/scheduler -count=1`
+- 号池部署前构建：`bash deploy/build-local.sh`
+- 容器更新：`docker compose -f deploy/docker-compose.yml build server && docker compose -f deploy/docker-compose.yml up -d server`
+- 三档真单联调：`cd scripts && npm run gpt-image-2:e2e -- --resolutions 1k,2k,4k`
 
-### 5. 下游前端改动最小切片
+### 5. 文档维护
 
-- 分辨率选择旁展示价格和说明。
-- 对 `2k/4k` 若存在“失败不兜底”或“失败退款”的特殊语义，要直接写给用户，不要只藏在后端逻辑里。
-- 前端不要自己推导价格，统一读后端配置或接口返回。
+- 长期规则和机器拓扑只写 `AGENTS.md`。
+- 当前事实、排查入口、最近仍有复用价值的变更写 `Documentation.md`。
+- 纠正过的误解和不要再犯的问题写 `Corrections.md`。
+- 面向调用方的接口写 `docs/API_MANUAL.md`；面向下游系统协作写 `docs/DOWNSTREAM_INTEGRATION.md`。
 
-## 验收方式
+## 当前风险点
 
-- `1k` 请求能稳定命中免费账号链路，且用户侧默认扣费为 `0.06` ⭐（最终以后台分档 `model_price` 为准）。
-- `2k/4k` 请求能命中 `Codex/APIMart` 设定链路，且用户侧默认扣费分别为 `0.10/0.20` ⭐（最终以后台分档 `model_price` 为准）。
-- 三端联调时，前端展示价格、后端实际扣费、号池最终命中链路三者一致。
-- 部署或回滚任一端时，旧请求不会因为字段缺失或语义不一致导致整链路中断。
-
-## 建议执行顺序
-
-1. 已拍板：`2k/4k` 失败时允许回落 `free runner`。
-2. 先改号池路由能力和日志可观测性。
-3. 再改下游后端收费与接口，尤其是预扣快照字段。
-4. 最后改下游前端展示与提醒。
-5. 三端全部就绪后再切默认策略。
-
-## gpt-image-2 分辨率联动草案（2026-05-01）
-
-### 号池 gpt2api
-
-- `resolution` 必须规范化为 `1k` / `2k` / `4k` 三档；兼容 `image_size`、`scale`、`quality`、`upscale` 等旧字段，但最终任务记录和 `provider_trace` 要能看到规范化档位。
-- 路由策略按档位选择：`1k` 只走免费账号池；`2k` / `4k` 优先走 `Codex -> APIMart` 外置图片渠道，外置失败且属于可重试/基础设施类错误时回落免费账号池。
-- 号池返回或任务查询至少保留：请求档位、最终 provider、是否 fallback、上游 task/request id、错误层级；前端/后端不要靠字符串日志反推。
-- 号池自身的 `estimated_credit` / `credit_cost` 可继续作为号池内部统计，但用户侧价格真相源不放在号池。
-
-### 下游后端 new-api
-
-- 用户收费按“请求档位”预扣并固化快照：默认 `1k=0.06`、`2k=0.10`、`4k=0.20` ⭐，后台 `model_price` 分档配置可覆盖；不要按号池最终命中的 provider 动态改价。
-- 创建任务时落库 `requested_resolution`、`quoted_price`、`pricing_version`、`image_count`，其中 `quoted_price` 来自后台 `model_price` 分档配置；结算/退款按创建时快照执行，避免中途改价导致账实不一致。
-- 成功且最终走 free runner 兜底时仍按请求档位结算；只有号池明确返回“交付档位低于请求档位”或任务失败时，才触发退差价/退款。
-- 对旧前端或旧 API 请求没有 resolution 的情况设兼容默认值，默认 `1k`；号池和后端都必须回显实际采用的档位，避免旧请求被误按 `2k/4k` 收费。
-
-### 下游前端 new-api-web
-
-- 分辨率选择不写死价格，优先读取后端能力/价格接口；后端未返回时才使用本地兜底文案并标记为兼容模式。
-- UI 明示三档额度价：默认 `1k 0.06 ⭐`、`2k 0.10 ⭐`、`4k 0.20 ⭐`；提交前展示本次预计扣费，最终以 `/api/pricing` 返回为准。
-- `2k/4k` 文案说明“优先高质量外置渠道，失败可能由免费账号池兜底完成；成功按所选档位计费，失败退款”；不要承诺 fallback 后仍一定是原生 2K/4K。
-- 任务详情/失败提示展示后端返回的 `requested_resolution`、`final_provider`、`fallback` 和错误层级，减少售后排查成本。
-
-### 联调验收矩阵
-
-- `1k`：默认前端显示 `0.06 ⭐`，后端预扣 `0.06 ⭐`（可由后台改为 `0`），号池不尝试 Codex/APIMart，最终 provider 为免费账号池。
-- `2k`：默认前端显示 `0.10 ⭐`，后端预扣 `0.10 ⭐`，号池优先 Codex/APIMart；外置失败可 fallback，成功仍按请求档位快照结算。
-- `4k`：默认前端显示 `0.20 ⭐`，后端预扣 `0.20 ⭐`，号池优先 Codex/APIMart；重参考图请求使用更长超时窗口，fallback 成功仍按请求档位快照结算。
-- 旧请求：缺少 resolution 时不报错，后端与号池采用同一个默认档位并在任务结果中回显。
-
-
-## 后台可调价格修正（2026-05-01）
-
-- 价格单位统一按下游额度 ⭐ 理解，不再写成人民币符号；当前业务换算关系是 `2 RMB = 1 ⭐`。
-- 默认分档为 `1k=0.06`、`2k=0.10`、`4k=0.20` ⭐，但不是最终写死价格。
-- 下游后端应优先读取后台 `model_price` 分档键：`gpt-image-2:1k`、`gpt-image-2:2k`、`gpt-image-2:4k`；未配置时才回退默认值。
-- 若 han 想让 1K 免费，在后台把 `gpt-image-2:1k` 设置为 `0` 即可；前端展示和后端预扣都应同步为 `0.00 ⭐`。
+- 当前工作区可能存在未提交的实现草稿；部署或构建前必须确认不会混入无关改动。
+- 本项目 Dockerfile 不会在镜像内重新 `go build`；只 `docker compose build/up` 会复制已有 `deploy/bin/gpt2api`。
+- `free runner` 多图生产依赖并发拆单策略；不要承诺单个 free 账号单次会话稳定一次性出满 4 张。
+- 号池内部 `models.image_price_per_call` 仍可能显示固定成本，这不是下游用户实际扣费依据。
